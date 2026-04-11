@@ -1,0 +1,17 @@
+.pnpm-debug.log*
+
+node_modules
+
+.vscode
+
+# next.js
+.next
+out
+
+# production
+build
+
+*.tsbuildinfo
+next-env.d.ts
+
+.env*

@@ -1,0 +1,24 @@
+{
+  "name": "blog-cms-app",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "fmt": "oxfmt"
+  },
+  "devDependencies": {
+    "@types/node": "25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "oxfmt": "^0.44.0",
+    "oxlint": "^1.59.0",
+    "typescript": "^6.0.2"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
+    "next": "^16.2.3",
+    "postcss": "^8.5.9",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "tailwindcss": "^4.2.2"
+  }
+}
