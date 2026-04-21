@@ -6,16 +6,16 @@
   "build": {
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000",
-    "beforeDevCommand": "yarn dev",
-    "beforeBuildCommand": "yarn build"
+    "beforeDevCommand": "pnpm run dev",
+    "beforeBuildCommand": "pnpm run build"
   },
   "app": {
     "windows": [
       {
         "title": "blog-cms-app",
-        "width": 800,
-        "height": 600,
-        "resizable": true,
+        "width": 1600,
+        "height": 900,
+        "resizable": false,
         "fullscreen": false
       }
     ],
