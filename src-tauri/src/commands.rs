@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::cloudflare::{insert_d1_record, upload_to_r2, CloudflareConfig};
+use crate::cloudflare::{self, CloudflareConfig};
+use crate::db;
+use crate::entities::post::Model as PostModel;
 
 // ─── Frontmatter parser ───────────────────────────────────────────────────────
 
@@ -64,7 +67,10 @@ fn parse_frontmatter(content: &str) -> Frontmatter {
 /// Returns `Err("cancelled")` when the user dismisses the dialog without
 /// choosing a file — the frontend treats this differently from real errors.
 #[tauri::command]
-pub async fn upload_article(app: tauri::AppHandle) -> Result<String, String> {
+pub async fn upload_article(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+) -> Result<String, String> {
     // ── 1. File picker ────────────────────────────────────────────────────────
     // `blocking_pick_file` must not run on a tokio thread; use spawn_blocking.
     let app_clone = app.clone();
@@ -113,14 +119,103 @@ pub async fn upload_article(app: tauri::AppHandle) -> Result<String, String> {
     let client = reqwest::Client::new();
 
     // ── 6. Upload to R2 ───────────────────────────────────────────────────────
-    upload_to_r2(&client, &config, &r2_key, &content).await?;
+    cloudflare::upload_to_r2(&client, &config, &r2_key, &content).await?;
 
-    // ── 7. Insert D1 record ───────────────────────────────────────────────────
-    // R2 succeeded; attempt D1. If D1 fails we surface the error — the caller
-    // should decide whether to retry or clean up the orphaned R2 object.
-    insert_d1_record(&client, &config, &id, &title, &now, &now, &tags).await?;
+    // ── 7. Record metadata in D1 and the local cache ─────────────────────────
+    // R2 succeeded; mirror the metadata to D1, then cache it locally. If D1
+    // fails we surface the error — the caller should decide whether to retry or
+    // clean up the orphaned R2 object.
+    let post = PostModel {
+        id,
+        title: title.clone(),
+        status: "draft".to_string(),
+        tags,
+        r2_key,
+        upload_date: now.clone(),
+        last_updated_date: now,
+    };
+    cloudflare::d1_insert(&client, &config, post.clone()).await?;
+    db::create(conn.inner(), post).await?;
 
     Ok(title)
+}
+
+// ─── Post metadata CRUD ─────────────────────────────────────────────────────
+//
+// Local SQLite is the offline working store (full Sea ORM); the `d1_*` commands
+// operate on Cloudflare D1 for cloud sync. Both share the `PostModel` shape.
+
+// ── Local SQLite ──────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn create_post(
+    conn: State<'_, DatabaseConnection>,
+    post: PostModel,
+) -> Result<PostModel, String> {
+    db::create(conn.inner(), post).await
+}
+
+#[tauri::command]
+pub async fn list_posts(conn: State<'_, DatabaseConnection>) -> Result<Vec<PostModel>, String> {
+    db::list(conn.inner()).await
+}
+
+#[tauri::command]
+pub async fn get_post(
+    conn: State<'_, DatabaseConnection>,
+    id: String,
+) -> Result<Option<PostModel>, String> {
+    db::get(conn.inner(), id).await
+}
+
+#[tauri::command]
+pub async fn update_post(
+    conn: State<'_, DatabaseConnection>,
+    post: PostModel,
+) -> Result<PostModel, String> {
+    db::update(conn.inner(), post).await
+}
+
+#[tauri::command]
+pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: String) -> Result<(), String> {
+    db::delete(conn.inner(), id).await
+}
+
+// ── Cloudflare D1 ─────────────────────────────────────────────────────────────
+
+/// A reqwest client plus credentials, built per call from the environment.
+fn cf() -> Result<(reqwest::Client, CloudflareConfig), String> {
+    Ok((reqwest::Client::new(), CloudflareConfig::from_env()?))
+}
+
+#[tauri::command]
+pub async fn d1_create_post(post: PostModel) -> Result<(), String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_insert(&client, &config, post).await
+}
+
+#[tauri::command]
+pub async fn d1_list_posts() -> Result<Vec<PostModel>, String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_list(&client, &config).await
+}
+
+#[tauri::command]
+pub async fn d1_get_post(id: String) -> Result<Option<PostModel>, String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_get(&client, &config, id).await
+}
+
+#[tauri::command]
+pub async fn d1_update_post(post: PostModel) -> Result<(), String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_update(&client, &config, post).await
+}
+
+#[tauri::command]
+pub async fn d1_delete_post(id: String) -> Result<(), String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_delete(&client, &config, id).await
 }
 
 // ─── Image staging ──────────────────────────────────────────────────────────
