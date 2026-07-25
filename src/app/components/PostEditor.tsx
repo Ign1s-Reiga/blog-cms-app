@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { ArrowLeft, Columns2, Eye, PenLine, Tag } from "lucide-react";
 import Link from "next/link";
 import { renderMarkdown } from "@ign1s-reiga/marked-presets";
@@ -23,6 +24,36 @@ function today(): string {
   return new Date().toISOString().split("T")[0];
 }
 
+// One "tab" is four spaces.
+const INDENT = "    ";
+
+// Given the current line, returns the Markdown marker to continue on the next
+// line (unordered/ordered/task list or blockquote), plus whether the current
+// item is empty (in which case Enter should end the list/quote instead). Returns
+// null when the line isn't a continuable construct.
+function continuationMarker(line: string): { marker: string; isEmpty: boolean } | null {
+  // Unordered or task list: -, *, + optionally followed by a [ ] / [x] checkbox.
+  let m = line.match(/^(\s*)([-*+])[ \t]+(\[[ xX]\][ \t]+)?(.*)$/);
+  if (m) {
+    const [, indent, bullet, checkbox, rest] = m;
+    const marker = checkbox ? `${indent}${bullet} [ ] ` : `${indent}${bullet} `;
+    return { marker, isEmpty: rest.trim() === "" };
+  }
+  // Ordered list: "1." or "1)" — continue with the next number.
+  m = line.match(/^(\s*)(\d+)([.)])[ \t]+(.*)$/);
+  if (m) {
+    const [, indent, num, delim, rest] = m;
+    return { marker: `${indent}${Number(num) + 1}${delim} `, isEmpty: rest.trim() === "" };
+  }
+  // Blockquote: one or more leading ">" (nesting preserved).
+  m = line.match(/^(\s*(?:>[ \t]?)+)(.*)$/);
+  if (m) {
+    const [, prefix, rest] = m;
+    return { marker: prefix, isEmpty: rest.trim() === "" };
+  }
+  return null;
+}
+
 // ─── PostEditor ───────────────────────────────────────────────────────────────
 
 export function PostEditor() {
@@ -42,6 +73,57 @@ export function PostEditor() {
 
   const words = wordCount(body);
   const chars = body.length;
+
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Replace the textarea content and restore the caret. flushSync commits the
+  // state update before we move the caret, so the controlled value and the
+  // selection stay in sync (React would otherwise reset the caret to the end).
+  function applyEdit(nextValue: string, selStart: number, selEnd: number = selStart) {
+    flushSync(() => setBody(nextValue));
+    const el = textareaRef.current;
+    if (el) {
+      el.focus();
+      el.setSelectionRange(selStart, selEnd);
+    }
+  }
+
+  function handleEditorKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.nativeEvent.isComposing) return; // don't interfere with IME
+    const { value, selectionStart: start, selectionEnd: end } = e.currentTarget;
+
+    // Tab → insert four spaces (indent selected lines when there's a selection).
+    if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      if (start === end) {
+        applyEdit(value.slice(0, start) + INDENT + value.slice(end), start + INDENT.length);
+      } else {
+        const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+        const block = value.slice(lineStart, end);
+        const indented = block.replace(/^/gm, INDENT);
+        const next = value.slice(0, lineStart) + indented + value.slice(end);
+        applyEdit(next, start + INDENT.length, end + (indented.length - block.length));
+      }
+      return;
+    }
+
+    // Enter → continue the current list item / blockquote automatically.
+    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && start === end) {
+      const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+      let lineEnd = value.indexOf("\n", start);
+      if (lineEnd === -1) lineEnd = value.length;
+      const cont = continuationMarker(value.slice(lineStart, lineEnd));
+      if (!cont) return; // ordinary newline
+      e.preventDefault();
+      if (cont.isEmpty) {
+        // Empty item: drop the marker and end the list/quote.
+        applyEdit(value.slice(0, lineStart) + value.slice(lineEnd), lineStart);
+      } else {
+        const insertion = "\n" + cont.marker;
+        applyEdit(value.slice(0, start) + insertion + value.slice(start), start + insertion.length);
+      }
+    }
+  }
 
   // Render the Markdown body to HTML for the preview pane. Runs live in both
   // split and preview modes, debounced so we don't re-parse on every keystroke.
@@ -116,8 +198,10 @@ export function PostEditor() {
 
   const editor = (
     <textarea
+      ref={textareaRef}
       value={body}
       onChange={(e) => setBody(e.target.value)}
+      onKeyDown={handleEditorKeyDown}
       placeholder={`Start writing in Markdown…\n\n## Heading\n\nYour content here.`}
       spellCheck
       className={[
