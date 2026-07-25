@@ -6,6 +6,11 @@ import Link from "next/link";
 import { POSTS } from "@/lib/data";
 import { StatusDot } from "@/components/StatusDot";
 import { StatusPill } from "@/components/StatusPill";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -64,59 +69,36 @@ export default function PostsPage() {
           {/* Left: tabs + search */}
           <div className="flex items-center gap-3">
             {/* Segmented tabs */}
-            <div className="flex items-center p-[3px] rounded-[7px] bg-zinc-100 dark:bg-white/[0.04] border border-zinc-200 dark:border-white/[0.07] gap-px">
-              {tabs.map(({ id, label, count }) => (
-                <button
-                  key={id}
-                  onClick={() => setFilter(id)}
-                  className={[
-                    "flex items-center gap-1.5 h-[26px] px-3 rounded-[5px] text-[12px] font-semibold",
-                    "transition-[background-color,color,box-shadow] duration-150",
-                    "active:scale-[0.97] active:transition-none",
-                    filter === id
-                      ? "bg-white dark:bg-white/[0.1] text-zinc-800 dark:text-zinc-100 shadow-[0_1px_3px_rgba(0,0,0,0.1),0_1px_0_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]"
-                      : "text-zinc-500 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300",
-                  ].join(" ")}
-                >
-                  {label}
-                  <span
-                    className={[
-                      "text-[10px] font-bold tabular-nums",
-                      filter === id
-                        ? "text-zinc-400 dark:text-zinc-500"
-                        : "text-zinc-400 dark:text-zinc-700",
-                    ].join(" ")}
+            <Tabs value={filter} onValueChange={(v) => setFilter(v as FilterId)}>
+              <TabsList className="h-[32px] gap-px rounded-[7px] border border-zinc-200 dark:border-white/[0.07] bg-zinc-100 dark:bg-white/[0.04] p-[3px]">
+                {tabs.map(({ id, label, count }) => (
+                  <TabsTrigger
+                    key={id}
+                    value={id}
+                    className="h-[26px] gap-1.5 rounded-[5px] px-3 text-[12px] font-semibold text-zinc-500 dark:text-zinc-500 data-active:text-zinc-800 dark:data-active:text-zinc-100"
                   >
-                    {count}
-                  </span>
-                </button>
-              ))}
-            </div>
+                    {label}
+                    <span className="text-[10px] font-bold tabular-nums text-zinc-400 dark:text-zinc-500">
+                      {count}
+                    </span>
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </Tabs>
 
             {/* Search */}
             <div className="relative">
               <Search
                 size={13}
                 strokeWidth={1.8}
-                className="absolute left-[9px] top-1/2 -translate-y-1/2 text-zinc-400 dark:text-zinc-600 pointer-events-none"
+                className="absolute left-[9px] top-1/2 -translate-y-1/2 z-10 text-zinc-400 dark:text-zinc-600 pointer-events-none"
               />
-              <input
+              <Input
                 type="text"
                 placeholder="Search posts, tags…"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className={[
-                  "h-[30px] w-[200px] pl-[28px] pr-3 text-[12px]",
-                  "rounded-[6px] border",
-                  "border-zinc-200 dark:border-white/[0.08]",
-                  "bg-zinc-50 dark:bg-white/[0.04]",
-                  "text-zinc-900 dark:text-zinc-100",
-                  "placeholder:text-zinc-400 dark:placeholder:text-zinc-600",
-                  "focus:outline-none focus:ring-[1.5px] focus:ring-zinc-400/60 dark:focus:ring-white/[0.2]",
-                  "focus:border-zinc-300 dark:focus:border-white/[0.15]",
-                  "focus:bg-white dark:focus:bg-white/[0.06]",
-                  "transition-[border-color,box-shadow,background-color] duration-150",
-                ].join(" ")}
+                className="h-[30px] w-[200px] pl-[28px] pr-3 text-[12px] rounded-[6px] border-zinc-200 dark:border-white/[0.08] bg-zinc-50 dark:bg-white/[0.04]"
               />
             </div>
           </div>
@@ -124,71 +106,48 @@ export default function PostsPage() {
           {/* Right: CTAs */}
           <div className="flex items-center gap-2 shrink-0">
             {/* Upload Article */}
-            <button
+            <Button
+              variant="outline"
+              size="sm"
               onClick={handleUploadArticle}
               disabled={uploadStatus.kind === "loading"}
-              className={[
-                "flex items-center gap-[6px] h-[30px] px-3 rounded-[6px]",
-                "text-[13px] font-semibold",
-                "text-zinc-600 dark:text-zinc-400",
-                "border border-zinc-200 dark:border-white/[0.1]",
-                "bg-white dark:bg-white/[0.04]",
-                "hover:bg-zinc-50 dark:hover:bg-white/[0.07] hover:text-zinc-800 dark:hover:text-zinc-200",
-                "hover:border-zinc-300 dark:hover:border-white/[0.16]",
-                "active:scale-[0.97] active:translate-y-px active:transition-none",
-                "disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none",
-                "transition-[background-color,border-color,color] duration-150",
-              ].join(" ")}
+              className="h-[30px] px-3 gap-[6px] rounded-[6px] text-[13px] font-semibold text-zinc-600 dark:text-zinc-400"
             >
               <Upload size={13} strokeWidth={2} />
               {uploadStatus.kind === "loading" ? "Uploading…" : "Upload Article"}
-            </button>
+            </Button>
 
             {/* New Post */}
-            <Link
-              href="/posts/new"
-              className={[
-                "flex items-center gap-[6px] h-[30px] px-3 rounded-[6px]",
-                "text-[13px] font-semibold text-white dark:text-zinc-900",
-                "bg-zinc-900 dark:bg-zinc-100",
-                "shadow-[0_1px_2px_rgba(0,0,0,0.12)]",
-                "hover:bg-zinc-800 dark:hover:bg-white",
-                "hover:shadow-[0_2px_8px_rgba(0,0,0,0.18)] dark:hover:shadow-[0_2px_8px_rgba(0,0,0,0.5)]",
-                "active:scale-[0.97] active:translate-y-px active:shadow-[0_1px_2px_rgba(0,0,0,0.12)] active:transition-none",
-                "transition-all duration-150",
-              ].join(" ")}
+            <Button
+              asChild
+              size="sm"
+              className="h-[30px] px-3 gap-[6px] rounded-[6px] text-[13px] font-semibold shadow-[0_1px_2px_rgba(0,0,0,0.12)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.18)] dark:hover:shadow-[0_2px_8px_rgba(0,0,0,0.5)]"
             >
-              <Plus size={13} strokeWidth={2.5} />
-              New Post
-            </Link>
+              <Link href="/posts/new">
+                <Plus size={13} strokeWidth={2.5} />
+                New Post
+              </Link>
+            </Button>
           </div>
         </div>
 
         {/* Upload feedback banner */}
         {uploadStatus.kind !== "idle" && uploadStatus.kind !== "loading" && (
-          <div
-            className={[
-              "flex items-center gap-2 px-3 py-2 rounded-[6px] text-[12px] font-medium border",
-              uploadStatus.kind === "success"
-                ? "bg-emerald-50 dark:bg-emerald-500/[0.08] border-emerald-200 dark:border-emerald-500/[0.2] text-emerald-700 dark:text-emerald-400"
-                : "bg-red-50 dark:bg-red-500/[0.08] border-red-200 dark:border-red-500/[0.2] text-red-700 dark:text-red-400",
-            ].join(" ")}
-          >
-            {uploadStatus.kind === "success" ? (
-              <>
-                <CheckCircle2 size={13} strokeWidth={2} className="shrink-0" />
-                <span>
-                  <span className="font-semibold">&ldquo;{uploadStatus.title}&rdquo;</span>
-                  {" "}uploaded to R2 and registered in D1.
-                </span>
-              </>
-            ) : (
-              <>
-                <span className="shrink-0 font-bold">Error:</span>
-                {uploadStatus.message}
-              </>
-            )}
-          </div>
+          uploadStatus.kind === "success" ? (
+            <Alert className="items-center rounded-[6px] px-3 py-2 border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/[0.08] dark:text-emerald-400">
+              <CheckCircle2 size={13} strokeWidth={2} className="size-3.5" />
+              <AlertDescription className="text-[12px] font-medium text-emerald-700 dark:text-emerald-400">
+                <span className="font-semibold">&ldquo;{uploadStatus.title}&rdquo;</span>
+                {" "}uploaded to R2 and registered in D1.
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <Alert className="items-center rounded-[6px] px-3 py-2 border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/[0.08] dark:text-red-400">
+              <AlertDescription className="text-[12px] font-medium text-red-700 dark:text-red-400">
+                <span className="font-bold">Error:</span> {uploadStatus.message}
+              </AlertDescription>
+            </Alert>
+          )
         )}
 
         {/* Table */}
@@ -226,12 +185,13 @@ export default function PostsPage() {
 
                 <div className="hidden sm:flex gap-1 flex-wrap">
                   {post.tags.map((t) => (
-                    <span
+                    <Badge
                       key={t}
-                      className="inline-block px-[6px] py-[2px] text-[10px] font-mono font-semibold rounded-[4px] bg-zinc-100 dark:bg-white/[0.05] border border-zinc-200 dark:border-white/[0.07] text-zinc-500 dark:text-zinc-500"
+                      variant="outline"
+                      className="h-auto px-[6px] py-[2px] rounded-[4px] text-[10px] font-mono font-semibold bg-zinc-100 dark:bg-white/[0.05] border-zinc-200 dark:border-white/[0.07] text-zinc-500 dark:text-zinc-500"
                     >
                       {t}
-                    </span>
+                    </Badge>
                   ))}
                 </div>
 

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { POSTS, STATS } from "@/lib/data";
 import { SectionHeader } from "@/components/SectionHeader";
 import { StatusDot } from "@/components/StatusDot";
+import { Card } from "@/components/ui/card";
 
 // ─── Quick actions data ───────────────────────────────────────────────────────
 
@@ -39,11 +40,11 @@ export default function DashboardPage() {
           <SectionHeader>Overview</SectionHeader>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {STATS.map(({ label, value, Icon, delta, positive }) => (
-              <div
+              <Card
                 key={label}
                 className={[
                   "group relative flex flex-col justify-between",
-                  "p-4 rounded-lg",
+                  "p-4 rounded-lg gap-0 ring-0",
                   "bg-white dark:bg-[#161616]",
                   "border border-zinc-200 dark:border-white/[0.07]",
                   "hover:border-zinc-300 dark:hover:border-white/12",
@@ -79,7 +80,7 @@ export default function DashboardPage() {
                     {delta}
                   </span>
                 </div>
-              </div>
+              </Card>
             ))}
           </div>
         </section>
