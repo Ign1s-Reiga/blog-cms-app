@@ -1,13 +1,28 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { flushSync } from "react-dom";
-import { ArrowLeft, Columns2, Eye, PenLine, Tag } from "lucide-react";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { createPortal, flushSync } from "react-dom";
+import {
+  ArrowLeft,
+  Bold,
+  Columns2,
+  Eye,
+  Italic,
+  Link2,
+  PenLine,
+  Strikethrough,
+  Tag,
+  Underline,
+  type LucideIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { renderMarkdown } from "@ign1s-reiga/marked-presets";
 import "@ign1s-reiga/marked-presets/styles";
 import "./markdown-theme.css";
 import { useTheme } from "next-themes";
+import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { appDataDir, join } from "@tauri-apps/api/path";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
@@ -54,6 +69,57 @@ function continuationMarker(line: string): { marker: string; isEmpty: boolean } 
   return null;
 }
 
+// True when the line is a list item or blockquote — the constructs that Tab /
+// Shift+Tab indent and outdent by a whole level.
+function isListOrQuote(line: string): boolean {
+  return continuationMarker(line) !== null;
+}
+
+// Indent a single line by one level: a blockquote gains another ">" level,
+// anything else gains one INDENT of leading space.
+function indentLine(line: string): string {
+  const bq = line.match(/^(\s*)((?:>[ \t]?)+)(.*)$/);
+  if (bq) {
+    const [, lead, marks, rest] = bq;
+    return `${lead}> ${marks}${rest}`;
+  }
+  return INDENT + line;
+}
+
+// Outdent a single line by one level: a blockquote drops one ">" level,
+// anything else loses up to one INDENT of leading space (or a leading tab).
+function outdentLine(line: string): string {
+  const bq = line.match(/^(\s*)((?:>[ \t]?)+)(.*)$/);
+  if (bq) {
+    const [, lead, marks, rest] = bq;
+    return `${lead}${marks.replace(/^>[ \t]?/, "")}${rest}`;
+  }
+  return line.replace(/^(?:\t| {1,4})/, "");
+}
+
+// Image files accepted by drag-and-drop (mirrors the Rust allow-list).
+const IMAGE_EXT = /\.(?:png|jpe?g|gif|webp|avif|svg|bmp|ico)$/i;
+
+// Shape returned by the `stage_image` Tauri command.
+type StagedImage = { rel: string; name: string };
+
+// Rewrite the relative `assets/…` image sources produced when an image is
+// dropped into the editor to asset-protocol URLs the webview can actually load
+// (the raw relative path would resolve against the dev server). In a browser
+// (dev) build there's no asset protocol, so the HTML is returned unchanged.
+async function resolveAssetSrcs(html: string): Promise<string> {
+  if (!isTauri()) return html;
+  const refs = new Set([...html.matchAll(/src="(assets\/[^"]+)"/g)].map((m) => m[1]));
+  if (refs.size === 0) return html;
+  const base = await appDataDir();
+  let out = html;
+  for (const ref of refs) {
+    const url = convertFileSrc(await join(base, ref));
+    out = out.replaceAll(`src="${ref}"`, `src="${url}"`);
+  }
+  return out;
+}
+
 // ─── PostEditor ───────────────────────────────────────────────────────────────
 
 export function PostEditor() {
@@ -88,22 +154,166 @@ export function PostEditor() {
     }
   }
 
+  // ── Inline formatting: right-click menu + keyboard shortcuts ────────────────
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const savedSel = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+
+  const [isMac, setIsMac] = useState(false);
+  useEffect(() => {
+    setIsMac(/mac|iphone|ipad/i.test(navigator.userAgent));
+  }, []);
+  const shortcut = (k: string, shift = false) =>
+    isMac ? `⌘${shift ? "⇧" : ""}${k}` : `Ctrl+${shift ? "Shift+" : ""}${k}`;
+
+  // Wrap the given range in Markdown markers (bold/italic/strike) or raw HTML
+  // (underline), toggling the markers back off when they already surround it.
+  function surround(before: string, after: string, start: number, end: number) {
+    const el = textareaRef.current;
+    if (!el) return;
+    const value = el.value;
+    const hasBefore = value.slice(start - before.length, start) === before;
+    const hasAfter = value.slice(end, end + after.length) === after;
+    // A lone "*" (italic) sitting next to another "*" is really part of a bold
+    // "**" pair — don't mistake that for an italic wrap to toggle off.
+    const italicOnBold =
+      before === "*" &&
+      (value.slice(start - 2, start - 1) === "*" || value.slice(end + 1, end + 2) === "*");
+    if (hasBefore && hasAfter && !italicOnBold) {
+      const inner = value.slice(start, end);
+      applyEdit(
+        value.slice(0, start - before.length) + inner + value.slice(end + after.length),
+        start - before.length,
+        end - before.length,
+      );
+      return;
+    }
+    const selected = value.slice(start, end);
+    applyEdit(
+      value.slice(0, start) + before + selected + after + value.slice(end),
+      start + before.length,
+      start + before.length + selected.length,
+    );
+  }
+
+  function insertLink(start: number, end: number) {
+    const el = textareaRef.current;
+    if (!el) return;
+    const value = el.value;
+    const prefix = `[${value.slice(start, end)}](`;
+    // Drop in a "url" placeholder and select it so the author can type over it.
+    applyEdit(
+      value.slice(0, start) + prefix + "url)" + value.slice(end),
+      start + prefix.length,
+      start + prefix.length + 3,
+    );
+  }
+
+  // Right-clicking a selection opens the formatting menu; with no selection we
+  // leave the native context menu alone.
+  function handleEditorContextMenu(e: React.MouseEvent<HTMLTextAreaElement>) {
+    const el = e.currentTarget;
+    if (el.selectionStart === el.selectionEnd) return;
+    e.preventDefault();
+    savedSel.current = { start: el.selectionStart, end: el.selectionEnd };
+    setMenu({ x: e.clientX, y: e.clientY });
+  }
+
+  const formatActions: {
+    label: string;
+    Icon: LucideIcon;
+    keys: string;
+    run: () => void;
+    separated?: boolean;
+  }[] = [
+    { label: "Bold", Icon: Bold, keys: shortcut("B"),
+      run: () => surround("**", "**", savedSel.current.start, savedSel.current.end) },
+    { label: "Italic", Icon: Italic, keys: shortcut("I"),
+      run: () => surround("*", "*", savedSel.current.start, savedSel.current.end) },
+    { label: "Underline", Icon: Underline, keys: shortcut("U"),
+      run: () => surround("<u>", "</u>", savedSel.current.start, savedSel.current.end) },
+    { label: "Strikethrough", Icon: Strikethrough, keys: shortcut("X", true),
+      run: () => surround("~~", "~~", savedSel.current.start, savedSel.current.end) },
+    { label: "Insert Link", Icon: Link2, keys: shortcut("K"), separated: true,
+      run: () => insertLink(savedSel.current.start, savedSel.current.end) },
+  ];
+
+  // Dismiss the menu on outside pointer, Escape, scroll or resize.
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onPointerDown = (e: PointerEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) close();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [menu]);
+
+  // Once rendered, nudge the menu back inside the viewport if it overflows.
+  useEffect(() => {
+    if (!menu || !menuRef.current) return;
+    const { width, height } = menuRef.current.getBoundingClientRect();
+    const pad = 8;
+    const x = Math.max(pad, Math.min(menu.x, window.innerWidth - width - pad));
+    const y = Math.max(pad, Math.min(menu.y, window.innerHeight - height - pad));
+    if (x !== menu.x || y !== menu.y) setMenu({ x, y });
+  }, [menu]);
+
   function handleEditorKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.nativeEvent.isComposing) return; // don't interfere with IME
     const { value, selectionStart: start, selectionEnd: end } = e.currentTarget;
 
-    // Tab → insert four spaces (indent selected lines when there's a selection).
-    if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Ctrl/Cmd formatting shortcuts (mirror the right-click menu).
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (k === "b") { e.preventDefault(); surround("**", "**", start, end); return; }
+      if (k === "i") { e.preventDefault(); surround("*", "*", start, end); return; }
+      if (k === "u") { e.preventDefault(); surround("<u>", "</u>", start, end); return; }
+      if (k === "k") { e.preventDefault(); insertLink(start, end); return; }
+      if (e.shiftKey && k === "x") { e.preventDefault(); surround("~~", "~~", start, end); return; }
+    }
+
+    // Tab / Shift+Tab → indent or outdent by one level.
+    if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
-      if (start === end) {
+      const outdent = e.shiftKey;
+
+      // A plain caret (no selection) outside a list/quote keeps the simple
+      // "insert four spaces at the caret" behaviour on Tab.
+      const caretLineStart = value.lastIndexOf("\n", start - 1) + 1;
+      let caretLineEnd = value.indexOf("\n", start);
+      if (caretLineEnd === -1) caretLineEnd = value.length;
+      if (!outdent && start === end && !isListOrQuote(value.slice(caretLineStart, caretLineEnd))) {
         applyEdit(value.slice(0, start) + INDENT + value.slice(end), start + INDENT.length);
-      } else {
-        const lineStart = value.lastIndexOf("\n", start - 1) + 1;
-        const block = value.slice(lineStart, end);
-        const indented = block.replace(/^/gm, INDENT);
-        const next = value.slice(0, lineStart) + indented + value.slice(end);
-        applyEdit(next, start + INDENT.length, end + (indented.length - block.length));
+        return;
       }
+
+      // Otherwise indent/outdent every line the selection touches by one level.
+      const blockStart = caretLineStart;
+      // A selection ending exactly at a line start shouldn't pull in the next line.
+      const searchFrom = end > start && value[end - 1] === "\n" ? end - 1 : end;
+      let blockEnd = value.indexOf("\n", searchFrom);
+      if (blockEnd === -1) blockEnd = value.length;
+
+      const lines = value.slice(blockStart, blockEnd).split("\n");
+      const newLines = lines.map(outdent ? outdentLine : indentLine);
+      const firstDelta = newLines[0].length - lines[0].length;
+      const totalDelta = newLines.reduce((sum, l, i) => sum + (l.length - lines[i].length), 0);
+
+      const next = value.slice(0, blockStart) + newLines.join("\n") + value.slice(blockEnd);
+      const newStart = Math.max(blockStart, start + firstDelta);
+      applyEdit(next, newStart, Math.max(newStart, end + totalDelta));
       return;
     }
 
@@ -141,6 +351,7 @@ export function PostEditor() {
     let cancelled = false;
     const timer = setTimeout(() => {
       renderMarkdown(body)
+        .then(resolveAssetSrcs)
         .then((html) => { if (!cancelled) setPreview(html); })
         .catch(() => { if (!cancelled) setPreview('<p class="md-error">Failed to render preview.</p>'); });
     }, 200);
@@ -150,6 +361,89 @@ export function PostEditor() {
       clearTimeout(timer);
     };
   }, [mode, body]);
+
+  // Drag-and-drop image insertion (Tauri desktop only). Dropped image files are
+  // copied into the app's local assets dir by the `stage_image` command, and a
+  // Markdown reference is inserted at the caret; resolveAssetSrcs (above) turns
+  // those refs into asset-protocol URLs so they render in the preview.
+  const [dragActive, setDragActive] = useState(false);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    let draggingImage = false;
+
+    // Tauri reports the pointer in physical pixels; the textarea rect is in CSS
+    // pixels, so divide by the device pixel ratio before hit-testing.
+    const overEditor = (pos: { x: number; y: number }) => {
+      const el = textareaRef.current;
+      if (!el) return false;
+      const dpr = window.devicePixelRatio || 1;
+      const x = pos.x / dpr;
+      const y = pos.y / dpr;
+      const r = el.getBoundingClientRect();
+      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    };
+
+    const insertImages = async (paths: string[]) => {
+      const images = paths.filter((p) => IMAGE_EXT.test(p));
+      if (images.length === 0) return;
+      const el = textareaRef.current;
+      if (!el) return;
+      const value = el.value;
+      const at = el.selectionStart;
+
+      const refs: string[] = [];
+      for (const path of images) {
+        try {
+          const staged = await invoke<StagedImage>("stage_image", { srcPath: path });
+          const alt = staged.name.replace(/\.[^.]+$/, "");
+          refs.push(`![${alt}](${staged.rel})`);
+        } catch (err) {
+          console.error("Failed to stage dropped image:", err);
+        }
+      }
+      if (refs.length === 0) return;
+
+      // Sit the image(s) on their own block, adding blank lines only as needed.
+      const before = value.slice(0, at);
+      const after = value.slice(at);
+      const lead = before !== "" && !before.endsWith("\n") ? "\n" : "";
+      const trail = after !== "" && !after.startsWith("\n") ? "\n" : "";
+      const insertion = lead + refs.join("\n\n") + trail;
+      applyEdit(before + insertion + after, at + insertion.length);
+    };
+
+    getCurrentWebview()
+      .onDragDropEvent(({ payload }) => {
+        if (payload.type === "enter") {
+          draggingImage = payload.paths.some((p) => IMAGE_EXT.test(p));
+          setDragActive(draggingImage && overEditor(payload.position));
+        } else if (payload.type === "over") {
+          setDragActive(draggingImage && overEditor(payload.position));
+        } else if (payload.type === "leave") {
+          draggingImage = false;
+          setDragActive(false);
+        } else if (payload.type === "drop") {
+          const onEditor = draggingImage && overEditor(payload.position);
+          draggingImage = false;
+          setDragActive(false);
+          if (onEditor) void insertImages(payload.paths);
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+    // Registered once; the handler reads the textarea's live value and only
+    // stable refs/setters, so it never needs to re-subscribe.
+  }, []);
 
   // ── Shared fields, composed differently per layout mode below ────────────────
 
@@ -202,17 +496,20 @@ export function PostEditor() {
       value={body}
       onChange={(e) => setBody(e.target.value)}
       onKeyDown={handleEditorKeyDown}
+      onContextMenu={handleEditorContextMenu}
       placeholder={`Start writing in Markdown…\n\n## Heading\n\nYour content here.`}
       spellCheck
-      className={[
+      className={cn(
         "flex-1 min-h-0 w-full resize-none",
         "px-4 py-3",
         "font-mono text-[13.5px] leading-[1.85]",
         "text-zinc-700 dark:text-zinc-300",
         "placeholder:text-zinc-300 dark:placeholder:text-zinc-700",
         "bg-transparent border-none outline-none focus:ring-0",
-        "overflow-y-auto",
-      ].join(" ")}
+        "overflow-y-auto transition-colors",
+        dragActive &&
+          "ring-2 ring-inset ring-blue-400/70 bg-blue-50/50 dark:ring-blue-400/50 dark:bg-blue-500/[0.07]",
+      )}
     />
   );
 
@@ -349,6 +646,39 @@ export function PostEditor() {
           Markdown
         </span>
       </div>
+
+      {/* ── Selection formatting menu (right-click) ─────────────────────── */}
+      {menu &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="menu"
+            style={{ top: menu.y, left: menu.x }}
+            className="fixed z-50 min-w-[188px] rounded-lg border border-zinc-200 bg-white p-1 shadow-xl shadow-black/[0.06] dark:border-white/10 dark:bg-zinc-900 dark:shadow-black/40"
+          >
+            {formatActions.map(({ label, Icon, keys, run, separated }) => (
+              <Fragment key={label}>
+                {separated && <div className="my-1 h-px bg-zinc-100 dark:bg-white/10" />}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    run();
+                    setMenu(null);
+                  }}
+                  className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100 active:scale-[0.98] dark:text-zinc-200 dark:hover:bg-white/[0.06]"
+                >
+                  <Icon size={14} strokeWidth={2} className="text-zinc-500 dark:text-zinc-400" />
+                  {label}
+                  <span className="ml-auto pl-4 font-mono text-[11px] text-zinc-400 dark:text-zinc-600">
+                    {keys}
+                  </span>
+                </button>
+              </Fragment>
+            ))}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
