@@ -1,7 +1,13 @@
 "use client";
 
-import { ChevronRight } from "lucide-react";
 import { usePathname } from "next/navigation";
+import {
+  Breadcrumb as BreadcrumbRoot,
+  BreadcrumbItem,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
 
 const LABELS: Record<string, string> = {
   "/":           "Dashboard",
@@ -17,18 +23,18 @@ export function Breadcrumb() {
   const label = LABELS[pathname] ?? "Page";
 
   return (
-    <nav aria-label="Breadcrumb" className="flex items-center gap-[5px] text-[13px]">
-      <span className="text-zinc-400 dark:text-zinc-600 font-medium hidden sm:block">
-        blog-cms
-      </span>
-      <ChevronRight
-        size={13}
-        strokeWidth={1.8}
-        className="text-zinc-300 dark:text-zinc-700 hidden sm:block"
-      />
-      <span className="font-semibold text-zinc-800 dark:text-zinc-200">
-        {label}
-      </span>
-    </nav>
+    <BreadcrumbRoot className="text-[13px]">
+      <BreadcrumbList className="gap-[5px] sm:gap-[5px]">
+        <BreadcrumbItem className="hidden sm:flex text-zinc-400 dark:text-zinc-600 font-medium">
+          blog-cms
+        </BreadcrumbItem>
+        <BreadcrumbSeparator className="hidden sm:block text-zinc-300 dark:text-zinc-700" />
+        <BreadcrumbItem>
+          <BreadcrumbPage className="font-semibold text-zinc-800 dark:text-zinc-200">
+            {label}
+          </BreadcrumbPage>
+        </BreadcrumbItem>
+      </BreadcrumbList>
+    </BreadcrumbRoot>
   );
 }

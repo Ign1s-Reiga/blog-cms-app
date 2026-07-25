@@ -17,6 +17,10 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSidebar } from "./SidebarProvider";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Separator } from "@/components/ui/separator";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -99,17 +103,16 @@ function NavLink({
             {label}
           </span>
           {badge !== undefined && (
-            <span
+            <Badge
               className={[
-                "flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full",
-                "text-[10px] font-bold tabular-nums",
+                "min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold tabular-nums border-transparent",
                 active
                   ? "bg-zinc-200 dark:bg-white/[0.14] text-zinc-600 dark:text-zinc-300"
                   : "bg-zinc-100 dark:bg-white/[0.06] text-zinc-400 dark:text-zinc-500",
               ].join(" ")}
             >
               {badge}
-            </span>
+            </Badge>
           )}
         </>
       )}
@@ -182,33 +185,33 @@ export function Sidebar() {
                 blog-cms-app
               </p>
             </div>
-            <button className="w-5 h-5 flex items-center justify-center rounded-[4px] text-zinc-400 dark:text-zinc-600 hover:bg-zinc-100 dark:hover:bg-white/[0.06] hover:text-zinc-600 dark:hover:text-zinc-400 transition-colors duration-100 shrink-0 active:scale-95">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-5 rounded-[4px] text-zinc-400 dark:text-zinc-600 hover:text-zinc-600 dark:hover:text-zinc-400 shrink-0"
+            >
               <ChevronDown size={12} strokeWidth={2} />
-            </button>
+            </Button>
           </>
         )}
       </div>
 
       {/* ── New Post CTA ───────────────────────────────────────────────── */}
       <div className={["py-2.5", collapsed ? "px-2" : "px-2.5"].join(" ")}>
-        <Link
-          href="/posts/new"
-          title={collapsed ? "New Post" : undefined}
+        <Button
+          asChild
           className={[
-            "w-full flex items-center justify-center rounded-[6px]",
-            "text-[13px] font-semibold leading-none",
-            "bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900",
+            "w-full h-auto rounded-[6px] text-[13px] font-semibold leading-none",
             "shadow-[0_1px_2px_rgba(0,0,0,0.1)]",
-            "hover:bg-zinc-800 dark:hover:bg-white",
             "hover:shadow-[0_2px_8px_rgba(0,0,0,0.18)] dark:hover:shadow-[0_2px_8px_rgba(0,0,0,0.5)]",
-            "active:scale-[0.97] active:translate-y-px active:shadow-[0_1px_2px_rgba(0,0,0,0.1)]",
-            "transition-all duration-150",
             collapsed ? "p-2" : "gap-[6px] py-[7px] px-3",
           ].join(" ")}
         >
-          <Plus size={13} strokeWidth={2.5} />
-          {!collapsed && "New Post"}
-        </Link>
+          <Link href="/posts/new" title={collapsed ? "New Post" : undefined}>
+            <Plus size={13} strokeWidth={2.5} />
+            {!collapsed && "New Post"}
+          </Link>
+        </Button>
       </div>
 
       {/* ── Navigation ─────────────────────────────────────────────────── */}
@@ -225,7 +228,7 @@ export function Sidebar() {
           />
         ))}
 
-        <div className="my-[6px] h-px bg-zinc-100 dark:bg-white/[0.04]" />
+        <Separator className="my-[6px] bg-zinc-100 dark:bg-white/[0.04]" />
 
         {!collapsed && (
           <p className="px-2.5 pt-[2px] pb-[4px] text-[10px] font-bold uppercase tracking-[0.12em] text-zinc-400 dark:text-zinc-600">
@@ -296,12 +299,12 @@ export function Sidebar() {
             collapsed ? "justify-center" : "gap-2.5 px-1",
           ].join(" ")}
         >
-          <div className="relative shrink-0">
-            <div className="w-[26px] h-[26px] rounded-full bg-gradient-to-br from-violet-400 to-indigo-600 flex items-center justify-center text-[11px] font-bold text-white ring-[1.5px] ring-white dark:ring-[#111111]">
+          <Avatar className="size-[26px] shrink-0 ring-[1.5px] ring-white dark:ring-[#111111] after:hidden">
+            <AvatarFallback className="text-[11px] font-bold text-white bg-gradient-to-br from-violet-400 to-indigo-600">
               A
-            </div>
-            <span className="absolute -bottom-px -right-px w-[7px] h-[7px] rounded-full bg-emerald-500 ring-[1.5px] ring-white dark:ring-[#111111]" />
-          </div>
+            </AvatarFallback>
+            <span className="absolute -bottom-px -right-px z-10 w-[7px] h-[7px] rounded-full bg-emerald-500 ring-[1.5px] ring-white dark:ring-[#111111]" />
+          </Avatar>
           {!collapsed && (
             <div className="flex-1 min-w-0">
               <p className="text-[12px] font-semibold text-zinc-700 dark:text-zinc-300 leading-none truncate">
