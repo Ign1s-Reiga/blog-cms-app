@@ -1,3 +1,7 @@
+use std::path::PathBuf;
+
+use serde::Serialize;
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::cloudflare::{insert_d1_record, upload_to_r2, CloudflareConfig};
@@ -117,4 +121,61 @@ pub async fn upload_article(app: tauri::AppHandle) -> Result<String, String> {
     insert_d1_record(&client, &config, &id, &title, &now, &now, &tags).await?;
 
     Ok(title)
+}
+
+// ─── Image staging ──────────────────────────────────────────────────────────
+
+/// A dropped image after it has been copied into the local assets directory.
+#[derive(Serialize)]
+pub struct StagedImage {
+    /// Markdown-relative reference, e.g. `"assets/<uuid>.png"`.
+    pub rel: String,
+    /// Original file name — used as the inserted image's alt text.
+    pub name: String,
+}
+
+/// Copy a dropped image into the app's local `assets` directory so it can be
+/// referenced from a post and rendered in the preview via the asset protocol.
+/// Cloud (R2) upload is deferred to the save/publish sync.
+///
+/// `src_path` is an absolute path from an OS drag-and-drop. The extension is
+/// validated against a fixed allow-list; other files are rejected.
+#[tauri::command]
+pub async fn stage_image(app: tauri::AppHandle, src_path: String) -> Result<StagedImage, String> {
+    let src = PathBuf::from(&src_path);
+
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|e| {
+            matches!(
+                e.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "svg" | "bmp" | "ico"
+            )
+        })
+        .ok_or_else(|| format!("Unsupported image type: {src_path}"))?;
+
+    let assets_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .join("assets");
+    tokio::fs::create_dir_all(&assets_dir)
+        .await
+        .map_err(|e| format!("Failed to create assets dir: {e}"))?;
+
+    let file_name = format!("{}.{ext}", uuid::Uuid::new_v4());
+    let dest = assets_dir.join(&file_name);
+    tokio::fs::copy(&src, &dest)
+        .await
+        .map_err(|e| format!("Failed to copy image: {e}"))?;
+
+    let name = src
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image")
+        .to_string();
+
+    Ok(StagedImage { rel: format!("assets/{file_name}"), name })
 }

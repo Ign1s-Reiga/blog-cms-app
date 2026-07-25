@@ -20,6 +20,9 @@ import { renderMarkdown } from "@ign1s-reiga/marked-presets";
 import "@ign1s-reiga/marked-presets/styles";
 import "./markdown-theme.css";
 import { useTheme } from "next-themes";
+import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { appDataDir, join } from "@tauri-apps/api/path";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
@@ -64,6 +67,57 @@ function continuationMarker(line: string): { marker: string; isEmpty: boolean } 
     return { marker: prefix, isEmpty: rest.trim() === "" };
   }
   return null;
+}
+
+// True when the line is a list item or blockquote — the constructs that Tab /
+// Shift+Tab indent and outdent by a whole level.
+function isListOrQuote(line: string): boolean {
+  return continuationMarker(line) !== null;
+}
+
+// Indent a single line by one level: a blockquote gains another ">" level,
+// anything else gains one INDENT of leading space.
+function indentLine(line: string): string {
+  const bq = line.match(/^(\s*)((?:>[ \t]?)+)(.*)$/);
+  if (bq) {
+    const [, lead, marks, rest] = bq;
+    return `${lead}> ${marks}${rest}`;
+  }
+  return INDENT + line;
+}
+
+// Outdent a single line by one level: a blockquote drops one ">" level,
+// anything else loses up to one INDENT of leading space (or a leading tab).
+function outdentLine(line: string): string {
+  const bq = line.match(/^(\s*)((?:>[ \t]?)+)(.*)$/);
+  if (bq) {
+    const [, lead, marks, rest] = bq;
+    return `${lead}${marks.replace(/^>[ \t]?/, "")}${rest}`;
+  }
+  return line.replace(/^(?:\t| {1,4})/, "");
+}
+
+// Image files accepted by drag-and-drop (mirrors the Rust allow-list).
+const IMAGE_EXT = /\.(?:png|jpe?g|gif|webp|avif|svg|bmp|ico)$/i;
+
+// Shape returned by the `stage_image` Tauri command.
+type StagedImage = { rel: string; name: string };
+
+// Rewrite the relative `assets/…` image sources produced when an image is
+// dropped into the editor to asset-protocol URLs the webview can actually load
+// (the raw relative path would resolve against the dev server). In a browser
+// (dev) build there's no asset protocol, so the HTML is returned unchanged.
+async function resolveAssetSrcs(html: string): Promise<string> {
+  if (!isTauri()) return html;
+  const refs = new Set([...html.matchAll(/src="(assets\/[^"]+)"/g)].map((m) => m[1]));
+  if (refs.size === 0) return html;
+  const base = await appDataDir();
+  let out = html;
+  for (const ref of refs) {
+    const url = convertFileSrc(await join(base, ref));
+    out = out.replaceAll(`src="${ref}"`, `src="${url}"`);
+  }
+  return out;
 }
 
 // ─── PostEditor ───────────────────────────────────────────────────────────────
@@ -230,18 +284,36 @@ export function PostEditor() {
       if (e.shiftKey && k === "x") { e.preventDefault(); surround("~~", "~~", start, end); return; }
     }
 
-    // Tab → insert four spaces (indent selected lines when there's a selection).
-    if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Tab / Shift+Tab → indent or outdent by one level.
+    if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
-      if (start === end) {
+      const outdent = e.shiftKey;
+
+      // A plain caret (no selection) outside a list/quote keeps the simple
+      // "insert four spaces at the caret" behaviour on Tab.
+      const caretLineStart = value.lastIndexOf("\n", start - 1) + 1;
+      let caretLineEnd = value.indexOf("\n", start);
+      if (caretLineEnd === -1) caretLineEnd = value.length;
+      if (!outdent && start === end && !isListOrQuote(value.slice(caretLineStart, caretLineEnd))) {
         applyEdit(value.slice(0, start) + INDENT + value.slice(end), start + INDENT.length);
-      } else {
-        const lineStart = value.lastIndexOf("\n", start - 1) + 1;
-        const block = value.slice(lineStart, end);
-        const indented = block.replace(/^/gm, INDENT);
-        const next = value.slice(0, lineStart) + indented + value.slice(end);
-        applyEdit(next, start + INDENT.length, end + (indented.length - block.length));
+        return;
       }
+
+      // Otherwise indent/outdent every line the selection touches by one level.
+      const blockStart = caretLineStart;
+      // A selection ending exactly at a line start shouldn't pull in the next line.
+      const searchFrom = end > start && value[end - 1] === "\n" ? end - 1 : end;
+      let blockEnd = value.indexOf("\n", searchFrom);
+      if (blockEnd === -1) blockEnd = value.length;
+
+      const lines = value.slice(blockStart, blockEnd).split("\n");
+      const newLines = lines.map(outdent ? outdentLine : indentLine);
+      const firstDelta = newLines[0].length - lines[0].length;
+      const totalDelta = newLines.reduce((sum, l, i) => sum + (l.length - lines[i].length), 0);
+
+      const next = value.slice(0, blockStart) + newLines.join("\n") + value.slice(blockEnd);
+      const newStart = Math.max(blockStart, start + firstDelta);
+      applyEdit(next, newStart, Math.max(newStart, end + totalDelta));
       return;
     }
 
@@ -279,6 +351,7 @@ export function PostEditor() {
     let cancelled = false;
     const timer = setTimeout(() => {
       renderMarkdown(body)
+        .then(resolveAssetSrcs)
         .then((html) => { if (!cancelled) setPreview(html); })
         .catch(() => { if (!cancelled) setPreview('<p class="md-error">Failed to render preview.</p>'); });
     }, 200);
@@ -288,6 +361,89 @@ export function PostEditor() {
       clearTimeout(timer);
     };
   }, [mode, body]);
+
+  // Drag-and-drop image insertion (Tauri desktop only). Dropped image files are
+  // copied into the app's local assets dir by the `stage_image` command, and a
+  // Markdown reference is inserted at the caret; resolveAssetSrcs (above) turns
+  // those refs into asset-protocol URLs so they render in the preview.
+  const [dragActive, setDragActive] = useState(false);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    let draggingImage = false;
+
+    // Tauri reports the pointer in physical pixels; the textarea rect is in CSS
+    // pixels, so divide by the device pixel ratio before hit-testing.
+    const overEditor = (pos: { x: number; y: number }) => {
+      const el = textareaRef.current;
+      if (!el) return false;
+      const dpr = window.devicePixelRatio || 1;
+      const x = pos.x / dpr;
+      const y = pos.y / dpr;
+      const r = el.getBoundingClientRect();
+      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    };
+
+    const insertImages = async (paths: string[]) => {
+      const images = paths.filter((p) => IMAGE_EXT.test(p));
+      if (images.length === 0) return;
+      const el = textareaRef.current;
+      if (!el) return;
+      const value = el.value;
+      const at = el.selectionStart;
+
+      const refs: string[] = [];
+      for (const path of images) {
+        try {
+          const staged = await invoke<StagedImage>("stage_image", { srcPath: path });
+          const alt = staged.name.replace(/\.[^.]+$/, "");
+          refs.push(`![${alt}](${staged.rel})`);
+        } catch (err) {
+          console.error("Failed to stage dropped image:", err);
+        }
+      }
+      if (refs.length === 0) return;
+
+      // Sit the image(s) on their own block, adding blank lines only as needed.
+      const before = value.slice(0, at);
+      const after = value.slice(at);
+      const lead = before !== "" && !before.endsWith("\n") ? "\n" : "";
+      const trail = after !== "" && !after.startsWith("\n") ? "\n" : "";
+      const insertion = lead + refs.join("\n\n") + trail;
+      applyEdit(before + insertion + after, at + insertion.length);
+    };
+
+    getCurrentWebview()
+      .onDragDropEvent(({ payload }) => {
+        if (payload.type === "enter") {
+          draggingImage = payload.paths.some((p) => IMAGE_EXT.test(p));
+          setDragActive(draggingImage && overEditor(payload.position));
+        } else if (payload.type === "over") {
+          setDragActive(draggingImage && overEditor(payload.position));
+        } else if (payload.type === "leave") {
+          draggingImage = false;
+          setDragActive(false);
+        } else if (payload.type === "drop") {
+          const onEditor = draggingImage && overEditor(payload.position);
+          draggingImage = false;
+          setDragActive(false);
+          if (onEditor) void insertImages(payload.paths);
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+    // Registered once; the handler reads the textarea's live value and only
+    // stable refs/setters, so it never needs to re-subscribe.
+  }, []);
 
   // ── Shared fields, composed differently per layout mode below ────────────────
 
@@ -343,15 +499,17 @@ export function PostEditor() {
       onContextMenu={handleEditorContextMenu}
       placeholder={`Start writing in Markdown…\n\n## Heading\n\nYour content here.`}
       spellCheck
-      className={[
+      className={cn(
         "flex-1 min-h-0 w-full resize-none",
         "px-4 py-3",
         "font-mono text-[13.5px] leading-[1.85]",
         "text-zinc-700 dark:text-zinc-300",
         "placeholder:text-zinc-300 dark:placeholder:text-zinc-700",
         "bg-transparent border-none outline-none focus:ring-0",
-        "overflow-y-auto",
-      ].join(" ")}
+        "overflow-y-auto transition-colors",
+        dragActive &&
+          "ring-2 ring-inset ring-blue-400/70 bg-blue-50/50 dark:ring-blue-400/50 dark:bg-blue-500/[0.07]",
+      )}
     />
   );
 

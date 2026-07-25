@@ -15,7 +15,10 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![commands::upload_article])
+        .invoke_handler(tauri::generate_handler![
+            commands::upload_article,
+            commands::stage_image
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
