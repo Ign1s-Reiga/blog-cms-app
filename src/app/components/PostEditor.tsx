@@ -1,8 +1,20 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { flushSync } from "react-dom";
-import { ArrowLeft, Columns2, Eye, PenLine, Tag } from "lucide-react";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { createPortal, flushSync } from "react-dom";
+import {
+  ArrowLeft,
+  Bold,
+  Columns2,
+  Eye,
+  Italic,
+  Link2,
+  PenLine,
+  Strikethrough,
+  Tag,
+  Underline,
+  type LucideIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { renderMarkdown } from "@ign1s-reiga/marked-presets";
 import "@ign1s-reiga/marked-presets/styles";
@@ -88,9 +100,135 @@ export function PostEditor() {
     }
   }
 
+  // ── Inline formatting: right-click menu + keyboard shortcuts ────────────────
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const savedSel = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+
+  const [isMac, setIsMac] = useState(false);
+  useEffect(() => {
+    setIsMac(/mac|iphone|ipad/i.test(navigator.userAgent));
+  }, []);
+  const shortcut = (k: string, shift = false) =>
+    isMac ? `⌘${shift ? "⇧" : ""}${k}` : `Ctrl+${shift ? "Shift+" : ""}${k}`;
+
+  // Wrap the given range in Markdown markers (bold/italic/strike) or raw HTML
+  // (underline), toggling the markers back off when they already surround it.
+  function surround(before: string, after: string, start: number, end: number) {
+    const el = textareaRef.current;
+    if (!el) return;
+    const value = el.value;
+    const hasBefore = value.slice(start - before.length, start) === before;
+    const hasAfter = value.slice(end, end + after.length) === after;
+    // A lone "*" (italic) sitting next to another "*" is really part of a bold
+    // "**" pair — don't mistake that for an italic wrap to toggle off.
+    const italicOnBold =
+      before === "*" &&
+      (value.slice(start - 2, start - 1) === "*" || value.slice(end + 1, end + 2) === "*");
+    if (hasBefore && hasAfter && !italicOnBold) {
+      const inner = value.slice(start, end);
+      applyEdit(
+        value.slice(0, start - before.length) + inner + value.slice(end + after.length),
+        start - before.length,
+        end - before.length,
+      );
+      return;
+    }
+    const selected = value.slice(start, end);
+    applyEdit(
+      value.slice(0, start) + before + selected + after + value.slice(end),
+      start + before.length,
+      start + before.length + selected.length,
+    );
+  }
+
+  function insertLink(start: number, end: number) {
+    const el = textareaRef.current;
+    if (!el) return;
+    const value = el.value;
+    const prefix = `[${value.slice(start, end)}](`;
+    // Drop in a "url" placeholder and select it so the author can type over it.
+    applyEdit(
+      value.slice(0, start) + prefix + "url)" + value.slice(end),
+      start + prefix.length,
+      start + prefix.length + 3,
+    );
+  }
+
+  // Right-clicking a selection opens the formatting menu; with no selection we
+  // leave the native context menu alone.
+  function handleEditorContextMenu(e: React.MouseEvent<HTMLTextAreaElement>) {
+    const el = e.currentTarget;
+    if (el.selectionStart === el.selectionEnd) return;
+    e.preventDefault();
+    savedSel.current = { start: el.selectionStart, end: el.selectionEnd };
+    setMenu({ x: e.clientX, y: e.clientY });
+  }
+
+  const formatActions: {
+    label: string;
+    Icon: LucideIcon;
+    keys: string;
+    run: () => void;
+    separated?: boolean;
+  }[] = [
+    { label: "Bold", Icon: Bold, keys: shortcut("B"),
+      run: () => surround("**", "**", savedSel.current.start, savedSel.current.end) },
+    { label: "Italic", Icon: Italic, keys: shortcut("I"),
+      run: () => surround("*", "*", savedSel.current.start, savedSel.current.end) },
+    { label: "Underline", Icon: Underline, keys: shortcut("U"),
+      run: () => surround("<u>", "</u>", savedSel.current.start, savedSel.current.end) },
+    { label: "Strikethrough", Icon: Strikethrough, keys: shortcut("X", true),
+      run: () => surround("~~", "~~", savedSel.current.start, savedSel.current.end) },
+    { label: "Insert Link", Icon: Link2, keys: shortcut("K"), separated: true,
+      run: () => insertLink(savedSel.current.start, savedSel.current.end) },
+  ];
+
+  // Dismiss the menu on outside pointer, Escape, scroll or resize.
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onPointerDown = (e: PointerEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) close();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [menu]);
+
+  // Once rendered, nudge the menu back inside the viewport if it overflows.
+  useEffect(() => {
+    if (!menu || !menuRef.current) return;
+    const { width, height } = menuRef.current.getBoundingClientRect();
+    const pad = 8;
+    const x = Math.max(pad, Math.min(menu.x, window.innerWidth - width - pad));
+    const y = Math.max(pad, Math.min(menu.y, window.innerHeight - height - pad));
+    if (x !== menu.x || y !== menu.y) setMenu({ x, y });
+  }, [menu]);
+
   function handleEditorKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.nativeEvent.isComposing) return; // don't interfere with IME
     const { value, selectionStart: start, selectionEnd: end } = e.currentTarget;
+
+    // Ctrl/Cmd formatting shortcuts (mirror the right-click menu).
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (k === "b") { e.preventDefault(); surround("**", "**", start, end); return; }
+      if (k === "i") { e.preventDefault(); surround("*", "*", start, end); return; }
+      if (k === "u") { e.preventDefault(); surround("<u>", "</u>", start, end); return; }
+      if (k === "k") { e.preventDefault(); insertLink(start, end); return; }
+      if (e.shiftKey && k === "x") { e.preventDefault(); surround("~~", "~~", start, end); return; }
+    }
 
     // Tab → insert four spaces (indent selected lines when there's a selection).
     if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -202,6 +340,7 @@ export function PostEditor() {
       value={body}
       onChange={(e) => setBody(e.target.value)}
       onKeyDown={handleEditorKeyDown}
+      onContextMenu={handleEditorContextMenu}
       placeholder={`Start writing in Markdown…\n\n## Heading\n\nYour content here.`}
       spellCheck
       className={[
@@ -349,6 +488,39 @@ export function PostEditor() {
           Markdown
         </span>
       </div>
+
+      {/* ── Selection formatting menu (right-click) ─────────────────────── */}
+      {menu &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="menu"
+            style={{ top: menu.y, left: menu.x }}
+            className="fixed z-50 min-w-[188px] rounded-lg border border-zinc-200 bg-white p-1 shadow-xl shadow-black/[0.06] dark:border-white/10 dark:bg-zinc-900 dark:shadow-black/40"
+          >
+            {formatActions.map(({ label, Icon, keys, run, separated }) => (
+              <Fragment key={label}>
+                {separated && <div className="my-1 h-px bg-zinc-100 dark:bg-white/10" />}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    run();
+                    setMenu(null);
+                  }}
+                  className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100 active:scale-[0.98] dark:text-zinc-200 dark:hover:bg-white/[0.06]"
+                >
+                  <Icon size={14} strokeWidth={2} className="text-zinc-500 dark:text-zinc-400" />
+                  {label}
+                  <span className="ml-auto pl-4 font-mono text-[11px] text-zinc-400 dark:text-zinc-600">
+                    {keys}
+                  </span>
+                </button>
+              </Fragment>
+            ))}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
