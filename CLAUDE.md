@@ -8,16 +8,24 @@ A desktop application built with **Tauri** and **Next.js** designed for managing
 
 ```text
 ├─────── src/
-│         ├── app/              # Frontend (Next.js AppRouter)
+│         ├── app/              # Frontend (Next.js App Router)
 │         │    ├── components/  # UI components
+│         │    │    └── ui/     # shadcn/ui primitives (Button, Card, Tabs, …)
+│         │    ├── lib/         # Shared utilities (e.g. cn())
+│         │    ├── posts/       # Posts routes (list + new)
+│         │    ├── media/       # Media route
+│         │    ├── analytics/   # Analytics route
+│         │    ├── settings/    # Settings route
 │         │    ├── page.tsx     # Main dashboard
-│         │    └── layout.tsx   # Root layout & providers
+│         │    ├── layout.tsx   # Root layout & providers
+│         │    └── globals.css  # Tailwind v4 theme tokens
 │         └─── public/
 ├─────── src-tauri/             # Backend (Rust)
 │       ├── src/                # Rust logic & Command handlers
 │       └── tauri.conf.json     # Tauri configuration
 ├── .gitignore
 ├── README.md
+├── components.json             # shadcn/ui configuration
 ├── tsconfig.json
 ├── postcss.config.ts
 └── next.config.ts
@@ -25,9 +33,11 @@ A desktop application built with **Tauri** and **Next.js** designed for managing
 
 ## Tech stack
 
-* **Frontend:** Next.js
-* **Backend:** Tauri
-* **Styling:** Tailwind CSS
+* **Frontend:** Next.js 16 (App Router) + React 19
+* **UI:** shadcn/ui (`radix-nova` style) built on Radix UI primitives
+* **Backend:** Tauri 2
+* **Styling:** Tailwind CSS v4 (CSS-first config in `globals.css`)
+* **Theming:** `next-themes` (class strategy, light/dark)
 * **ORM:** Sea ORM (Rust)
 * **Cloud Infrastructure:** Cloudflare (R2, D1)
 
@@ -53,6 +63,12 @@ A desktop application built with **Tauri** and **Next.js** designed for managing
 
 * All buttons and links are treated with `transition-colors`.
 * Add a slight response to clicks (e.g., active:scale-95).
+
+### Components
+
+* Build UI from the **shadcn/ui** primitives in `@/components/ui` (Button, Card, Tabs, Badge, Input, Avatar, Alert, Separator, Breadcrumb) before hand-rolling markup.
+* Add new primitives with `pnpm dlx shadcn@latest add <component>`; they install into `src/app/components/ui/`.
+* Compose class names with the `cn()` helper from `@/lib/utils` (clsx + `tailwind-merge`) so variant and override classes merge cleanly.
 
 ## Data Management & Architecture
 
@@ -82,7 +98,8 @@ A desktop application built with **Tauri** and **Next.js** designed for managing
 
 ### Quality Control
 
-* `pnpm run lint`: Run Oxlint to check code quality.
+* `pnpm run lint`: Run Oxlint (with `--fix`) to check and auto-fix code quality.
+* `pnpm run fmt`: Format the code with oxfmt.
 
 ## Coding Standards
 
@@ -96,4 +113,4 @@ A desktop application built with **Tauri** and **Next.js** designed for managing
 
 * When adding new features, check if a Tauri plugin (e.g., `fs`, `shell`, `dialog`) is needed before writing custom Rust code.
 * Prefer `Lucide React` for icons to maintain a consistent UI language.
-* When import components, use absolute imports (e.g., `@/components/SectionHeader`) for better readability and maintainability.
+* When importing components, use absolute imports (e.g., `@/components/SectionHeader`) for better readability and maintainability. The `@/*` alias maps to `src/app/*`.
