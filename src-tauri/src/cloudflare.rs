@@ -3,9 +3,10 @@ use sea_orm::sea_query::Expr;
 use sea_orm::{
     ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QueryTrait, Value, Values,
 };
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use crate::entities::post;
+use crate::entities::{post, series};
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -71,8 +72,8 @@ pub async fn upload_to_r2(
 // D1 has no raw SQLite wire protocol, so Sea ORM can't connect to it directly.
 // Instead we build each statement with Sea ORM for the SQLite backend
 // (`.build(DbBackend::Sqlite)` → SQL + bound params) and run it against D1's
-// HTTP `/query` endpoint. The `posts` table must exist in D1 with the same
-// columns as `entities::post::Model`.
+// HTTP `/query` endpoint. The `series` and `blog-db` tables must already exist
+// in D1 (created by the web app's Drizzle migrations).
 
 /// Cloudflare's query-response envelope (only the parts we read).
 #[derive(Deserialize)]
@@ -88,6 +89,14 @@ struct D1Envelope {
 struct D1QueryResult {
     #[serde(default)]
     results: Vec<serde_json::Value>,
+    #[serde(default)]
+    meta: D1Meta,
+}
+
+#[derive(Deserialize, Default)]
+struct D1Meta {
+    #[serde(default)]
+    last_row_id: i64,
 }
 
 #[derive(Deserialize)]
@@ -95,19 +104,23 @@ struct D1Error {
     message: String,
 }
 
-/// Convert a built statement's bound values into D1's JSON `params` array. Every
-/// `posts` column is TEXT, so each value is a string (empty optionals → null).
+/// Convert a built statement's bound values into D1's JSON `params` array.
+/// Booleans map to `0`/`1` to match SQLite's integer storage.
 fn params_json(values: Option<Values>) -> Vec<serde_json::Value> {
     values
-        .map(|vs| {
-            vs.0.into_iter()
-                .map(|v| match v {
-                    Value::String(Some(s)) => serde_json::Value::String(s.to_string()),
-                    _ => serde_json::Value::Null,
-                })
-                .collect()
-        })
+        .map(|vs| vs.0.into_iter().map(value_json).collect())
         .unwrap_or_default()
+}
+
+fn value_json(v: Value) -> serde_json::Value {
+    use serde_json::Value as J;
+    match v {
+        Value::Bool(Some(b)) => J::from(i32::from(b)),
+        Value::Int(Some(i)) => J::from(i),
+        Value::BigInt(Some(i)) => J::from(i),
+        Value::String(Some(s)) => J::String(s.to_string()),
+        _ => J::Null,
+    }
 }
 
 /// Build a Sea ORM statement for the SQLite backend and run it against D1.
@@ -162,8 +175,8 @@ async fn d1_query(
     Ok(env)
 }
 
-/// Decode the first result set's rows into `Post` models.
-fn decode_rows(env: D1Envelope) -> Result<Vec<post::Model>, String> {
+/// Decode the first result set's rows into models.
+fn decode_rows<M: DeserializeOwned>(env: D1Envelope) -> Result<Vec<M>, String> {
     let rows = env
         .result
         .into_iter()
@@ -171,69 +184,132 @@ fn decode_rows(env: D1Envelope) -> Result<Vec<post::Model>, String> {
         .map(|r| r.results)
         .unwrap_or_default();
     rows.into_iter()
-        .map(|row| {
-            serde_json::from_value::<post::Model>(row).map_err(|e| format!("D1 row decode error: {e}"))
-        })
+        .map(|row| serde_json::from_value::<M>(row).map_err(|e| format!("D1 row decode error: {e}")))
         .collect()
 }
 
-// ── CRUD ─────────────────────────────────────────────────────────────────────
-
-pub async fn d1_insert(
-    client: &Client,
-    config: &CloudflareConfig,
-    model: post::Model,
-) -> Result<(), String> {
-    d1_run(client, config, post::Entity::insert(model.into_active_set()))
-        .await
-        .map(|_| ())
+/// The auto-assigned row id reported by an INSERT.
+fn last_row_id(env: &D1Envelope) -> i64 {
+    env.result.first().map(|r| r.meta.last_row_id).unwrap_or_default()
 }
 
-pub async fn d1_update(
+// ── Posts ──────────────────────────────────────────────────────────────────────
+
+pub async fn d1_post_insert(
+    client: &Client,
+    config: &CloudflareConfig,
+    model: post::Model,
+) -> Result<i64, String> {
+    let env = d1_run(client, config, post::Entity::insert(model.into_insert())).await?;
+    Ok(last_row_id(&env))
+}
+
+pub async fn d1_post_update(
     client: &Client,
     config: &CloudflareConfig,
     model: post::Model,
 ) -> Result<(), String> {
-    // UpdateOne isn't a `QueryTrait`, so build an UPDATE … WHERE id = ? by hand.
+    // UpdateOne isn't a `QueryTrait`, so build an UPDATE … WHERE id = ? explicitly.
     let stmt = post::Entity::update_many()
+        .col_expr(post::Column::Slug, Expr::value(model.slug))
         .col_expr(post::Column::Title, Expr::value(model.title))
-        .col_expr(post::Column::Status, Expr::value(model.status))
+        .col_expr(post::Column::Excerpt, Expr::value(model.excerpt))
         .col_expr(post::Column::Tags, Expr::value(model.tags))
-        .col_expr(post::Column::R2Key, Expr::value(model.r2_key))
-        .col_expr(post::Column::UploadDate, Expr::value(model.upload_date))
-        .col_expr(post::Column::LastUpdatedDate, Expr::value(model.last_updated_date))
+        .col_expr(post::Column::Published, Expr::value(model.published))
+        .col_expr(post::Column::PublishedAt, Expr::value(model.published_at))
+        .col_expr(post::Column::SeriesId, Expr::value(model.series_id))
+        .col_expr(post::Column::SeriesOrder, Expr::value(model.series_order))
+        .col_expr(post::Column::CreatedAt, Expr::value(model.created_at))
+        .col_expr(post::Column::UpdatedAt, Expr::value(model.updated_at))
         .filter(post::Column::Id.eq(model.id));
     d1_run(client, config, stmt).await.map(|_| ())
 }
 
-pub async fn d1_delete(
+pub async fn d1_post_delete(
     client: &Client,
     config: &CloudflareConfig,
-    id: String,
+    id: i32,
 ) -> Result<(), String> {
     d1_run(client, config, post::Entity::delete_by_id(id))
         .await
         .map(|_| ())
 }
 
-pub async fn d1_list(
+pub async fn d1_post_list(
     client: &Client,
     config: &CloudflareConfig,
 ) -> Result<Vec<post::Model>, String> {
     let env = d1_run(
         client,
         config,
-        post::Entity::find().order_by_desc(post::Column::LastUpdatedDate),
+        post::Entity::find().order_by_desc(post::Column::CreatedAt),
     )
     .await?;
     decode_rows(env)
 }
 
-pub async fn d1_get(
+pub async fn d1_post_get(
     client: &Client,
     config: &CloudflareConfig,
-    id: String,
+    id: i32,
 ) -> Result<Option<post::Model>, String> {
     let env = d1_run(client, config, post::Entity::find_by_id(id)).await?;
-    Ok(decode_rows(env)?.into_iter().next())
+    Ok(decode_rows::<post::Model>(env)?.into_iter().next())
+}
+
+// ── Series ─────────────────────────────────────────────────────────────────────
+
+pub async fn d1_series_insert(
+    client: &Client,
+    config: &CloudflareConfig,
+    model: series::Model,
+) -> Result<i64, String> {
+    let env = d1_run(client, config, series::Entity::insert(model.into_insert())).await?;
+    Ok(last_row_id(&env))
+}
+
+pub async fn d1_series_update(
+    client: &Client,
+    config: &CloudflareConfig,
+    model: series::Model,
+) -> Result<(), String> {
+    let stmt = series::Entity::update_many()
+        .col_expr(series::Column::Slug, Expr::value(model.slug))
+        .col_expr(series::Column::Title, Expr::value(model.title))
+        .col_expr(series::Column::Description, Expr::value(model.description))
+        .col_expr(series::Column::CreatedAt, Expr::value(model.created_at))
+        .filter(series::Column::Id.eq(model.id));
+    d1_run(client, config, stmt).await.map(|_| ())
+}
+
+pub async fn d1_series_delete(
+    client: &Client,
+    config: &CloudflareConfig,
+    id: i32,
+) -> Result<(), String> {
+    d1_run(client, config, series::Entity::delete_by_id(id))
+        .await
+        .map(|_| ())
+}
+
+pub async fn d1_series_list(
+    client: &Client,
+    config: &CloudflareConfig,
+) -> Result<Vec<series::Model>, String> {
+    let env = d1_run(
+        client,
+        config,
+        series::Entity::find().order_by_desc(series::Column::CreatedAt),
+    )
+    .await?;
+    decode_rows(env)
+}
+
+pub async fn d1_series_get(
+    client: &Client,
+    config: &CloudflareConfig,
+    id: i32,
+) -> Result<Option<series::Model>, String> {
+    let env = d1_run(client, config, series::Entity::find_by_id(id)).await?;
+    Ok(decode_rows::<series::Model>(env)?.into_iter().next())
 }

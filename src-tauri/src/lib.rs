@@ -32,16 +32,30 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::upload_article,
             commands::stage_image,
+            // Posts — local SQLite
             commands::create_post,
             commands::list_posts,
             commands::get_post,
             commands::update_post,
             commands::delete_post,
+            // Posts — Cloudflare D1
             commands::d1_create_post,
             commands::d1_list_posts,
             commands::d1_get_post,
             commands::d1_update_post,
             commands::d1_delete_post,
+            // Series — local SQLite
+            commands::create_series,
+            commands::list_series,
+            commands::get_series,
+            commands::update_series,
+            commands::delete_series,
+            // Series — Cloudflare D1
+            commands::d1_create_series,
+            commands::d1_list_series,
+            commands::d1_get_series,
+            commands::d1_update_series,
+            commands::d1_delete_series,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

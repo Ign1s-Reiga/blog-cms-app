@@ -1,7 +1,8 @@
 //! Local SQLite cache, accessed through the full Sea ORM entity API.
 //!
 //! The database file lives in the app data dir and holds the offline editing
-//! state that later syncs to Cloudflare D1 (see `cloudflare::d1_*`).
+//! state that later syncs to Cloudflare D1 (see `cloudflare::d1_*`). The tables
+//! mirror the Drizzle schema (`series` and `blog-db`).
 
 use sea_orm::{
     ActiveModelTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait, QueryOrder,
@@ -9,7 +10,7 @@ use sea_orm::{
 };
 use tauri::Manager;
 
-use crate::entities::post;
+use crate::entities::{post, series};
 
 /// Open (creating if needed) the local SQLite database and ensure its schema
 /// exists. Returns a connection to store in Tauri's managed state.
@@ -37,52 +38,108 @@ pub async fn connect(app: &tauri::AppHandle) -> Result<DatabaseConnection, Strin
     Ok(db)
 }
 
-/// Create the `posts` table from the entity definition if it isn't there yet.
+/// Create the tables from the entity definitions if they aren't there yet.
+/// `series` is created first because `blog-db` references it.
 async fn ensure_schema(db: &DatabaseConnection) -> Result<(), String> {
-    let backend = db.get_database_backend();
-    let mut stmt = Schema::new(backend).create_table_from_entity(post::Entity);
-    stmt.if_not_exists();
-    db.execute(&stmt)
+    let schema = Schema::new(db.get_database_backend());
+
+    let mut series_tbl = schema.create_table_from_entity(series::Entity);
+    series_tbl.if_not_exists();
+    db.execute(&series_tbl)
         .await
-        .map_err(|e| format!("Failed to create schema: {e}"))?;
+        .map_err(|e| format!("Failed to create `series` table: {e}"))?;
+
+    let mut post_tbl = schema.create_table_from_entity(post::Entity);
+    post_tbl.if_not_exists();
+    db.execute(&post_tbl)
+        .await
+        .map_err(|e| format!("Failed to create `blog-db` table: {e}"))?;
+
     Ok(())
 }
 
-// ─── CRUD ─────────────────────────────────────────────────────────────────────
+// ─── Posts ────────────────────────────────────────────────────────────────────
 
-pub async fn create(db: &DatabaseConnection, model: post::Model) -> Result<post::Model, String> {
+pub async fn post_create(db: &DatabaseConnection, model: post::Model) -> Result<post::Model, String> {
     model
-        .into_active_set()
+        .into_insert()
         .insert(db)
         .await
         .map_err(|e| e.to_string())
 }
 
-pub async fn list(db: &DatabaseConnection) -> Result<Vec<post::Model>, String> {
+pub async fn post_list(db: &DatabaseConnection) -> Result<Vec<post::Model>, String> {
     post::Entity::find()
-        .order_by_desc(post::Column::LastUpdatedDate)
+        .order_by_desc(post::Column::CreatedAt)
         .all(db)
         .await
         .map_err(|e| e.to_string())
 }
 
-pub async fn get(db: &DatabaseConnection, id: String) -> Result<Option<post::Model>, String> {
+pub async fn post_get(db: &DatabaseConnection, id: i32) -> Result<Option<post::Model>, String> {
     post::Entity::find_by_id(id)
         .one(db)
         .await
         .map_err(|e| e.to_string())
 }
 
-pub async fn update(db: &DatabaseConnection, model: post::Model) -> Result<post::Model, String> {
-    let id = model.id.clone();
-    let mut active = model.into_active_set();
-    // Locate the row by its (unchanged) primary key; write the rest.
-    active.id = sea_orm::ActiveValue::Unchanged(id);
-    active.update(db).await.map_err(|e| e.to_string())
+pub async fn post_update(db: &DatabaseConnection, model: post::Model) -> Result<post::Model, String> {
+    model
+        .into_update()
+        .update(db)
+        .await
+        .map_err(|e| e.to_string())
 }
 
-pub async fn delete(db: &DatabaseConnection, id: String) -> Result<(), String> {
+pub async fn post_delete(db: &DatabaseConnection, id: i32) -> Result<(), String> {
     post::Entity::delete_by_id(id)
+        .exec(db)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ─── Series ───────────────────────────────────────────────────────────────────
+
+pub async fn series_create(
+    db: &DatabaseConnection,
+    model: series::Model,
+) -> Result<series::Model, String> {
+    model
+        .into_insert()
+        .insert(db)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn series_list(db: &DatabaseConnection) -> Result<Vec<series::Model>, String> {
+    series::Entity::find()
+        .order_by_desc(series::Column::CreatedAt)
+        .all(db)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn series_get(db: &DatabaseConnection, id: i32) -> Result<Option<series::Model>, String> {
+    series::Entity::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn series_update(
+    db: &DatabaseConnection,
+    model: series::Model,
+) -> Result<series::Model, String> {
+    model
+        .into_update()
+        .update(db)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn series_delete(db: &DatabaseConnection, id: i32) -> Result<(), String> {
+    series::Entity::delete_by_id(id)
         .exec(db)
         .await
         .map_err(|e| e.to_string())?;

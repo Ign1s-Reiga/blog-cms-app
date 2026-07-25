@@ -8,6 +8,36 @@ use tauri_plugin_dialog::DialogExt;
 use crate::cloudflare::{self, CloudflareConfig};
 use crate::db;
 use crate::entities::post::Model as PostModel;
+use crate::entities::series::Model as SeriesModel;
+
+/// Current time as a Unix timestamp in seconds (the schema's date encoding).
+fn now_ts() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Turn arbitrary text into a URL-safe slug: lowercase alphanumerics, other runs
+/// collapsed to single hyphens, no leading/trailing hyphens.
+fn slugify(input: &str) -> String {
+    let mut slug = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+/// Encode a comma-separated tag string as a JSON array (the `tags` column shape).
+fn tags_to_json(csv: &str) -> String {
+    let list: Vec<&str> = csv
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect();
+    serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+}
 
 // ─── Frontmatter parser ───────────────────────────────────────────────────────
 
@@ -109,10 +139,16 @@ pub async fn upload_article(
     let title = fm.title.unwrap_or_else(|| stem.to_string());
     let tags  = fm.tags.unwrap_or_default();
 
-    // ── 4. Generate stable identifiers ───────────────────────────────────────
-    let id       = uuid::Uuid::new_v4().to_string();
-    let now      = chrono::Utc::now().to_rfc3339();
-    let r2_key   = format!("posts/{id}.md");
+    // ── 4. Derive slug + R2 key ───────────────────────────────────────────────
+    // The id is auto-assigned by the DB, so the R2 object key is keyed by slug.
+    let now = now_ts();
+    let slug = {
+        let s = slugify(&title);
+        let s = if s.is_empty() { slugify(stem) } else { s };
+        // Fall back to a unique, non-empty slug (e.g. non-ASCII titles).
+        if s.is_empty() { format!("post-{now}") } else { s }
+    };
+    let r2_key = format!("posts/{slug}.md");
 
     // ── 5. Load Cloudflare credentials ───────────────────────────────────────
     let config = CloudflareConfig::from_env()?;
@@ -126,46 +162,61 @@ pub async fn upload_article(
     // fails we surface the error — the caller should decide whether to retry or
     // clean up the orphaned R2 object.
     let post = PostModel {
-        id,
+        id: 0, // ignored on insert (auto-increment)
+        slug,
         title: title.clone(),
-        status: "draft".to_string(),
-        tags,
-        r2_key,
-        upload_date: now.clone(),
-        last_updated_date: now,
+        excerpt: None,
+        tags: Some(tags_to_json(&tags)),
+        published: false,
+        published_at: None,
+        series_id: None,
+        series_order: None,
+        created_at: now,
+        updated_at: now,
     };
-    cloudflare::d1_insert(&client, &config, post.clone()).await?;
-    db::create(conn.inner(), post).await?;
+    cloudflare::d1_post_insert(&client, &config, post.clone()).await?;
+    db::post_create(conn.inner(), post).await?;
 
     Ok(title)
 }
 
-// ─── Post metadata CRUD ─────────────────────────────────────────────────────
+// ─── Metadata CRUD ────────────────────────────────────────────────────────────
 //
 // Local SQLite is the offline working store (full Sea ORM); the `d1_*` commands
-// operate on Cloudflare D1 for cloud sync. Both share the `PostModel` shape.
+// operate on Cloudflare D1 for cloud sync. Ids are auto-assigned by the database,
+// so create ignores any incoming id and D1 creates return the new row id.
+// `created_at` / `updated_at` are stamped server-side here.
 
-// ── Local SQLite ──────────────────────────────────────────────────────────────
+/// A reqwest client plus credentials, built per call from the environment.
+fn cf() -> Result<(reqwest::Client, CloudflareConfig), String> {
+    Ok((reqwest::Client::new(), CloudflareConfig::from_env()?))
+}
+
+// ── Posts: local SQLite ─────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn create_post(
     conn: State<'_, DatabaseConnection>,
     post: PostModel,
 ) -> Result<PostModel, String> {
-    db::create(conn.inner(), post).await
+    let mut post = post;
+    let now = now_ts();
+    post.created_at = now;
+    post.updated_at = now;
+    db::post_create(conn.inner(), post).await
 }
 
 #[tauri::command]
 pub async fn list_posts(conn: State<'_, DatabaseConnection>) -> Result<Vec<PostModel>, String> {
-    db::list(conn.inner()).await
+    db::post_list(conn.inner()).await
 }
 
 #[tauri::command]
 pub async fn get_post(
     conn: State<'_, DatabaseConnection>,
-    id: String,
+    id: i32,
 ) -> Result<Option<PostModel>, String> {
-    db::get(conn.inner(), id).await
+    db::post_get(conn.inner(), id).await
 }
 
 #[tauri::command]
@@ -173,49 +224,124 @@ pub async fn update_post(
     conn: State<'_, DatabaseConnection>,
     post: PostModel,
 ) -> Result<PostModel, String> {
-    db::update(conn.inner(), post).await
+    let mut post = post;
+    post.updated_at = now_ts();
+    db::post_update(conn.inner(), post).await
 }
 
 #[tauri::command]
-pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: String) -> Result<(), String> {
-    db::delete(conn.inner(), id).await
+pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: i32) -> Result<(), String> {
+    db::post_delete(conn.inner(), id).await
 }
 
-// ── Cloudflare D1 ─────────────────────────────────────────────────────────────
-
-/// A reqwest client plus credentials, built per call from the environment.
-fn cf() -> Result<(reqwest::Client, CloudflareConfig), String> {
-    Ok((reqwest::Client::new(), CloudflareConfig::from_env()?))
-}
+// ── Posts: Cloudflare D1 ────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn d1_create_post(post: PostModel) -> Result<(), String> {
+pub async fn d1_create_post(post: PostModel) -> Result<i64, String> {
     let (client, config) = cf()?;
-    cloudflare::d1_insert(&client, &config, post).await
+    let mut post = post;
+    let now = now_ts();
+    post.created_at = now;
+    post.updated_at = now;
+    cloudflare::d1_post_insert(&client, &config, post).await
 }
 
 #[tauri::command]
 pub async fn d1_list_posts() -> Result<Vec<PostModel>, String> {
     let (client, config) = cf()?;
-    cloudflare::d1_list(&client, &config).await
+    cloudflare::d1_post_list(&client, &config).await
 }
 
 #[tauri::command]
-pub async fn d1_get_post(id: String) -> Result<Option<PostModel>, String> {
+pub async fn d1_get_post(id: i32) -> Result<Option<PostModel>, String> {
     let (client, config) = cf()?;
-    cloudflare::d1_get(&client, &config, id).await
+    cloudflare::d1_post_get(&client, &config, id).await
 }
 
 #[tauri::command]
 pub async fn d1_update_post(post: PostModel) -> Result<(), String> {
     let (client, config) = cf()?;
-    cloudflare::d1_update(&client, &config, post).await
+    let mut post = post;
+    post.updated_at = now_ts();
+    cloudflare::d1_post_update(&client, &config, post).await
 }
 
 #[tauri::command]
-pub async fn d1_delete_post(id: String) -> Result<(), String> {
+pub async fn d1_delete_post(id: i32) -> Result<(), String> {
     let (client, config) = cf()?;
-    cloudflare::d1_delete(&client, &config, id).await
+    cloudflare::d1_post_delete(&client, &config, id).await
+}
+
+// ── Series: local SQLite ────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn create_series(
+    conn: State<'_, DatabaseConnection>,
+    series: SeriesModel,
+) -> Result<SeriesModel, String> {
+    let mut series = series;
+    series.created_at = now_ts();
+    db::series_create(conn.inner(), series).await
+}
+
+#[tauri::command]
+pub async fn list_series(conn: State<'_, DatabaseConnection>) -> Result<Vec<SeriesModel>, String> {
+    db::series_list(conn.inner()).await
+}
+
+#[tauri::command]
+pub async fn get_series(
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+) -> Result<Option<SeriesModel>, String> {
+    db::series_get(conn.inner(), id).await
+}
+
+#[tauri::command]
+pub async fn update_series(
+    conn: State<'_, DatabaseConnection>,
+    series: SeriesModel,
+) -> Result<SeriesModel, String> {
+    db::series_update(conn.inner(), series).await
+}
+
+#[tauri::command]
+pub async fn delete_series(conn: State<'_, DatabaseConnection>, id: i32) -> Result<(), String> {
+    db::series_delete(conn.inner(), id).await
+}
+
+// ── Series: Cloudflare D1 ───────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn d1_create_series(series: SeriesModel) -> Result<i64, String> {
+    let (client, config) = cf()?;
+    let mut series = series;
+    series.created_at = now_ts();
+    cloudflare::d1_series_insert(&client, &config, series).await
+}
+
+#[tauri::command]
+pub async fn d1_list_series() -> Result<Vec<SeriesModel>, String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_series_list(&client, &config).await
+}
+
+#[tauri::command]
+pub async fn d1_get_series(id: i32) -> Result<Option<SeriesModel>, String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_series_get(&client, &config, id).await
+}
+
+#[tauri::command]
+pub async fn d1_update_series(series: SeriesModel) -> Result<(), String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_series_update(&client, &config, series).await
+}
+
+#[tauri::command]
+pub async fn d1_delete_series(id: i32) -> Result<(), String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_series_delete(&client, &config, id).await
 }
 
 // ─── Image staging ──────────────────────────────────────────────────────────
