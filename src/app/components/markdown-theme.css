@@ -36,3 +36,17 @@
   --mp-surface-secondary: #2d2d2d;
   --mp-surface-tertiary:  #393939;
 }
+
+/*
+ * Restore list markers. Tailwind's Preflight resets `ul, ol { list-style: none }`
+ * globally, and the preset only sets list padding/margins — it never re-declares
+ * list-style — so bullets and numbers disappear in the preview. Put them back
+ * here (this file loads after both), following the browser's default nesting.
+ */
+.md-body ul       { list-style: disc; }
+.md-body ul ul    { list-style: circle; }
+.md-body ul ul ul { list-style: square; }
+.md-body ol       { list-style: decimal; }
+
+/* GFM task-list items render their own checkbox — drop the redundant bullet. */
+.md-body li:has(> input[type="checkbox"]) { list-style: none; }
