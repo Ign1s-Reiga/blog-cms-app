@@ -1,10 +1,45 @@
 use std::path::PathBuf;
 
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::cloudflare::{insert_d1_record, upload_to_r2, CloudflareConfig};
+use crate::cloudflare::{self, CloudflareConfig};
+use crate::db;
+use crate::entities::post::Model as PostModel;
+use crate::entities::post_stage;
+use crate::entities::series::Model as SeriesModel;
+use sea_orm::DatabaseConnection as Db;
+
+/// Current time as a Unix timestamp in seconds (the schema's date encoding).
+fn now_ts() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Turn arbitrary text into a URL-safe slug: lowercase alphanumerics, other runs
+/// collapsed to single hyphens, no leading/trailing hyphens.
+fn slugify(input: &str) -> String {
+    let mut slug = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+/// Encode a comma-separated tag string as a JSON array (the `tags` column shape).
+fn tags_to_json(csv: &str) -> String {
+    let list: Vec<&str> = csv
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect();
+    serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+}
 
 // ─── Frontmatter parser ───────────────────────────────────────────────────────
 
@@ -64,7 +99,10 @@ fn parse_frontmatter(content: &str) -> Frontmatter {
 /// Returns `Err("cancelled")` when the user dismisses the dialog without
 /// choosing a file — the frontend treats this differently from real errors.
 #[tauri::command]
-pub async fn upload_article(app: tauri::AppHandle) -> Result<String, String> {
+pub async fn upload_article(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+) -> Result<String, String> {
     // ── 1. File picker ────────────────────────────────────────────────────────
     // `blocking_pick_file` must not run on a tokio thread; use spawn_blocking.
     let app_clone = app.clone();
@@ -103,24 +141,339 @@ pub async fn upload_article(app: tauri::AppHandle) -> Result<String, String> {
     let title = fm.title.unwrap_or_else(|| stem.to_string());
     let tags  = fm.tags.unwrap_or_default();
 
-    // ── 4. Generate stable identifiers ───────────────────────────────────────
-    let id       = uuid::Uuid::new_v4().to_string();
-    let now      = chrono::Utc::now().to_rfc3339();
-    let r2_key   = format!("posts/{id}.md");
+    // ── 4. Derive slug + R2 key ───────────────────────────────────────────────
+    // The id is auto-assigned by the DB, so the R2 object key is keyed by slug.
+    let now = now_ts();
+    let slug = {
+        let s = slugify(&title);
+        let s = if s.is_empty() { slugify(stem) } else { s };
+        // Fall back to a unique, non-empty slug (e.g. non-ASCII titles).
+        if s.is_empty() { format!("post-{now}") } else { s }
+    };
+    let r2_key = format!("posts/{slug}.md");
 
     // ── 5. Load Cloudflare credentials ───────────────────────────────────────
     let config = CloudflareConfig::from_env()?;
     let client = reqwest::Client::new();
 
     // ── 6. Upload to R2 ───────────────────────────────────────────────────────
-    upload_to_r2(&client, &config, &r2_key, &content).await?;
+    cloudflare::upload_to_r2(&client, &config, &r2_key, &content).await?;
 
-    // ── 7. Insert D1 record ───────────────────────────────────────────────────
-    // R2 succeeded; attempt D1. If D1 fails we surface the error — the caller
-    // should decide whether to retry or clean up the orphaned R2 object.
-    insert_d1_record(&client, &config, &id, &title, &now, &now, &tags).await?;
+    // ── 7. Record metadata in D1 and the local cache ─────────────────────────
+    // R2 succeeded; mirror the metadata to D1, then cache it locally. If D1
+    // fails we surface the error — the caller should decide whether to retry or
+    // clean up the orphaned R2 object.
+    let post = PostModel {
+        id: 0, // ignored on insert (auto-increment)
+        slug,
+        title: title.clone(),
+        excerpt: None,
+        tags: Some(tags_to_json(&tags)),
+        published: false,
+        published_at: None,
+        series_id: None,
+        series_order: None,
+        created_at: now,
+        updated_at: now,
+    };
+    cloudflare::d1_post_insert(&client, &config, post.clone()).await?;
+    let created = db::post_create(conn.inner(), post).await?;
+    // Imported posts start staged as Draft.
+    db::stage_set(
+        conn.inner(),
+        post_stage::Model {
+            post_id: created.id,
+            stage: post_stage::DRAFT.to_string(),
+            staged_at: now,
+        },
+    )
+    .await?;
 
     Ok(title)
+}
+
+// ─── Metadata CRUD ────────────────────────────────────────────────────────────
+//
+// Local SQLite is the offline working store (full Sea ORM); the `d1_*` commands
+// operate on Cloudflare D1 for cloud sync. Ids are auto-assigned by the database,
+// so create ignores any incoming id and D1 creates return the new row id.
+// `created_at` / `updated_at` are stamped server-side here.
+
+/// A reqwest client plus credentials, built per call from the environment.
+fn cf() -> Result<(reqwest::Client, CloudflareConfig), String> {
+    Ok((reqwest::Client::new(), CloudflareConfig::from_env()?))
+}
+
+// ── Posts: local SQLite ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn create_post(
+    conn: State<'_, DatabaseConnection>,
+    post: PostModel,
+) -> Result<PostModel, String> {
+    let mut post = post;
+    let now = now_ts();
+    post.created_at = now;
+    post.updated_at = now;
+    let created = db::post_create(conn.inner(), post).await?;
+    // New posts start staged as Draft.
+    db::stage_set(
+        conn.inner(),
+        post_stage::Model {
+            post_id: created.id,
+            stage: post_stage::DRAFT.to_string(),
+            staged_at: now,
+        },
+    )
+    .await?;
+    Ok(created)
+}
+
+#[tauri::command]
+pub async fn list_posts(conn: State<'_, DatabaseConnection>) -> Result<Vec<PostModel>, String> {
+    db::post_list(conn.inner()).await
+}
+
+#[tauri::command]
+pub async fn get_post(
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+) -> Result<Option<PostModel>, String> {
+    db::post_get(conn.inner(), id).await
+}
+
+#[tauri::command]
+pub async fn update_post(
+    conn: State<'_, DatabaseConnection>,
+    post: PostModel,
+) -> Result<PostModel, String> {
+    let mut post = post;
+    post.updated_at = now_ts();
+    db::post_update(conn.inner(), post).await
+}
+
+#[tauri::command]
+pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: i32) -> Result<(), String> {
+    db::post_delete(conn.inner(), id).await
+}
+
+// ── Posts: Cloudflare D1 ────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn d1_create_post(post: PostModel) -> Result<i64, String> {
+    let (client, config) = cf()?;
+    let mut post = post;
+    let now = now_ts();
+    post.created_at = now;
+    post.updated_at = now;
+    cloudflare::d1_post_insert(&client, &config, post).await
+}
+
+#[tauri::command]
+pub async fn d1_list_posts() -> Result<Vec<PostModel>, String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_post_list(&client, &config).await
+}
+
+#[tauri::command]
+pub async fn d1_get_post(id: i32) -> Result<Option<PostModel>, String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_post_get(&client, &config, id).await
+}
+
+#[tauri::command]
+pub async fn d1_update_post(post: PostModel) -> Result<(), String> {
+    let (client, config) = cf()?;
+    let mut post = post;
+    post.updated_at = now_ts();
+    cloudflare::d1_post_update(&client, &config, post).await
+}
+
+#[tauri::command]
+pub async fn d1_delete_post(id: i32) -> Result<(), String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_post_delete(&client, &config, id).await
+}
+
+// ── Series: local SQLite ────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn create_series(
+    conn: State<'_, DatabaseConnection>,
+    series: SeriesModel,
+) -> Result<SeriesModel, String> {
+    let mut series = series;
+    series.created_at = now_ts();
+    db::series_create(conn.inner(), series).await
+}
+
+#[tauri::command]
+pub async fn list_series(conn: State<'_, DatabaseConnection>) -> Result<Vec<SeriesModel>, String> {
+    db::series_list(conn.inner()).await
+}
+
+#[tauri::command]
+pub async fn get_series(
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+) -> Result<Option<SeriesModel>, String> {
+    db::series_get(conn.inner(), id).await
+}
+
+#[tauri::command]
+pub async fn update_series(
+    conn: State<'_, DatabaseConnection>,
+    series: SeriesModel,
+) -> Result<SeriesModel, String> {
+    db::series_update(conn.inner(), series).await
+}
+
+#[tauri::command]
+pub async fn delete_series(conn: State<'_, DatabaseConnection>, id: i32) -> Result<(), String> {
+    db::series_delete(conn.inner(), id).await
+}
+
+// ── Series: Cloudflare D1 ───────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn d1_create_series(series: SeriesModel) -> Result<i64, String> {
+    let (client, config) = cf()?;
+    let mut series = series;
+    series.created_at = now_ts();
+    cloudflare::d1_series_insert(&client, &config, series).await
+}
+
+#[tauri::command]
+pub async fn d1_list_series() -> Result<Vec<SeriesModel>, String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_series_list(&client, &config).await
+}
+
+#[tauri::command]
+pub async fn d1_get_series(id: i32) -> Result<Option<SeriesModel>, String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_series_get(&client, &config, id).await
+}
+
+#[tauri::command]
+pub async fn d1_update_series(series: SeriesModel) -> Result<(), String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_series_update(&client, &config, series).await
+}
+
+#[tauri::command]
+pub async fn d1_delete_series(id: i32) -> Result<(), String> {
+    let (client, config) = cf()?;
+    cloudflare::d1_series_delete(&client, &config, id).await
+}
+
+// ─── Publish staging ────────────────────────────────────────────────────────
+//
+// A local-only staging table records each post's editorial stage
+// (`draft`/`published`). `set_post_stage` only touches that table; `publish_post`
+// / `unpublish_post` also flip the post's `published` field locally and push the
+// change to Cloudflare D1.
+
+fn validate_stage(stage: &str) -> Result<(), String> {
+    match stage {
+        post_stage::DRAFT | post_stage::PUBLISHED => Ok(()),
+        other => Err(format!("Invalid stage `{other}` (expected `draft` or `published`)")),
+    }
+}
+
+/// Set (or clear) a post's local staging stage without publishing.
+#[tauri::command]
+pub async fn set_post_stage(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+    stage: String,
+) -> Result<post_stage::Model, String> {
+    validate_stage(&stage)?;
+    db::stage_set(
+        conn.inner(),
+        post_stage::Model { post_id, stage, staged_at: now_ts() },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_post_stage(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+) -> Result<Option<post_stage::Model>, String> {
+    db::stage_get(conn.inner(), post_id).await
+}
+
+#[tauri::command]
+pub async fn list_posts_by_stage(
+    conn: State<'_, DatabaseConnection>,
+    stage: String,
+) -> Result<Vec<PostModel>, String> {
+    validate_stage(&stage)?;
+    db::posts_in_stage(conn.inner(), stage).await
+}
+
+/// Promote a post to Published: stage it locally, flip `published`/`published_at`
+/// in the local cache, and push that to Cloudflare D1.
+#[tauri::command]
+pub async fn publish_post(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+) -> Result<PostModel, String> {
+    set_stage_and_sync(conn.inner(), post_id, true).await
+}
+
+/// Revert a post to Draft: the mirror of `publish_post`.
+#[tauri::command]
+pub async fn unpublish_post(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+) -> Result<PostModel, String> {
+    set_stage_and_sync(conn.inner(), post_id, false).await
+}
+
+async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> Result<PostModel, String> {
+    let now = now_ts();
+
+    // 1. Flip the post's published state in the local cache.
+    let mut post = db::post_get(conn, post_id)
+        .await?
+        .ok_or_else(|| format!("post {post_id} not found"))?;
+    post.published = publish;
+    post.published_at = if publish { Some(now) } else { None };
+    post.updated_at = now;
+    let post = db::post_update(conn, post).await?;
+
+    // 2. Record the local staging stage.
+    let stage = if publish { post_stage::PUBLISHED } else { post_stage::DRAFT };
+    db::stage_set(
+        conn,
+        post_stage::Model { post_id, stage: stage.to_string(), staged_at: now },
+    )
+    .await?;
+
+    // 3. Push the published state to Cloudflare D1. On failure the local stage
+    //    persists (unsynced), so a retry re-syncs.
+    let (client, config) = cf()?;
+    cloudflare::d1_post_update(&client, &config, post.clone()).await?;
+
+    Ok(post)
+}
+
+// ─── Sync ───────────────────────────────────────────────────────────────────
+
+/// Push every local post up to Cloudflare D1, upserting by `slug` (local wins).
+/// Returns the number of posts synced.
+#[tauri::command]
+pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, String> {
+    let posts = db::post_list(conn.inner()).await?;
+    let (client, config) = cf()?;
+    let mut synced = 0usize;
+    for post in posts {
+        cloudflare::d1_post_upsert(&client, &config, post).await?;
+        synced += 1;
+    }
+    Ok(synced)
 }
 
 // ─── Image staging ──────────────────────────────────────────────────────────
