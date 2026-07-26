@@ -1,5 +1,5 @@
 use reqwest::Client;
-use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QueryTrait, Value, Values,
 };
@@ -202,6 +202,32 @@ pub async fn d1_post_insert(
 ) -> Result<i64, String> {
     let env = d1_run(client, config, post::Entity::insert(model.into_insert())).await?;
     Ok(last_row_id(&env))
+}
+
+/// Insert a post into D1, or update the existing row with the same `slug`
+/// (local wins). Used by the sync action to push local posts to the cloud
+/// without needing the D1 row id.
+pub async fn d1_post_upsert(
+    client: &Client,
+    config: &CloudflareConfig,
+    model: post::Model,
+) -> Result<(), String> {
+    let stmt = post::Entity::insert(model.into_insert()).on_conflict(
+        OnConflict::column(post::Column::Slug)
+            .update_columns([
+                post::Column::Title,
+                post::Column::Excerpt,
+                post::Column::Tags,
+                post::Column::Published,
+                post::Column::PublishedAt,
+                post::Column::SeriesId,
+                post::Column::SeriesOrder,
+                post::Column::CreatedAt,
+                post::Column::UpdatedAt,
+            ])
+            .to_owned(),
+    );
+    d1_run(client, config, stmt).await.map(|_| ())
 }
 
 pub async fn d1_post_update(

@@ -24,6 +24,13 @@ pub fn run() {
             let handle = app.handle().clone();
             let conn: DatabaseConnection = tauri::async_runtime::block_on(db::connect(&handle))
                 .expect("failed to initialise local database");
+
+            // In development, seed an empty database with sample posts.
+            #[cfg(debug_assertions)]
+            if let Err(e) = tauri::async_runtime::block_on(db::seed_sample_posts(&conn)) {
+                log::warn!("sample post seed skipped: {e}");
+            }
+
             app.manage(conn);
 
             Ok(())
@@ -56,6 +63,14 @@ pub fn run() {
             commands::d1_get_series,
             commands::d1_update_series,
             commands::d1_delete_series,
+            // Publish staging (local table + D1 sync)
+            commands::set_post_stage,
+            commands::get_post_stage,
+            commands::list_posts_by_stage,
+            commands::publish_post,
+            commands::unpublish_post,
+            // Sync
+            commands::sync_posts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

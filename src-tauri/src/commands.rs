@@ -8,7 +8,9 @@ use tauri_plugin_dialog::DialogExt;
 use crate::cloudflare::{self, CloudflareConfig};
 use crate::db;
 use crate::entities::post::Model as PostModel;
+use crate::entities::post_stage;
 use crate::entities::series::Model as SeriesModel;
+use sea_orm::DatabaseConnection as Db;
 
 /// Current time as a Unix timestamp in seconds (the schema's date encoding).
 fn now_ts() -> i64 {
@@ -175,7 +177,17 @@ pub async fn upload_article(
         updated_at: now,
     };
     cloudflare::d1_post_insert(&client, &config, post.clone()).await?;
-    db::post_create(conn.inner(), post).await?;
+    let created = db::post_create(conn.inner(), post).await?;
+    // Imported posts start staged as Draft.
+    db::stage_set(
+        conn.inner(),
+        post_stage::Model {
+            post_id: created.id,
+            stage: post_stage::DRAFT.to_string(),
+            staged_at: now,
+        },
+    )
+    .await?;
 
     Ok(title)
 }
@@ -203,7 +215,18 @@ pub async fn create_post(
     let now = now_ts();
     post.created_at = now;
     post.updated_at = now;
-    db::post_create(conn.inner(), post).await
+    let created = db::post_create(conn.inner(), post).await?;
+    // New posts start staged as Draft.
+    db::stage_set(
+        conn.inner(),
+        post_stage::Model {
+            post_id: created.id,
+            stage: post_stage::DRAFT.to_string(),
+            staged_at: now,
+        },
+    )
+    .await?;
+    Ok(created)
 }
 
 #[tauri::command]
@@ -342,6 +365,115 @@ pub async fn d1_update_series(series: SeriesModel) -> Result<(), String> {
 pub async fn d1_delete_series(id: i32) -> Result<(), String> {
     let (client, config) = cf()?;
     cloudflare::d1_series_delete(&client, &config, id).await
+}
+
+// ─── Publish staging ────────────────────────────────────────────────────────
+//
+// A local-only staging table records each post's editorial stage
+// (`draft`/`published`). `set_post_stage` only touches that table; `publish_post`
+// / `unpublish_post` also flip the post's `published` field locally and push the
+// change to Cloudflare D1.
+
+fn validate_stage(stage: &str) -> Result<(), String> {
+    match stage {
+        post_stage::DRAFT | post_stage::PUBLISHED => Ok(()),
+        other => Err(format!("Invalid stage `{other}` (expected `draft` or `published`)")),
+    }
+}
+
+/// Set (or clear) a post's local staging stage without publishing.
+#[tauri::command]
+pub async fn set_post_stage(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+    stage: String,
+) -> Result<post_stage::Model, String> {
+    validate_stage(&stage)?;
+    db::stage_set(
+        conn.inner(),
+        post_stage::Model { post_id, stage, staged_at: now_ts() },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_post_stage(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+) -> Result<Option<post_stage::Model>, String> {
+    db::stage_get(conn.inner(), post_id).await
+}
+
+#[tauri::command]
+pub async fn list_posts_by_stage(
+    conn: State<'_, DatabaseConnection>,
+    stage: String,
+) -> Result<Vec<PostModel>, String> {
+    validate_stage(&stage)?;
+    db::posts_in_stage(conn.inner(), stage).await
+}
+
+/// Promote a post to Published: stage it locally, flip `published`/`published_at`
+/// in the local cache, and push that to Cloudflare D1.
+#[tauri::command]
+pub async fn publish_post(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+) -> Result<PostModel, String> {
+    set_stage_and_sync(conn.inner(), post_id, true).await
+}
+
+/// Revert a post to Draft: the mirror of `publish_post`.
+#[tauri::command]
+pub async fn unpublish_post(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+) -> Result<PostModel, String> {
+    set_stage_and_sync(conn.inner(), post_id, false).await
+}
+
+async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> Result<PostModel, String> {
+    let now = now_ts();
+
+    // 1. Flip the post's published state in the local cache.
+    let mut post = db::post_get(conn, post_id)
+        .await?
+        .ok_or_else(|| format!("post {post_id} not found"))?;
+    post.published = publish;
+    post.published_at = if publish { Some(now) } else { None };
+    post.updated_at = now;
+    let post = db::post_update(conn, post).await?;
+
+    // 2. Record the local staging stage.
+    let stage = if publish { post_stage::PUBLISHED } else { post_stage::DRAFT };
+    db::stage_set(
+        conn,
+        post_stage::Model { post_id, stage: stage.to_string(), staged_at: now },
+    )
+    .await?;
+
+    // 3. Push the published state to Cloudflare D1. On failure the local stage
+    //    persists (unsynced), so a retry re-syncs.
+    let (client, config) = cf()?;
+    cloudflare::d1_post_update(&client, &config, post.clone()).await?;
+
+    Ok(post)
+}
+
+// ─── Sync ───────────────────────────────────────────────────────────────────
+
+/// Push every local post up to Cloudflare D1, upserting by `slug` (local wins).
+/// Returns the number of posts synced.
+#[tauri::command]
+pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, String> {
+    let posts = db::post_list(conn.inner()).await?;
+    let (client, config) = cf()?;
+    let mut synced = 0usize;
+    for post in posts {
+        cloudflare::d1_post_upsert(&client, &config, post).await?;
+        synced += 1;
+    }
+    Ok(synced)
 }
 
 // ─── Image staging ──────────────────────────────────────────────────────────

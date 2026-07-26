@@ -1,9 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, Plus, Search, Upload } from "lucide-react";
 import Link from "next/link";
-import { POSTS } from "@/lib/data";
 import { StatusDot } from "@/components/StatusDot";
 import { StatusPill } from "@/components/StatusPill";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -22,10 +21,75 @@ type UploadStatus =
   | { kind: "success"; title: string }
   | { kind: "error";   message: string };
 
+// Row shape the table renders.
+type Post = {
+  id: number;
+  title: string;
+  tags: string[];
+  status: "published" | "draft";
+  date: string;
+  views?: number;
+};
+
+// Subset of the `list_posts` command payload we actually use.
+type BackendPost = {
+  id: number;
+  title: string;
+  tags: string | null; // JSON-encoded string[]
+  published: boolean;
+  created_at: number; // Unix seconds
+};
+
+function toPost(p: BackendPost): Post {
+  let tags: string[] = [];
+  if (p.tags) {
+    try {
+      const parsed = JSON.parse(p.tags) as unknown;
+      if (Array.isArray(parsed)) tags = parsed.map(String);
+    } catch {
+      // leave tags empty on malformed JSON
+    }
+  }
+  return {
+    id: p.id,
+    title: p.title,
+    tags,
+    status: p.published ? "published" : "draft",
+    date: new Date(p.created_at * 1000).toISOString().slice(0, 10),
+  };
+}
+
 export default function PostsPage() {
   const [filter, setFilter]             = useState<FilterId>("all");
   const [search, setSearch]             = useState("");
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>({ kind: "idle" });
+
+  const [posts, setPosts]     = useState<Post[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Load posts from the local SQLite cache via the Tauri backend. No-ops in a
+  // plain browser (`pnpm dev`), where the Tauri API isn't available.
+  const loadPosts = useCallback(async () => {
+    const { invoke, isTauri } = await import("@tauri-apps/api/core");
+    if (!isTauri()) {
+      setLoading(false);
+      return;
+    }
+    try {
+      const rows = await invoke<BackendPost[]>("list_posts");
+      setPosts(rows.map(toPost));
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPosts();
+  }, [loadPosts]);
 
   const handleUploadArticle = async () => {
     setUploadStatus({ kind: "loading" });
@@ -33,6 +97,7 @@ export default function PostsPage() {
       const { invoke } = await import("@tauri-apps/api/core");
       const title = await invoke<string>("upload_article");
       setUploadStatus({ kind: "success", title });
+      void loadPosts(); // show the newly imported post
       setTimeout(() => setUploadStatus({ kind: "idle" }), 4000);
     } catch (err) {
       const msg = String(err);
@@ -45,7 +110,7 @@ export default function PostsPage() {
     }
   };
 
-  const visible = POSTS.filter((p) => {
+  const visible = posts.filter((p) => {
     const q = search.toLowerCase();
     const matchSearch =
       q === "" ||
@@ -56,9 +121,9 @@ export default function PostsPage() {
   });
 
   const tabs: { id: FilterId; label: string; count: number }[] = [
-    { id: "all",       label: "All",       count: POSTS.length },
-    { id: "published", label: "Published", count: POSTS.filter((p) => p.status === "published").length },
-    { id: "draft",     label: "Drafts",    count: POSTS.filter((p) => p.status === "draft").length },
+    { id: "all",       label: "All",       count: posts.length },
+    { id: "published", label: "Published", count: posts.filter((p) => p.status === "published").length },
+    { id: "draft",     label: "Drafts",    count: posts.filter((p) => p.status === "draft").length },
   ];
 
   return (
@@ -213,7 +278,13 @@ export default function PostsPage() {
           {visible.length === 0 && (
             <div className="bg-white dark:bg-[#161616] py-16 text-center">
               <p className="text-[13px] text-zinc-400 dark:text-zinc-600">
-                No posts match this filter.
+                {loading
+                  ? "Loading posts…"
+                  : loadError
+                    ? `Failed to load posts: ${loadError}`
+                    : posts.length === 0
+                      ? "No posts yet."
+                      : "No posts match this filter."}
               </p>
             </div>
           )}
@@ -221,7 +292,7 @@ export default function PostsPage() {
 
         {visible.length > 0 && (
           <p className="text-[11px] text-zinc-400 dark:text-zinc-600 px-1">
-            {visible.length} of {POSTS.length} posts
+            {visible.length} of {posts.length} posts
           </p>
         )}
       </div>

@@ -1,6 +1,7 @@
 import { Bell } from "lucide-react";
 import { Breadcrumb } from "./Breadcrumb";
 import { SidebarToggleBtn } from "./SidebarToggleBtn";
+import { SyncButton } from "./SyncButton";
 import { ThemeToggle } from "./ThemeToggle";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -24,6 +25,9 @@ export function Header() {
 
       {/* ── Right: action cluster ─────────────────────────────────────── */}
       <div className="flex items-center gap-0.5 ml-auto shrink-0">
+        {/* Sync to cloud */}
+        <SyncButton />
+
         {/* Notification bell */}
         <div className="relative">
           <Button
