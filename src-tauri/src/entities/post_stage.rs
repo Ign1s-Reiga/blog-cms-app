@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 /// The two editorial publish stages a post can be staged in.
 pub const DRAFT: &str = "draft";
 pub const PUBLISHED: &str = "published";
+/// A local edit that was applied to the post but whose sync to R2/D1 failed —
+/// the post is out of sync with the cloud and needs a retry.
+pub const SYNC_FAILED: &str = "sync_failed";
 
 /// Local-only staging table tracking each post's editorial publish stage
 /// (`"draft"` | `"published"`), keyed by the post's id.

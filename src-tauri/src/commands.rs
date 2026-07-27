@@ -376,8 +376,10 @@ pub async fn d1_delete_series(id: i32) -> Result<(), String> {
 
 fn validate_stage(stage: &str) -> Result<(), String> {
     match stage {
-        post_stage::DRAFT | post_stage::PUBLISHED => Ok(()),
-        other => Err(format!("Invalid stage `{other}` (expected `draft` or `published`)")),
+        post_stage::DRAFT | post_stage::PUBLISHED | post_stage::SYNC_FAILED => Ok(()),
+        other => Err(format!(
+            "Invalid stage `{other}` (expected `draft`, `published`, or `sync_failed`)"
+        )),
     }
 }
 
@@ -444,34 +446,68 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> Result<Po
     post.updated_at = now;
     let post = db::post_update(conn, post).await?;
 
-    // 2. Record the local staging stage.
-    let stage = if publish { post_stage::PUBLISHED } else { post_stage::DRAFT };
+    // 2. Push the change to Cloudflare D1.
+    let synced = match cf() {
+        Ok((client, config)) => cloudflare::d1_post_update(&client, &config, post.clone()).await,
+        Err(e) => Err(e),
+    };
+
+    // 3. Record the resulting stage: the intended draft/published on success, or
+    //    the sync-failed marker when the cloud push didn't complete.
+    let stage = if synced.is_ok() {
+        if publish { post_stage::PUBLISHED } else { post_stage::DRAFT }
+    } else {
+        post_stage::SYNC_FAILED
+    };
     db::stage_set(
         conn,
         post_stage::Model { post_id, stage: stage.to_string(), staged_at: now },
     )
     .await?;
 
-    // 3. Push the published state to Cloudflare D1. On failure the local stage
-    //    persists (unsynced), so a retry re-syncs.
-    let (client, config) = cf()?;
-    cloudflare::d1_post_update(&client, &config, post.clone()).await?;
-
-    Ok(post)
+    match synced {
+        Ok(()) => Ok(post),
+        Err(e) => Err(format!("post updated locally but cloud sync failed: {e}")),
+    }
 }
 
 // ─── Sync ───────────────────────────────────────────────────────────────────
 
 /// Push every local post up to Cloudflare D1, upserting by `slug` (local wins).
-/// Returns the number of posts synced.
+/// A post that fails to push is marked `sync_failed`; a successful push clears
+/// that back to its draft/published stage. Returns the number of posts synced;
+/// errors with a summary if any failed.
 #[tauri::command]
 pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, String> {
     let posts = db::post_list(conn.inner()).await?;
     let (client, config) = cf()?;
+    let now = now_ts();
+
     let mut synced = 0usize;
+    let mut failed = 0usize;
     for post in posts {
-        cloudflare::d1_post_upsert(&client, &config, post).await?;
-        synced += 1;
+        let post_id = post.id;
+        let published = post.published;
+        let stage = match cloudflare::d1_post_upsert(&client, &config, post).await {
+            Ok(()) => {
+                synced += 1;
+                if published { post_stage::PUBLISHED } else { post_stage::DRAFT }
+            }
+            Err(_) => {
+                failed += 1;
+                post_stage::SYNC_FAILED
+            }
+        };
+        // Best-effort stage update; don't abort the whole sync on a staging error.
+        let _ = db::stage_set(
+            conn.inner(),
+            post_stage::Model { post_id, stage: stage.to_string(), staged_at: now },
+        )
+        .await;
+    }
+
+    if failed > 0 {
+        return Err(format!("synced {synced}, {failed} failed to sync"));
     }
     Ok(synced)
 }
