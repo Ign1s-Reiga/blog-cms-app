@@ -512,6 +512,53 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, St
     Ok(synced)
 }
 
+// ─── Post content ───────────────────────────────────────────────────────────
+
+/// Read a post's Markdown body for the editor.
+///
+/// Prefers the local cache (`<app_data>/posts/<slug>.md`). If it isn't cached
+/// locally but exists on R2, it's downloaded and cached so the editor can open
+/// it offline next time. Returns an empty string when the post has no content
+/// yet (nothing local and nothing on R2), or when the cloud is unreachable.
+#[tauri::command]
+pub async fn read_post_markdown(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+) -> Result<String, String> {
+    let post = db::post_get(conn.inner(), id)
+        .await?
+        .ok_or_else(|| format!("post {id} not found"))?;
+
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .join("posts");
+    let local_path = dir.join(format!("{}.md", post.slug));
+
+    // 1. Local cache hit.
+    if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
+        return Ok(content);
+    }
+
+    // 2. Not cached locally — download from R2 if we can reach it.
+    let (client, config) = match cf() {
+        Ok(cc) => cc,
+        Err(_) => return Ok(String::new()), // offline / no credentials
+    };
+    let key = format!("posts/{}.md", post.slug);
+    match cloudflare::download_from_r2(&client, &config, &key).await? {
+        Some(content) => {
+            // Cache locally for next time (best effort).
+            let _ = tokio::fs::create_dir_all(&dir).await;
+            let _ = tokio::fs::write(&local_path, &content).await;
+            Ok(content)
+        }
+        None => Ok(String::new()),
+    }
+}
+
 // ─── Image staging ──────────────────────────────────────────────────────────
 
 /// A dropped image after it has been copied into the local assets directory.

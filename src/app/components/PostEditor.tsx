@@ -120,12 +120,52 @@ async function resolveAssetSrcs(html: string): Promise<string> {
   return out;
 }
 
+// Format a post's JSON `tags` column (e.g. `["a","b"]`) as the comma-separated
+// string the tags input expects.
+function parseTags(tags: string | null): string {
+  if (!tags) return "";
+  try {
+    const parsed = JSON.parse(tags) as unknown;
+    if (Array.isArray(parsed)) return parsed.map(String).join(", ");
+  } catch {
+    // ignore malformed JSON
+  }
+  return "";
+}
+
 // ─── PostEditor ───────────────────────────────────────────────────────────────
 
 export function PostEditor() {
   const [title, setTitle] = useState("");
   const [tags, setTags]   = useState("");
   const [body, setBody]   = useState("");
+
+  // When the editor is opened with an `?id=` in the URL, load that post's
+  // metadata and Markdown body. read_post_markdown downloads the file from R2
+  // into the local cache when it isn't already cached locally.
+  useEffect(() => {
+    const id = Number(new URLSearchParams(window.location.search).get("id"));
+    if (!id) return; // no id → new post
+    let cancelled = false;
+    (async () => {
+      const { invoke, isTauri } = await import("@tauri-apps/api/core");
+      if (!isTauri()) return;
+      try {
+        const post = await invoke<{ title: string; tags: string | null } | null>("get_post", { id });
+        if (post && !cancelled) {
+          setTitle(post.title);
+          setTags(parseTags(post.tags));
+        }
+        const md = await invoke<string>("read_post_markdown", { id });
+        if (!cancelled) setBody(md);
+      } catch (err) {
+        console.error("Failed to load post:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [mode, setMode] = useState<EditorMode>("write");
   const [preview, setPreview] = useState("");

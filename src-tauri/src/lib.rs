@@ -71,6 +71,8 @@ pub fn run() {
             commands::unpublish_post,
             // Sync
             commands::sync_posts,
+            // Post content
+            commands::read_post_markdown,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

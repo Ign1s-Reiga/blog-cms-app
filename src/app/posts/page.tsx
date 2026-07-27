@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, Plus, Search, Upload } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { StatusDot } from "@/components/StatusDot";
 import { StatusPill } from "@/components/StatusPill";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -60,6 +61,7 @@ function toPost(p: BackendPost): Post {
 }
 
 export default function PostsPage() {
+  const router = useRouter();
   const [filter, setFilter]             = useState<FilterId>("all");
   const [search, setSearch]             = useState("");
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>({ kind: "idle" });
@@ -239,6 +241,15 @@ export default function PostsPage() {
             {visible.map((post) => (
               <div
                 key={post.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => router.push(`/posts/edit?id=${post.id}`)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    router.push(`/posts/edit?id=${post.id}`);
+                  }
+                }}
                 className="group grid grid-cols-[1fr_auto_auto_auto] sm:grid-cols-[1fr_120px_90px_100px_80px] items-center gap-0 px-4 py-[10px] cursor-pointer hover:bg-zinc-50 dark:hover:bg-white/[0.02] transition-colors duration-100"
               >
                 <div className="flex items-center gap-2.5 min-w-0 pr-4">
