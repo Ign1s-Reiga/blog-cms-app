@@ -67,6 +67,41 @@ pub async fn upload_to_r2(
     Ok(())
 }
 
+/// Download an object's text from R2. Returns `Ok(None)` when the object doesn't
+/// exist (404).
+pub async fn download_from_r2(
+    client: &Client,
+    config: &CloudflareConfig,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/r2/buckets/{}/objects/{}",
+        config.account_id, config.r2_bucket, key
+    );
+
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", config.api_token))
+        .send()
+        .await
+        .map_err(|e| format!("R2 request failed: {e}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("R2 download error ({status}): {body}"));
+    }
+
+    let content = response
+        .text()
+        .await
+        .map_err(|e| format!("R2 read failed: {e}"))?;
+    Ok(Some(content))
+}
+
 // ─── D1 ───────────────────────────────────────────────────────────────────────
 //
 // D1 has no raw SQLite wire protocol, so Sea ORM can't connect to it directly.
