@@ -559,6 +559,106 @@ pub async fn read_post_markdown(
     }
 }
 
+/// Save a post from the editor: persist its metadata + Markdown locally, and —
+/// when `published` — upload the body to R2 and upsert the metadata to D1.
+///
+/// A new post (`id` is `None`) is created and its generated row is returned; an
+/// existing post is updated in place, preserving its slug, created date, excerpt
+/// and series membership. `tags` is a comma-separated string. A publish that
+/// can't reach the cloud leaves the post saved locally and staged `sync_failed`,
+/// returning an error.
+#[tauri::command]
+pub async fn save_post(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    id: Option<i32>,
+    title: String,
+    tags: String,
+    body: String,
+    published: bool,
+) -> Result<PostModel, String> {
+    let now = now_ts();
+
+    // Start from the existing row (preserving slug/created_at/series/excerpt) or
+    // build a fresh one for a new post.
+    let mut model = match id {
+        Some(id) => db::post_get(conn.inner(), id)
+            .await?
+            .ok_or_else(|| format!("post {id} not found"))?,
+        None => {
+            let slug = slugify(&title);
+            let slug = if slug.is_empty() { format!("post-{now}") } else { slug };
+            PostModel {
+                id: 0,
+                slug,
+                title: String::new(),
+                excerpt: None,
+                tags: None,
+                published: false,
+                published_at: None,
+                series_id: None,
+                series_order: None,
+                created_at: now,
+                updated_at: now,
+            }
+        }
+    };
+
+    // Apply the editor's fields.
+    model.title = title;
+    model.tags = Some(tags_to_json(&tags));
+    model.published = published;
+    model.published_at = if published { model.published_at.or(Some(now)) } else { None };
+    model.updated_at = now;
+
+    // 1. Persist metadata locally.
+    let saved = match id {
+        Some(_) => db::post_update(conn.inner(), model).await?,
+        None => db::post_create(conn.inner(), model).await?,
+    };
+
+    // 2. Write the Markdown body to the local cache.
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .join("posts");
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    tokio::fs::write(dir.join(format!("{}.md", saved.slug)), &body)
+        .await
+        .map_err(|e| format!("Failed to write local markdown: {e}"))?;
+
+    // 3. Draft → local only. Publish → push the body to R2 and metadata to D1.
+    if !published {
+        db::stage_set(
+            conn.inner(),
+            post_stage::Model { post_id: saved.id, stage: post_stage::DRAFT.to_string(), staged_at: now },
+        )
+        .await?;
+        return Ok(saved);
+    }
+
+    let synced = async {
+        let (client, config) = cf()?;
+        cloudflare::upload_to_r2(&client, &config, &format!("posts/{}.md", saved.slug), &body).await?;
+        cloudflare::d1_post_upsert(&client, &config, saved.clone()).await?;
+        Ok::<(), String>(())
+    }
+    .await;
+
+    let stage = if synced.is_ok() { post_stage::PUBLISHED } else { post_stage::SYNC_FAILED };
+    db::stage_set(
+        conn.inner(),
+        post_stage::Model { post_id: saved.id, stage: stage.to_string(), staged_at: now },
+    )
+    .await?;
+
+    match synced {
+        Ok(()) => Ok(saved),
+        Err(e) => Err(format!("post saved locally but publish sync failed: {e}")),
+    }
+}
+
 // ─── Image staging ──────────────────────────────────────────────────────────
 
 /// A dropped image after it has been copied into the local assets directory.
