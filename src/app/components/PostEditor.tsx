@@ -133,6 +133,13 @@ function parseTags(tags: string | null): string {
   return "";
 }
 
+// Editor save/publish status, for button feedback.
+type SaveState =
+  | { kind: "idle" }
+  | { kind: "saving"; publish: boolean }
+  | { kind: "saved"; publish: boolean }
+  | { kind: "error"; message: string };
+
 // ─── PostEditor ───────────────────────────────────────────────────────────────
 
 export function PostEditor() {
@@ -140,12 +147,16 @@ export function PostEditor() {
   const [tags, setTags]   = useState("");
   const [body, setBody]   = useState("");
 
+  const [postId, setPostId]       = useState<number | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>({ kind: "idle" });
+
   // When the editor is opened with an `?id=` in the URL, load that post's
   // metadata and Markdown body. read_post_markdown downloads the file from R2
   // into the local cache when it isn't already cached locally.
   useEffect(() => {
     const id = Number(new URLSearchParams(window.location.search).get("id"));
     if (!id) return; // no id → new post
+    setPostId(id);
     let cancelled = false;
     (async () => {
       const { invoke, isTauri } = await import("@tauri-apps/api/core");
@@ -166,6 +177,32 @@ export function PostEditor() {
       cancelled = true;
     };
   }, []);
+
+  // Save the post: `publish=false` keeps it a local draft; `publish=true` also
+  // pushes the body to R2 and metadata to D1 (see the `save_post` command).
+  const handleSave = async (publish: boolean) => {
+    if (saveState.kind === "saving") return;
+    const { invoke, isTauri } = await import("@tauri-apps/api/core");
+    if (!isTauri()) return;
+    setSaveState({ kind: "saving", publish });
+    try {
+      const saved = await invoke<{ id: number }>("save_post", {
+        id: postId,
+        title,
+        tags,
+        body,
+        published: publish,
+      });
+      setPostId(saved.id);
+      // Point the URL at the saved post so a refresh / next save targets it.
+      window.history.replaceState(null, "", `/posts/edit?id=${saved.id}`);
+      setSaveState({ kind: "saved", publish });
+      setTimeout(() => setSaveState({ kind: "idle" }), 3000);
+    } catch (err) {
+      setSaveState({ kind: "error", message: String(err) });
+      setTimeout(() => setSaveState({ kind: "idle" }), 6000);
+    }
+  };
 
   const [mode, setMode] = useState<EditorMode>("write");
   const [preview, setPreview] = useState("");
@@ -621,19 +658,37 @@ export function PostEditor() {
 
         {/* Actions */}
         <div className="flex items-center gap-2">
+          {saveState.kind === "saved" && (
+            <span className="text-[12px] font-medium text-emerald-600 dark:text-emerald-400">
+              {saveState.publish ? "Published" : "Saved"}
+            </span>
+          )}
+          {saveState.kind === "error" && (
+            <span
+              title={saveState.message}
+              className="max-w-[220px] truncate text-[12px] font-medium text-red-600 dark:text-red-400"
+            >
+              {saveState.message}
+            </span>
+          )}
+
           <Button
             variant="outline"
             size="sm"
+            onClick={() => handleSave(false)}
+            disabled={saveState.kind === "saving"}
             className="h-[28px] px-3 rounded-[5px] text-[12px] font-semibold text-zinc-600 dark:text-zinc-400"
           >
-            Save Draft
+            {saveState.kind === "saving" && !saveState.publish ? "Saving…" : "Save Draft"}
           </Button>
 
           <Button
             size="sm"
+            onClick={() => handleSave(true)}
+            disabled={saveState.kind === "saving"}
             className="h-[28px] px-3 rounded-[5px] text-[12px] font-semibold shadow-[0_1px_2px_rgba(0,0,0,0.12)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.18)] dark:hover:shadow-[0_2px_8px_rgba(0,0,0,0.5)]"
           >
-            Publish
+            {saveState.kind === "saving" && saveState.publish ? "Publishing…" : "Publish"}
           </Button>
         </div>
       </div>
