@@ -1,8 +1,19 @@
-import type { Post } from "../lib/data";
-import { StatusDot } from "./StatusDot";
+import { StatusDot, type PostStatus } from "./StatusDot";
 import { Badge } from "@/components/ui/badge";
 
-export function StatusPill({ status }: { status: Post["status"] }) {
+export function StatusPill({ status }: { status: PostStatus }) {
+  if (status === "failed") {
+    return (
+      <Badge
+        variant="outline"
+        className="gap-[5px] px-[7px] py-[3px] rounded-full text-[11px] font-semibold bg-red-50 text-red-700 dark:bg-red-500/[0.12] dark:text-red-400 border-red-200/80 dark:border-red-500/20"
+      >
+        <StatusDot status="failed" />
+        Sync failed
+      </Badge>
+    );
+  }
+
   return status === "published" ? (
     <Badge
       variant="outline"
