@@ -41,6 +41,43 @@ fn tags_to_json(csv: &str) -> String {
     serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// MIME type to send when uploading a file with this (lowercase) extension.
+fn content_type_for(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Unique `assets/<file>` references in a Markdown body — the local image paths
+/// the editor inserts on drag-and-drop.
+fn extract_asset_refs(body: &str) -> Vec<String> {
+    let mut refs: Vec<String> = Vec::new();
+    let mut rest = body;
+    while let Some(pos) = rest.find("assets/") {
+        let after = &rest[pos..];
+        let end = after
+            .find(|c: char| c == ')' || c == ']' || c == '"' || c == '\'' || c.is_whitespace())
+            .unwrap_or(after.len());
+        let r = &after[..end];
+        if r.len() > "assets/".len() && !refs.iter().any(|x| x == r) {
+            refs.push(r.to_string());
+        }
+        rest = &after[end..];
+    }
+    refs
+}
+
 // ─── Frontmatter parser ───────────────────────────────────────────────────────
 
 struct Frontmatter {
@@ -638,9 +675,27 @@ pub async fn save_post(
         return Ok(saved);
     }
 
+    let assets_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .join("assets");
+
     let synced = async {
         let (client, config) = cf()?;
+        // Body → R2.
         cloudflare::upload_to_r2(&client, &config, &format!("posts/{}.md", saved.slug), &body).await?;
+        // Referenced local images → R2 under the same key the Markdown uses, so
+        // the relative `assets/…` links resolve against the bucket.
+        for r in extract_asset_refs(&body) {
+            let file_name = r.strip_prefix("assets/").unwrap_or(&r);
+            if let Ok(bytes) = tokio::fs::read(assets_dir.join(file_name)).await {
+                let ext = file_name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+                cloudflare::upload_bytes_to_r2(&client, &config, &r, bytes, content_type_for(&ext))
+                    .await?;
+            }
+        }
+        // Metadata → D1.
         cloudflare::d1_post_upsert(&client, &config, saved.clone()).await?;
         Ok::<(), String>(())
     }
@@ -714,4 +769,128 @@ pub async fn stage_image(app: tauri::AppHandle, src_path: String) -> Result<Stag
         .to_string();
 
     Ok(StagedImage { rel: format!("assets/{file_name}"), name })
+}
+
+// ─── Media library (R2 + local cache) ─────────────────────────────────────────
+
+/// A media object stored in R2, cached locally for display.
+#[derive(Serialize)]
+pub struct MediaItem {
+    /// R2 key, also the local-relative cache path, e.g. `"media/<uuid>.png"`.
+    pub key: String,
+    /// The key's last segment.
+    pub name: String,
+    /// Size in bytes.
+    pub size: u64,
+}
+
+/// Media extensions accepted by the uploader.
+const MEDIA_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico", "mp4", "webm", "mov",
+];
+
+/// Pick a media file, upload it to R2 under `media/<uuid>.<ext>`, and cache it
+/// locally. Returns the new item, or `Err("cancelled")` when the dialog closes.
+#[tauri::command]
+pub async fn upload_media(app: tauri::AppHandle) -> Result<MediaItem, String> {
+    let app_clone = app.clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        app_clone
+            .dialog()
+            .file()
+            .add_filter("Media", MEDIA_EXTS)
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|e| format!("Dialog thread panicked: {e}"))?;
+
+    let src = match picked {
+        None => return Err("cancelled".to_string()),
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        Some(tauri_plugin_dialog::FilePath::Path(p)) => p,
+        #[allow(unreachable_patterns)]
+        Some(_) => return Err("Unsupported path format on this platform".to_string()),
+    };
+
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|e| MEDIA_EXTS.contains(&e.as_str()))
+        .ok_or_else(|| "Unsupported media type".to_string())?;
+
+    let bytes = tokio::fs::read(&src)
+        .await
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+    let size = bytes.len() as u64;
+
+    let file_name = format!("{}.{ext}", uuid::Uuid::new_v4());
+    let key = format!("media/{file_name}");
+
+    // Upload to R2.
+    let (client, config) = cf()?;
+    cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes.clone(), content_type_for(&ext))
+        .await?;
+
+    // Cache locally (best effort).
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .join("media");
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    let _ = tokio::fs::write(dir.join(&file_name), &bytes).await;
+
+    Ok(MediaItem { key, name: file_name, size })
+}
+
+/// List media objects in R2 (prefix `media/`), caching any not already local.
+#[tauri::command]
+pub async fn list_media(app: tauri::AppHandle) -> Result<Vec<MediaItem>, String> {
+    let (client, config) = cf()?;
+    let objects = cloudflare::list_r2(&client, &config, "media/").await?;
+
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .join("media");
+    let _ = tokio::fs::create_dir_all(&dir).await;
+
+    let mut items = Vec::new();
+    for obj in objects {
+        let file_name = match obj.key.strip_prefix("media/") {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => continue, // skip a folder marker, if any
+        };
+        // Ensure a local cached copy exists for display.
+        let local = dir.join(&file_name);
+        if tokio::fs::metadata(&local).await.is_err() {
+            if let Ok(Some(bytes)) =
+                cloudflare::download_bytes_from_r2(&client, &config, &obj.key).await
+            {
+                let _ = tokio::fs::write(&local, &bytes).await;
+            }
+        }
+        items.push(MediaItem { key: obj.key, name: file_name, size: obj.size });
+    }
+    Ok(items)
+}
+
+/// Delete a media object from R2 and its local cache.
+#[tauri::command]
+pub async fn delete_media(app: tauri::AppHandle, key: String) -> Result<(), String> {
+    let (client, config) = cf()?;
+    cloudflare::delete_from_r2(&client, &config, &key).await?;
+
+    if let Some(file_name) = key.strip_prefix("media/") {
+        let local = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+            .join("media")
+            .join(file_name);
+        let _ = tokio::fs::remove_file(local).await;
+    }
+    Ok(())
 }

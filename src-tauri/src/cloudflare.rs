@@ -4,7 +4,7 @@ use sea_orm::{
     ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QueryTrait, Value, Values,
 };
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::entities::{post, series};
 
@@ -37,23 +37,26 @@ impl CloudflareConfig {
 
 // ─── R2 ───────────────────────────────────────────────────────────────────────
 
-/// Upload `content` to R2 at the given object `key` (e.g. `"posts/uuid.md"`).
-pub async fn upload_to_r2(
+fn r2_object_url(config: &CloudflareConfig, key: &str) -> String {
+    format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/r2/buckets/{}/objects/{}",
+        config.account_id, config.r2_bucket, key
+    )
+}
+
+/// Upload raw bytes to R2 at `key` with the given `content_type`.
+pub async fn upload_bytes_to_r2(
     client: &Client,
     config: &CloudflareConfig,
     key: &str,
-    content: &str,
+    bytes: Vec<u8>,
+    content_type: &str,
 ) -> Result<(), String> {
-    let url = format!(
-        "https://api.cloudflare.com/client/v4/accounts/{}/r2/buckets/{}/objects/{}",
-        config.account_id, config.r2_bucket, key
-    );
-
     let response = client
-        .put(&url)
+        .put(r2_object_url(config, key))
         .header("Authorization", format!("Bearer {}", config.api_token))
-        .header("Content-Type", "text/markdown; charset=utf-8")
-        .body(content.to_owned())
+        .header("Content-Type", content_type)
+        .body(bytes)
         .send()
         .await
         .map_err(|e| format!("R2 request failed: {e}"))?;
@@ -63,24 +66,34 @@ pub async fn upload_to_r2(
         let body = response.text().await.unwrap_or_default();
         return Err(format!("R2 upload error ({status}): {body}"));
     }
-
     Ok(())
 }
 
-/// Download an object's text from R2. Returns `Ok(None)` when the object doesn't
-/// exist (404).
-pub async fn download_from_r2(
+/// Upload UTF-8 text (e.g. a post's Markdown) to R2.
+pub async fn upload_to_r2(
     client: &Client,
     config: &CloudflareConfig,
     key: &str,
-) -> Result<Option<String>, String> {
-    let url = format!(
-        "https://api.cloudflare.com/client/v4/accounts/{}/r2/buckets/{}/objects/{}",
-        config.account_id, config.r2_bucket, key
-    );
+    content: &str,
+) -> Result<(), String> {
+    upload_bytes_to_r2(
+        client,
+        config,
+        key,
+        content.as_bytes().to_vec(),
+        "text/markdown; charset=utf-8",
+    )
+    .await
+}
 
+/// Download an object's bytes from R2. Returns `Ok(None)` when it doesn't exist.
+pub async fn download_bytes_from_r2(
+    client: &Client,
+    config: &CloudflareConfig,
+    key: &str,
+) -> Result<Option<Vec<u8>>, String> {
     let response = client
-        .get(&url)
+        .get(r2_object_url(config, key))
         .header("Authorization", format!("Bearer {}", config.api_token))
         .send()
         .await
@@ -95,11 +108,101 @@ pub async fn download_from_r2(
         return Err(format!("R2 download error ({status}): {body}"));
     }
 
-    let content = response
-        .text()
+    let bytes = response
+        .bytes()
         .await
         .map_err(|e| format!("R2 read failed: {e}"))?;
-    Ok(Some(content))
+    Ok(Some(bytes.to_vec()))
+}
+
+/// Download an object's text from R2. Returns `Ok(None)` when it doesn't exist.
+pub async fn download_from_r2(
+    client: &Client,
+    config: &CloudflareConfig,
+    key: &str,
+) -> Result<Option<String>, String> {
+    match download_bytes_from_r2(client, config, key).await? {
+        Some(bytes) => Ok(Some(
+            String::from_utf8(bytes).map_err(|e| format!("R2 object is not valid UTF-8: {e}"))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Delete an object from R2. A missing object (404) is treated as success.
+pub async fn delete_from_r2(
+    client: &Client,
+    config: &CloudflareConfig,
+    key: &str,
+) -> Result<(), String> {
+    let response = client
+        .delete(r2_object_url(config, key))
+        .header("Authorization", format!("Bearer {}", config.api_token))
+        .send()
+        .await
+        .map_err(|e| format!("R2 request failed: {e}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND || response.status().is_success() {
+        return Ok(());
+    }
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Err(format!("R2 delete error ({status}): {body}"))
+}
+
+/// An object listed from R2.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct R2Object {
+    pub key: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+#[derive(Deserialize)]
+struct R2ListResponse {
+    success: bool,
+    #[serde(default)]
+    errors: Vec<D1Error>,
+    #[serde(default)]
+    result: Vec<R2Object>,
+}
+
+/// List objects in R2 whose key starts with `prefix` (e.g. `"media/"`).
+pub async fn list_r2(
+    client: &Client,
+    config: &CloudflareConfig,
+    prefix: &str,
+) -> Result<Vec<R2Object>, String> {
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/r2/buckets/{}/objects",
+        config.account_id, config.r2_bucket
+    );
+
+    let response = client
+        .get(&url)
+        .query(&[("prefix", prefix)])
+        .header("Authorization", format!("Bearer {}", config.api_token))
+        .send()
+        .await
+        .map_err(|e| format!("R2 request failed: {e}"))?;
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("R2 list error ({status}): {text}"));
+    }
+
+    let parsed: R2ListResponse =
+        serde_json::from_str(&text).map_err(|e| format!("R2 list parse error: {e}"))?;
+    if !parsed.success {
+        let msg = parsed
+            .errors
+            .first()
+            .map(|e| e.message.as_str())
+            .unwrap_or("unknown R2 error");
+        return Err(format!("R2 list failed: {msg}"));
+    }
+    Ok(parsed.result)
 }
 
 // ─── D1 ───────────────────────────────────────────────────────────────────────
