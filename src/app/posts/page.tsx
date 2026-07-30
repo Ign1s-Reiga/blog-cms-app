@@ -14,7 +14,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type FilterId = "all" | "published" | "draft";
+type FilterId = "all" | "published" | "draft" | "failed";
 
 type UploadStatus =
   | { kind: "idle" }
@@ -28,6 +28,7 @@ type Post = {
   title: string;
   tags: string[];
   status: "published" | "draft";
+  syncFailed: boolean; // latest local edit failed to sync to R2/D1
   date: string;
   views?: number;
 };
@@ -56,6 +57,7 @@ function toPost(p: BackendPost): Post {
     title: p.title,
     tags,
     status: p.published ? "published" : "draft",
+    syncFailed: false,
     date: new Date(p.created_at * 1000).toISOString().slice(0, 10),
   };
 }
@@ -80,7 +82,17 @@ export default function PostsPage() {
     }
     try {
       const rows = await invoke<BackendPost[]>("list_posts");
-      setPosts(rows.map(toPost));
+      // Which posts are staged sync_failed (best-effort — doesn't block the list).
+      let failed = new Set<number>();
+      try {
+        const failedRows = await invoke<BackendPost[]>("list_posts_by_stage", {
+          stage: "sync_failed",
+        });
+        failed = new Set(failedRows.map((p) => p.id));
+      } catch {
+        // ignore staging query errors
+      }
+      setPosts(rows.map((p) => ({ ...toPost(p), syncFailed: failed.has(p.id) })));
       setLoadError(null);
     } catch (err) {
       setLoadError(String(err));
@@ -118,7 +130,12 @@ export default function PostsPage() {
       q === "" ||
       p.title.toLowerCase().includes(q) ||
       p.tags.some((t) => t.includes(q));
-    const matchFilter = filter === "all" || p.status === filter;
+    const matchFilter =
+      filter === "all"
+        ? true
+        : filter === "failed"
+          ? p.syncFailed
+          : p.status === filter;
     return matchSearch && matchFilter;
   });
 
@@ -126,6 +143,7 @@ export default function PostsPage() {
     { id: "all",       label: "All",       count: posts.length },
     { id: "published", label: "Published", count: posts.filter((p) => p.status === "published").length },
     { id: "draft",     label: "Drafts",    count: posts.filter((p) => p.status === "draft").length },
+    { id: "failed",    label: "Failed",    count: posts.filter((p) => p.syncFailed).length },
   ];
 
   return (
@@ -253,7 +271,7 @@ export default function PostsPage() {
                 className="group grid grid-cols-[1fr_auto_auto_auto] sm:grid-cols-[1fr_120px_90px_100px_80px] items-center gap-0 px-4 py-[10px] cursor-pointer hover:bg-zinc-50 dark:hover:bg-white/[0.02] transition-colors duration-100"
               >
                 <div className="flex items-center gap-2.5 min-w-0 pr-4">
-                  <StatusDot status={post.status} />
+                  <StatusDot status={post.syncFailed ? "failed" : post.status} />
                   <span className="text-[13px] font-medium text-zinc-800 dark:text-zinc-200 truncate group-hover:text-zinc-900 dark:group-hover:text-white transition-colors duration-100">
                     {post.title}
                   </span>
@@ -272,7 +290,7 @@ export default function PostsPage() {
                 </div>
 
                 <div>
-                  <StatusPill status={post.status} />
+                  <StatusPill status={post.syncFailed ? "failed" : post.status} />
                 </div>
 
                 <span className="hidden sm:block text-[11px] font-mono tracking-tight text-zinc-400 dark:text-zinc-600">
