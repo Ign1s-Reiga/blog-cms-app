@@ -23,18 +23,16 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
     setBusy(true);
     setError(null);
     try {
+      // Save and proceed. We don't gate login on Cloudflare's token-verify
+      // endpoint — it rejects some valid, narrowly-scoped/account-owned tokens.
+      // A bad token surfaces as a clear error when the app talks to R2/D1.
       await invoke("save_credentials", {
         accountId,
         apiToken,
         r2Bucket,
         d1DatabaseId: d1Id,
       });
-      const status = await invoke<{ authenticated: boolean }>("session_status");
-      if (status.authenticated) {
-        onAuthed();
-      } else {
-        setError("Saved, but the API token didn't verify. Check the token and try again.");
-      }
+      onAuthed();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -43,10 +41,15 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
   };
 
   return (
-    <div className="flex h-screen items-center justify-center bg-zinc-50 dark:bg-[#0a0a0a] p-6">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Sign in to Cloudflare"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-6"
+    >
       <form
         onSubmit={submit}
-        className="w-full max-w-[380px] space-y-4 rounded-[10px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616] p-6 shadow-sm"
+        className="w-full max-w-[380px] space-y-4 rounded-[10px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616] p-6 shadow-xl"
       >
         <div className="space-y-1">
           <h1 className="text-[16px] font-semibold text-zinc-900 dark:text-zinc-50">

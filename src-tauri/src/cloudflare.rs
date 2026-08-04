@@ -24,17 +24,6 @@ pub struct CloudflareConfig {
     pub d1_database_id: String,
 }
 
-/// Verify a Cloudflare API token is valid — the login "session" check.
-pub async fn verify_token(client: &Client, api_token: &str) -> Result<bool, String> {
-    let response = client
-        .get("https://api.cloudflare.com/client/v4/user/tokens/verify")
-        .header("Authorization", format!("Bearer {api_token}"))
-        .send()
-        .await
-        .map_err(|e| format!("Token verify request failed: {e}"))?;
-    Ok(response.status().is_success())
-}
-
 impl CloudflareConfig {
     pub fn from_env() -> Result<Self, String> {
         let missing = |name: &str| format!("Environment variable `{}` is not set", name);

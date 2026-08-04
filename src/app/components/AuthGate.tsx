@@ -19,7 +19,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     }
     setPhase("checking");
     try {
-      const status = await invoke<{ authenticated: boolean }>("session_status");
+      // Never sit on "Checking session" — if the backend is slow/unavailable,
+      // fall back to the login modal after a few seconds.
+      const status = await Promise.race([
+        invoke<{ authenticated: boolean }>("session_status"),
+        new Promise<{ authenticated: boolean }>((_, reject) =>
+          setTimeout(() => reject(new Error("session check timed out")), 4000),
+        ),
+      ]);
       setPhase(status.authenticated ? "authed" : "unauthed");
     } catch {
       setPhase("unauthed");
@@ -41,8 +48,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     );
   }
 
+  // No session → render the app behind a blocking login modal.
   if (phase === "unauthed") {
-    return <LoginScreen onAuthed={() => setPhase("authed")} />;
+    return (
+      <>
+        {children}
+        <LoginScreen onAuthed={() => setPhase("authed")} />
+      </>
+    );
   }
 
   return <>{children}</>;

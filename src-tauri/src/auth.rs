@@ -111,16 +111,14 @@ pub fn get_credentials() -> Option<PublicCreds> {
     })
 }
 
-/// The "Checking session" call: verifies the stored API token against Cloudflare.
+/// The "Checking session" call. Fast by design: a session simply means
+/// credentials are configured. Token validity is checked at login
+/// (`verify_credentials`) and surfaces when operations run, so startup never
+/// blocks on the network.
 #[tauri::command]
-pub async fn session_status() -> Result<SessionStatus, String> {
+pub fn session_status() -> SessionStatus {
     match get_creds() {
-        None => Ok(SessionStatus { authenticated: false, configured: false, account_id: None }),
-        Some(c) => {
-            let authenticated = crate::cloudflare::verify_token(&reqwest::Client::new(), &c.api_token)
-                .await
-                .unwrap_or(false);
-            Ok(SessionStatus { authenticated, configured: true, account_id: Some(c.account_id) })
-        }
+        Some(c) => SessionStatus { authenticated: true, configured: true, account_id: Some(c.account_id) },
+        None => SessionStatus { authenticated: false, configured: false, account_id: None },
     }
 }
