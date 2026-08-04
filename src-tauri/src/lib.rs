@@ -74,6 +74,10 @@ pub fn run() {
             // Post content
             commands::read_post_markdown,
             commands::save_post,
+            // Media library
+            commands::upload_media,
+            commands::list_media,
+            commands::delete_media,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
