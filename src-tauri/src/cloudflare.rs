@@ -16,11 +16,23 @@ use crate::entities::{post, series};
 ///   CF_API_TOKEN       — API token with R2:Edit and D1:Edit permissions
 ///   CF_R2_BUCKET       — R2 bucket name
 ///   CF_D1_DATABASE_ID  — D1 database ID (UUID from the dashboard)
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CloudflareConfig {
     pub account_id:    String,
     pub api_token:     String,
     pub r2_bucket:     String,
     pub d1_database_id: String,
+}
+
+/// Verify a Cloudflare API token is valid — the login "session" check.
+pub async fn verify_token(client: &Client, api_token: &str) -> Result<bool, String> {
+    let response = client
+        .get("https://api.cloudflare.com/client/v4/user/tokens/verify")
+        .header("Authorization", format!("Bearer {api_token}"))
+        .send()
+        .await
+        .map_err(|e| format!("Token verify request failed: {e}"))?;
+    Ok(response.status().is_success())
 }
 
 impl CloudflareConfig {

@@ -190,8 +190,7 @@ pub async fn upload_article(
     let r2_key = format!("posts/{slug}.md");
 
     // ── 5. Load Cloudflare credentials ───────────────────────────────────────
-    let config = CloudflareConfig::from_env()?;
-    let client = reqwest::Client::new();
+    let (client, config) = cf()?;
 
     // ── 6. Upload to R2 ───────────────────────────────────────────────────────
     cloudflare::upload_to_r2(&client, &config, &r2_key, &content).await?;
@@ -236,9 +235,10 @@ pub async fn upload_article(
 // so create ignores any incoming id and D1 creates return the new row id.
 // `created_at` / `updated_at` are stamped server-side here.
 
-/// A reqwest client plus credentials, built per call from the environment.
+/// A reqwest client plus the signed-in Cloudflare credentials.
 fn cf() -> Result<(reqwest::Client, CloudflareConfig), String> {
-    Ok((reqwest::Client::new(), CloudflareConfig::from_env()?))
+    let config = crate::auth::get_creds().ok_or_else(|| "Not signed in to Cloudflare".to_string())?;
+    Ok((reqwest::Client::new(), config))
 }
 
 // ── Posts: local SQLite ─────────────────────────────────────────────────────────
