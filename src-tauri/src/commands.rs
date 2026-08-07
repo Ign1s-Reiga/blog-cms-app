@@ -41,6 +41,12 @@ fn tags_to_json(csv: &str) -> String {
     serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// A strict, filesystem-safe slug: non-empty, only lowercase-friendly
+/// alphanumerics plus `-`/`_` (no path separators, dots, or `..`).
+fn is_safe_slug(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// MIME type to send when uploading a file with this (lowercase) extension.
 fn content_type_for(ext: &str) -> &'static str {
     match ext {
@@ -551,28 +557,29 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, St
 
 // ─── Post content ───────────────────────────────────────────────────────────
 
-/// Read a post's Markdown body for the editor.
+/// Read a post's Markdown body (by slug) for the editor.
 ///
 /// Prefers the local cache (`<app_data>/posts/<slug>.md`). If it isn't cached
 /// locally but exists on R2, it's downloaded and cached so the editor can open
 /// it offline next time. Returns an empty string when the post has no content
 /// yet (nothing local and nothing on R2), or when the cloud is unreachable.
+///
+/// Keyed by slug (not id) so it works for posts sourced from D1, whose ids don't
+/// match the local cache.
 #[tauri::command]
-pub async fn read_post_markdown(
-    app: tauri::AppHandle,
-    conn: State<'_, DatabaseConnection>,
-    id: i32,
-) -> Result<String, String> {
-    let post = db::post_get(conn.inner(), id)
-        .await?
-        .ok_or_else(|| format!("post {id} not found"))?;
+pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> Result<String, String> {
+    // The slug builds a local file path and an R2 key, so reject anything that
+    // isn't a strict slug (guards against path traversal / injection).
+    if !is_safe_slug(&slug) {
+        return Err(format!("Invalid post slug: {slug}"));
+    }
 
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
         .join("posts");
-    let local_path = dir.join(format!("{}.md", post.slug));
+    let local_path = dir.join(format!("{slug}.md"));
 
     // 1. Local cache hit.
     if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
@@ -584,7 +591,7 @@ pub async fn read_post_markdown(
         Ok(cc) => cc,
         Err(_) => return Ok(String::new()), // offline / no credentials
     };
-    let key = format!("posts/{}.md", post.slug);
+    let key = format!("posts/{slug}.md");
     match cloudflare::download_from_r2(&client, &config, &key).await? {
         Some(content) => {
             // Cache locally for next time (best effort).

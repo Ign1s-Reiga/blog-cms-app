@@ -81,7 +81,8 @@ export default function PostsPage() {
       return;
     }
     try {
-      const rows = await invoke<BackendPost[]>("list_posts");
+      // The connected account's posts, from D1.
+      const rows = await invoke<BackendPost[]>("d1_list_posts");
       // Which posts are staged sync_failed (best-effort — doesn't block the list).
       let failed = new Set<number>();
       try {

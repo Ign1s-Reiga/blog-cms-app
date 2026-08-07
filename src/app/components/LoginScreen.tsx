@@ -4,6 +4,9 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
+// D1 database ids are UUIDs; the API rejects anything else.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 // Full-screen Cloudflare credentials form shown when there's no valid session.
 export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
   const [accountId, setAccountId] = useState("");
@@ -18,6 +21,10 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!ready || busy) return;
+    if (!UUID_RE.test(d1Id.trim())) {
+      setError("D1 Database ID must be the database's UUID (8-4-4-4-12 hex) — not its name.");
+      return;
+    }
     const { invoke, isTauri } = await import("@tauri-apps/api/core");
     if (!isTauri()) return;
     setBusy(true);
@@ -56,8 +63,8 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
             Connect to Cloudflare
           </h1>
           <p className="text-[12px] text-zinc-500 dark:text-zinc-400">
-            Enter your Cloudflare credentials to use R2 and D1. They&rsquo;re stored locally on this
-            device.
+            Enter your Cloudflare credentials to use R2 and D1. Your API token is kept in your
+            device&rsquo;s keychain.
           </p>
         </div>
 

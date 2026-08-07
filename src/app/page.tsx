@@ -95,7 +95,8 @@ export default function DashboardPage() {
       return;
     }
     try {
-      const rows = await invoke<BackendPost[]>("list_posts");
+      // The connected account's posts, from D1.
+      const rows = await invoke<BackendPost[]>("d1_list_posts");
       setPosts(rows.map(toPost));
     } catch (err) {
       console.error("Failed to load posts:", err);
