@@ -47,6 +47,11 @@ fn is_safe_slug(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// A safe single path segment for the local media cache: no separators or `..`.
+fn is_safe_file_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..")
+}
+
 /// MIME type to send when uploading a file with this (lowercase) extension.
 fn content_type_for(ext: &str) -> &'static str {
     match ext {
@@ -891,13 +896,16 @@ pub async fn delete_media(app: tauri::AppHandle, key: String) -> Result<(), Stri
     cloudflare::delete_from_r2(&client, &config, &key).await?;
 
     if let Some(file_name) = key.strip_prefix("media/") {
-        let local = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
-            .join("media")
-            .join(file_name);
-        let _ = tokio::fs::remove_file(local).await;
+        // Only touch the local cache for a safe single filename (no traversal).
+        if is_safe_file_name(file_name) {
+            let local = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+                .join("media")
+                .join(file_name);
+            let _ = tokio::fs::remove_file(local).await;
+        }
     }
     Ok(())
 }
