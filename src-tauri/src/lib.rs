@@ -1,3 +1,4 @@
+mod auth;
 mod cloudflare;
 mod commands;
 mod db;
@@ -33,10 +34,25 @@ pub fn run() {
 
             app.manage(conn);
 
+            // Wire up the OS keychain before reading credentials so the API
+            // token can be loaded from (and saved to) secure storage.
+            auth::init_keystore();
+
+            // Load the stored Cloudflare credentials (falling back to env vars)
+            // into the process global used by the cloud commands.
+            let initial_creds =
+                auth::load_from_disk(&handle).or_else(|| cloudflare::CloudflareConfig::from_env().ok());
+            auth::set_creds(initial_creds);
+
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            // Auth / session
+            auth::save_credentials,
+            auth::clear_credentials,
+            auth::get_credentials,
+            auth::session_status,
             commands::upload_article,
             commands::stage_image,
             // Posts — local SQLite
@@ -71,6 +87,7 @@ pub fn run() {
             commands::unpublish_post,
             // Sync
             commands::sync_posts,
+            commands::sync_posts_from_cloud,
             // Post content
             commands::read_post_markdown,
             commands::save_post,

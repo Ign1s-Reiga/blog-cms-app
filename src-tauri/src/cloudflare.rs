@@ -16,6 +16,7 @@ use crate::entities::{post, series};
 ///   CF_API_TOKEN       — API token with R2:Edit and D1:Edit permissions
 ///   CF_R2_BUCKET       — R2 bucket name
 ///   CF_D1_DATABASE_ID  — D1 database ID (UUID from the dashboard)
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CloudflareConfig {
     pub account_id:    String,
     pub api_token:     String,

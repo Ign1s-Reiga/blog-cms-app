@@ -1,4 +1,4 @@
-import { PostEditor } from "../../components/PostEditor";
+import { PostEditor } from "@/components/PostEditor";
 
 // Editor for an existing post. The post to load comes from the `?id=` query
 // param, which PostEditor reads on mount.

@@ -5,17 +5,20 @@ import {
   ArrowUpRight,
   CheckCircle2,
   Clock,
+  CloudDownload,
+  CloudUpload,
   FilePen,
   FileText,
   Plus,
-  RefreshCw,
   TrendingUp,
   Upload,
+  type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { SectionHeader } from "@/components/SectionHeader";
 import { StatusDot } from "@/components/StatusDot";
 import { Card } from "@/components/ui/card";
+import { onPostsRefreshed, pullFromCloud, pushToCloud } from "@/lib/sync";
 
 // ─── Data mapping ─────────────────────────────────────────────────────────────
 
@@ -57,28 +60,41 @@ function toPost(p: BackendPost): Post {
   };
 }
 
-// ─── Quick actions data ───────────────────────────────────────────────────────
+// ─── Quick action card ────────────────────────────────────────────────────────
 
-const QUICK_ACTIONS = [
-  {
-    label: "New Post",
-    desc:  "Start writing in Markdown",
-    Icon:  Plus,
-    href:  "/posts/new",
-  },
-  {
-    label: "Upload Media",
-    desc:  "Add files to Cloudflare R2",
-    Icon:  Upload,
-    href:  "/media",
-  },
-  {
-    label: "Sync Cloud",
-    desc:  "Push local drafts to cloud",
-    Icon:  RefreshCw,
-    href:  null,
-  },
-] as const;
+const QUICK_CARD_CLASS = [
+  "group flex items-start gap-3 p-4 text-left rounded-[8px]",
+  "bg-white dark:bg-[#161616]",
+  "border border-zinc-200 dark:border-white/[0.07]",
+  "hover:border-zinc-300 dark:hover:border-white/[0.12]",
+  "hover:shadow-[0_4px_16px_rgba(0,0,0,0.05)] dark:hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)]",
+  "active:scale-[0.975] active:translate-y-px active:shadow-none active:border-zinc-200 dark:active:border-white/[0.07] active:transition-none",
+  "disabled:opacity-60 disabled:cursor-wait disabled:active:scale-100",
+  "transition-[border-color,box-shadow,transform] duration-150",
+].join(" ");
+
+function QuickActionInner({ Icon, label, desc }: { Icon: LucideIcon; label: string; desc: string }) {
+  return (
+    <>
+      <div className="p-1.75 rounded-md bg-zinc-50 dark:bg-white/[0.05] border border-zinc-100 dark:border-white/[0.06] group-hover:bg-zinc-100 dark:group-hover:bg-white/[0.08] transition-colors duration-150 shrink-0 mt-px">
+        <Icon size={13} strokeWidth={2} className="text-zinc-500 dark:text-zinc-400" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200 leading-none">
+          {label}
+        </p>
+        <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-1.25 leading-tight">
+          {desc}
+        </p>
+      </div>
+      <ArrowUpRight
+        size={13}
+        strokeWidth={1.8}
+        className="shrink-0 text-zinc-300 dark:text-zinc-700 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 mt-px transition-colors duration-150"
+      />
+    </>
+  );
+}
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
@@ -95,6 +111,7 @@ export default function DashboardPage() {
       return;
     }
     try {
+      // Local cache — refreshed from the cloud on launch and via the refresh button.
       const rows = await invoke<BackendPost[]>("list_posts");
       setPosts(rows.map(toPost));
     } catch (err) {
@@ -107,6 +124,22 @@ export default function DashboardPage() {
   useEffect(() => {
     void loadPosts();
   }, [loadPosts]);
+
+  // Re-read local data after a cloud refresh.
+  useEffect(() => onPostsRefreshed(() => void loadPosts()), [loadPosts]);
+
+  // Pull (D1 → local) / push (local → D1) from the quick-action cards.
+  const [syncing, setSyncing] = useState<{ pull: boolean; push: boolean }>({ pull: false, push: false });
+  const runSync = useCallback(async (which: "pull" | "push") => {
+    setSyncing((s) => ({ ...s, [which]: true }));
+    try {
+      await (which === "pull" ? pullFromCloud() : pushToCloud());
+    } catch (err) {
+      console.error(`${which} failed:`, err);
+    } finally {
+      setSyncing((s) => ({ ...s, [which]: false }));
+    }
+  }, []);
 
   // ── Computed stats ──────────────────────────────────────────────────────────
   const total     = posts.length;
@@ -244,49 +277,37 @@ export default function DashboardPage() {
         {/* Quick actions */}
         <section>
           <SectionHeader>Quick Actions</SectionHeader>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {QUICK_ACTIONS.map(({ label, desc, Icon, href }) => {
-              const inner = (
-                <>
-                  <div className="p-1.75 rounded-md bg-zinc-50 dark:bg-white/[0.05] border border-zinc-100 dark:border-white/[0.06] group-hover:bg-zinc-100 dark:group-hover:bg-white/[0.08] transition-colors duration-150 shrink-0 mt-px">
-                    <Icon size={13} strokeWidth={2} className="text-zinc-500 dark:text-zinc-400" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200 leading-none">
-                      {label}
-                    </p>
-                    <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-1.25 leading-tight">
-                      {desc}
-                    </p>
-                  </div>
-                  <ArrowUpRight
-                    size={13}
-                    strokeWidth={1.8}
-                    className="shrink-0 text-zinc-300 dark:text-zinc-700 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 mt-px transition-colors duration-150"
-                  />
-                </>
-              );
-
-              const cardClass = [
-                "group flex items-start gap-3 p-4 text-left rounded-[8px]",
-                "bg-white dark:bg-[#161616]",
-                "border border-zinc-200 dark:border-white/[0.07]",
-                "hover:border-zinc-300 dark:hover:border-white/[0.12]",
-                "hover:shadow-[0_4px_16px_rgba(0,0,0,0.05)] dark:hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)]",
-                "active:scale-[0.975] active:translate-y-px active:shadow-none active:border-zinc-200 dark:active:border-white/[0.07] active:transition-none",
-                "transition-[border-color,box-shadow,transform] duration-150",
-              ].join(" ");
-
-              return href ? (
-                <Link key={label} href={href} className={cardClass}>
-                  {inner}
-                </Link>
-              ) : (
-                <div key={label} className={[cardClass, "opacity-50 cursor-not-allowed"].join(" ")}>
-                  {inner}
-                </div>
-              );
-            })}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <Link href="/posts/new" className={QUICK_CARD_CLASS}>
+              <QuickActionInner Icon={Plus} label="New Post" desc="Start writing in Markdown" />
+            </Link>
+            <Link href="/media" className={QUICK_CARD_CLASS}>
+              <QuickActionInner Icon={Upload} label="Upload Media" desc="Add files to Cloudflare R2" />
+            </Link>
+            <button
+              type="button"
+              onClick={() => void runSync("pull")}
+              disabled={syncing.pull}
+              className={QUICK_CARD_CLASS}
+            >
+              <QuickActionInner
+                Icon={CloudDownload}
+                label={syncing.pull ? "Pulling…" : "Pull from Cloud"}
+                desc="Mirror posts from D1 to local"
+              />
+            </button>
+            <button
+              type="button"
+              onClick={() => void runSync("push")}
+              disabled={syncing.push}
+              className={QUICK_CARD_CLASS}
+            >
+              <QuickActionInner
+                Icon={CloudUpload}
+                label={syncing.push ? "Pushing…" : "Push to Cloud"}
+                desc="Upload local posts to D1"
+              />
+            </button>
           </div>
         </section>
       </div>

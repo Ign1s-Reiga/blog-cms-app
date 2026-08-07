@@ -1,5 +1,5 @@
 [package]
-name = "app"
+name = "blog-cms-app"
 version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
@@ -27,3 +27,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["fs"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
+keyring-core = "1"
+
+# OS keychain backend for the Cloudflare API token. Windows Credential Manager
+# on Windows; other platforms fall back to the credentials file for now.
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = "1"

@@ -1,11 +1,9 @@
 import { Bell } from "lucide-react";
-import { Breadcrumb } from "./Breadcrumb";
-import { SidebarToggleBtn } from "./SidebarToggleBtn";
-import { SyncButton } from "./SyncButton";
-import { ThemeToggle } from "./ThemeToggle";
+import { Breadcrumb } from "@/components/Breadcrumb";
+import { SidebarToggleBtn } from "@/components/SidebarToggleBtn";
+import { SyncActions } from "@/components/SyncActions";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Separator } from "@/components/ui/separator";
 
 export function Header() {
   return (
@@ -25,8 +23,8 @@ export function Header() {
 
       {/* ── Right: action cluster ─────────────────────────────────────── */}
       <div className="flex items-center gap-0.5 ml-auto shrink-0">
-        {/* Sync to cloud */}
-        <SyncButton />
+        {/* Cloud sync: pull + push */}
+        <SyncActions />
 
         {/* Notification bell */}
         <div className="relative">
@@ -46,24 +44,6 @@ export function Header() {
 
         {/* Theme toggle */}
         <ThemeToggle />
-
-        {/* Vertical rule */}
-        <Separator
-          orientation="vertical"
-          className="mx-[6px] h-[18px] bg-zinc-200 dark:bg-white/[0.08]"
-        />
-
-        {/* User avatar */}
-        <button
-          aria-label="User menu"
-          className="relative rounded-full ring-[1.5px] ring-transparent hover:ring-indigo-400/50 dark:hover:ring-indigo-400/40 hover:ring-offset-[2px] hover:ring-offset-white dark:hover:ring-offset-[#111111] active:scale-[0.9] active:transition-none transition-all duration-150"
-        >
-          <Avatar className="size-[26px] after:hidden">
-            <AvatarFallback className="text-[11px] font-bold text-white bg-gradient-to-br from-violet-400 to-indigo-600">
-              A
-            </AvatarFallback>
-          </Avatar>
-        </button>
       </div>
     </header>
   );

@@ -162,13 +162,17 @@ export function PostEditor() {
       const { invoke, isTauri } = await import("@tauri-apps/api/core");
       if (!isTauri()) return;
       try {
-        const post = await invoke<{ title: string; tags: string | null } | null>("get_post", { id });
+        // Load the post from the local cache, then its Markdown by slug.
+        const post = await invoke<{ title: string; tags: string | null; slug: string } | null>(
+          "get_post",
+          { id },
+        );
         if (post && !cancelled) {
           setTitle(post.title);
           setTags(parseTags(post.tags));
+          const md = await invoke<string>("read_post_markdown", { slug: post.slug });
+          if (!cancelled) setBody(md);
         }
-        const md = await invoke<string>("read_post_markdown", { id });
-        if (!cancelled) setBody(md);
       } catch (err) {
         console.error("Failed to load post:", err);
       }

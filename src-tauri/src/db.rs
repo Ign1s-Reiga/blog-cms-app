@@ -106,6 +106,78 @@ pub async fn post_delete(db: &DatabaseConnection, id: i32) -> Result<(), String>
     Ok(())
 }
 
+/// Mirror the local posts table onto the cloud's set of posts, keyed by `slug`.
+///
+/// The cloud is authoritative: every remote post is upserted into the local
+/// cache (overwriting the local copy), and local posts whose slug isn't in the
+/// remote set are deleted — so `local == remote` afterwards. Unsynced local-only
+/// drafts are therefore removed. Returns `(upserted, deleted)`.
+pub async fn mirror_posts(
+    db: &DatabaseConnection,
+    remote: Vec<post::Model>,
+) -> Result<(usize, usize), String> {
+    let remote_slugs: std::collections::HashSet<String> =
+        remote.iter().map(|p| p.slug.clone()).collect();
+    let upserted = remote.len();
+
+    for post in remote {
+        upsert_post_from_remote(db, post).await?;
+    }
+
+    // Drop anything local that no longer exists remotely (+ its staging row).
+    let locals = post::Entity::find()
+        .all(db)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut deleted = 0usize;
+    for local in locals {
+        if !remote_slugs.contains(&local.slug) {
+            let _ = post_stage::Entity::delete_by_id(local.id).exec(db).await;
+            post::Entity::delete_by_id(local.id)
+                .exec(db)
+                .await
+                .map_err(|e| e.to_string())?;
+            deleted += 1;
+        }
+    }
+
+    Ok((upserted, deleted))
+}
+
+/// Upsert one remote post into the local cache, keyed by `slug` (cloud wins).
+///
+/// An existing local row (matched by slug) is overwritten in place, keeping its
+/// local primary key; a new slug is inserted. Staging is reset to the post's
+/// published/draft state so a stale `sync_failed` doesn't linger. Series linkage
+/// is dropped — series aren't synced and remote ids don't map to local rows.
+async fn upsert_post_from_remote(db: &DatabaseConnection, remote: post::Model) -> Result<(), String> {
+    let existing = post::Entity::find()
+        .filter(post::Column::Slug.eq(remote.slug.clone()))
+        .one(db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut model = remote;
+    model.series_id = None;
+    model.series_order = None;
+
+    let saved = match existing {
+        Some(local) => {
+            model.id = local.id;
+            model.into_update().update(db).await.map_err(|e| e.to_string())?
+        }
+        None => model.into_insert().insert(db).await.map_err(|e| e.to_string())?,
+    };
+
+    let stage = if saved.published { post_stage::PUBLISHED } else { post_stage::DRAFT };
+    stage_set(
+        db,
+        post_stage::Model { post_id: saved.id, stage: stage.to_string(), staged_at: saved.updated_at },
+    )
+    .await?;
+    Ok(())
+}
+
 // ─── Series ───────────────────────────────────────────────────────────────────
 
 pub async fn series_create(

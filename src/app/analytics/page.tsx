@@ -1,4 +1,4 @@
-import { PlaceholderView } from "../components/PlaceholderView";
+import { PlaceholderView } from "@/components/PlaceholderView";
 
 export default function AnalyticsPage() {
   return (
