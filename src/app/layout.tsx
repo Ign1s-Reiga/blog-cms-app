@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { ThemeProvider } from "next-themes";
-import { AuthGate } from "./components/AuthGate";
-import { Header } from "./components/Header";
-import { Sidebar } from "./components/Sidebar";
-import { SidebarProvider } from "./components/SidebarProvider";
+import { AuthGate } from "@/components/AuthGate";
+import { Header } from "@/components/Header";
+import { Sidebar } from "@/components/Sidebar";
+import { SidebarProvider } from "@/components/SidebarProvider";
 import { Geist } from "next/font/google";
 import { cn } from "@/lib/utils";
 

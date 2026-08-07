@@ -1,4 +1,4 @@
-import { StatusDot, type PostStatus } from "./StatusDot";
+import { StatusDot, type PostStatus } from "@/components/StatusDot";
 import { Badge } from "@/components/ui/badge";
 
 export function StatusPill({ status }: { status: PostStatus }) {
