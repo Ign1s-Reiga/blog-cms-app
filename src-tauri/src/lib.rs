@@ -87,6 +87,7 @@ pub fn run() {
             commands::unpublish_post,
             // Sync
             commands::sync_posts,
+            commands::sync_posts_from_cloud,
             // Post content
             commands::read_post_markdown,
             commands::save_post,

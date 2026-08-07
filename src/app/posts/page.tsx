@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { onPostsRefreshed } from "@/lib/sync";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -81,8 +82,8 @@ export default function PostsPage() {
       return;
     }
     try {
-      // The connected account's posts, from D1.
-      const rows = await invoke<BackendPost[]>("d1_list_posts");
+      // Local cache — refreshed from the cloud on launch and via the refresh button.
+      const rows = await invoke<BackendPost[]>("list_posts");
       // Which posts are staged sync_failed (best-effort — doesn't block the list).
       let failed = new Set<number>();
       try {
@@ -105,6 +106,9 @@ export default function PostsPage() {
   useEffect(() => {
     void loadPosts();
   }, [loadPosts]);
+
+  // Re-read local data after a cloud refresh.
+  useEffect(() => onPostsRefreshed(() => void loadPosts()), [loadPosts]);
 
   const handleUploadArticle = async () => {
     setUploadStatus({ kind: "loading" });

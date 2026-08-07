@@ -16,11 +16,12 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useSidebar } from "./SidebarProvider";
+import { useCallback, useEffect, useState } from "react";
+import { useSidebar } from "@/components/SidebarProvider";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
+import { onPostsRefreshed } from "@/lib/sync";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,7 +36,7 @@ interface NavItem {
 
 const NAV_MAIN: NavItem[] = [
   { href: "/", label: "Dashboard", Icon: LayoutDashboard },
-  { href: "/posts",     label: "Posts",     Icon: FileText, badge: 2 },
+  { href: "/posts",     label: "Posts",     Icon: FileText },
   { href: "/media",     label: "Media",     Icon: Image },
 ];
 
@@ -150,6 +151,30 @@ export function Sidebar() {
   const pathname = usePathname();
   const { collapsed, toggle } = useSidebar();
 
+  // Live post count for the Posts badge, from the local cache.
+  // `null` while unknown; re-read on navigation and after a cloud refresh so it
+  // tracks adds/deletes. An empty database or plain browser leaves it unset, so
+  // the badge simply doesn't render.
+  const [postCount, setPostCount] = useState<number | null>(null);
+
+  const loadCount = useCallback(async () => {
+    const { invoke, isTauri } = await import("@tauri-apps/api/core");
+    if (!isTauri()) return;
+    try {
+      const rows = await invoke<unknown[]>("list_posts");
+      setPostCount(Array.isArray(rows) ? rows.length : 0);
+    } catch {
+      setPostCount(0);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadCount();
+  }, [loadCount, pathname]);
+
+  // Re-read the count after a cloud refresh.
+  useEffect(() => onPostsRefreshed(() => void loadCount()), [loadCount]);
+
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/");
 
@@ -222,7 +247,7 @@ export function Sidebar() {
             href={href}
             label={label}
             Icon={Icon}
-            badge={badge}
+            badge={href === "/posts" ? (postCount && postCount > 0 ? postCount : undefined) : badge}
             active={isActive(href)}
             collapsed={collapsed}
           />
@@ -292,30 +317,6 @@ export function Sidebar() {
             />
           </div>
         )}
-
-        <div
-          className={[
-            "flex items-center pt-2 border-t border-zinc-100 dark:border-white/[0.04]",
-            collapsed ? "justify-center" : "gap-2.5 px-1",
-          ].join(" ")}
-        >
-          <Avatar className="size-[26px] shrink-0 ring-[1.5px] ring-white dark:ring-[#111111] after:hidden">
-            <AvatarFallback className="text-[11px] font-bold text-white bg-gradient-to-br from-violet-400 to-indigo-600">
-              A
-            </AvatarFallback>
-            <span className="absolute -bottom-px -right-px z-10 w-[7px] h-[7px] rounded-full bg-emerald-500 ring-[1.5px] ring-white dark:ring-[#111111]" />
-          </Avatar>
-          {!collapsed && (
-            <div className="flex-1 min-w-0">
-              <p className="text-[12px] font-semibold text-zinc-700 dark:text-zinc-300 leading-none truncate">
-                Admin
-              </p>
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-600 mt-[3px] truncate font-mono tracking-tight">
-                admin@blog.local
-              </p>
-            </div>
-          )}
-        </div>
       </div>
 
       <button

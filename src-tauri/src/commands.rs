@@ -560,6 +560,19 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, St
     Ok(synced)
 }
 
+/// Mirror the local cache to Cloudflare D1: upsert every remote post (cloud
+/// wins) and delete local posts that no longer exist remotely, leaving the local
+/// posts table an exact copy of D1. This is the "refresh" path — the UI reads
+/// local data, and this brings it in sync on app launch and when the refresh
+/// button is pressed. Returns the number of remote posts mirrored.
+#[tauri::command]
+pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> Result<usize, String> {
+    let (client, config) = cf()?;
+    let remote = cloudflare::d1_post_list(&client, &config).await?;
+    let (upserted, _deleted) = db::mirror_posts(conn.inner(), remote).await?;
+    Ok(upserted)
+}
+
 // ─── Post content ───────────────────────────────────────────────────────────
 
 /// Read a post's Markdown body (by slug) for the editor.

@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { LoginScreen } from "./LoginScreen";
+import { LoginScreen } from "@/components/LoginScreen";
+import { pullFromCloud } from "@/lib/sync";
 
 type Phase = "checking" | "authed" | "unauthed";
 
@@ -53,7 +54,13 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     return (
       <>
         {children}
-        <LoginScreen onAuthed={() => setPhase("authed")} />
+        <LoginScreen
+          onAuthed={() => {
+            setPhase("authed");
+            // Pull the freshly connected account's posts into the local cache.
+            void pullFromCloud();
+          }}
+        />
       </>
     );
   }

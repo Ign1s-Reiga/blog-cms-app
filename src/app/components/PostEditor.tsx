@@ -162,9 +162,9 @@ export function PostEditor() {
       const { invoke, isTauri } = await import("@tauri-apps/api/core");
       if (!isTauri()) return;
       try {
-        // Load the post from the connected account's D1, then its Markdown by slug.
+        // Load the post from the local cache, then its Markdown by slug.
         const post = await invoke<{ title: string; tags: string | null; slug: string } | null>(
-          "d1_get_post",
+          "get_post",
           { id },
         );
         if (post && !cancelled) {
