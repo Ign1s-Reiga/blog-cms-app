@@ -34,6 +34,10 @@ pub fn run() {
 
             app.manage(conn);
 
+            // Wire up the OS keychain before reading credentials so the API
+            // token can be loaded from (and saved to) secure storage.
+            auth::init_keystore();
+
             // Load the stored Cloudflare credentials (falling back to env vars)
             // into the process global used by the cloud commands.
             let initial_creds =
