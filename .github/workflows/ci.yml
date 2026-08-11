@@ -1,0 +1,79 @@
+name: CI
+
+# Fast checks on pull requests and pushes to main so broken code never
+# reaches a release tag.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Lint & build frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (oxlint)
+        run: pnpm exec oxlint
+
+      - name: Build static export
+        run: pnpm run build
+
+  backend:
+    name: Check Rust backend
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `tauri::generate_context!` embeds ../out at compile time, so the
+      # frontend must be built before the Rust crate is checked.
+      - name: Build static export
+        run: pnpm run build
+
+      - name: cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
