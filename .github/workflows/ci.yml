@@ -25,17 +25,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 26
           cache: pnpm
 
       - name: Authenticate to GitHub Packages
@@ -62,17 +62,17 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 26
           cache: pnpm
 
       - name: Setup Rust
@@ -103,3 +103,66 @@ jobs:
 
       - name: cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+
+  bundle:
+    name: Build installers
+    runs-on: windows-latest
+    # Bundling only ever ran at tag time, so a change that broke the installers
+    # surfaced during a release instead of on the PR that caused it. Skipped on
+    # pushes to main, which are squash-merges of already-built pull requests.
+    if: github.event_name != 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Authenticate to GitHub Packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "@ign1s-reiga:registry=https://npm.pkg.github.com/"
+            echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}"
+          } >> .npmrc
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `tauri build` runs `beforeBuildCommand` itself, so the static export is
+      # covered here. Updater artifacts are switched off because they require
+      # the signing key, which is deliberately not exposed to pull requests
+      # (and is unavailable to forks regardless). The NSIS/MSI bundling this
+      # does exercise is the part that only ran at tag time before.
+      - name: Build installers
+        shell: bash
+        run: pnpm exec tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: installers
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          # Fail rather than publish an empty artifact if the bundle layout moves.
+          if-no-files-found: error
+          retention-days: 7
