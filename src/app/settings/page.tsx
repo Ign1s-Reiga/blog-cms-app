@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { UpdateCard } from "@/components/UpdateCard";
 
 type Creds = { account_id: string; r2_bucket: string; d1_database_id: string };
 
@@ -79,6 +80,8 @@ export default function SettingsPage() {
             )}
           </div>
         </section>
+
+        <UpdateCard />
       </div>
     </main>
   );
