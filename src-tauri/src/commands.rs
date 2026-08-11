@@ -11,6 +11,7 @@ use crate::entities::post::Model as PostModel;
 use crate::entities::post_stage;
 use crate::entities::series::Model as SeriesModel;
 use crate::imaging;
+use crate::media_keys;
 use sea_orm::DatabaseConnection as Db;
 
 /// Current time as a Unix timestamp in seconds (the schema's date encoding).
@@ -199,7 +200,7 @@ pub async fn upload_article(
         // Fall back to a unique, non-empty slug (e.g. non-ASCII titles).
         if s.is_empty() { format!("post-{now}") } else { s }
     };
-    let r2_key = format!("posts/{slug}.md");
+    let r2_key = media_keys::body_key(&slug);
 
     // ── 5. Load Cloudflare credentials ───────────────────────────────────────
     let (client, config) = cf()?;
@@ -610,7 +611,7 @@ pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> Result<S
         Ok(cc) => cc,
         Err(_) => return Ok(String::new()), // offline / no credentials
     };
-    let key = format!("posts/{slug}.md");
+    let key = media_keys::body_key(&slug);
     match cloudflare::download_from_r2(&client, &config, &key).await? {
         Some(content) => {
             // Cache locally for next time (best effort).
@@ -709,18 +710,31 @@ pub async fn save_post(
 
     let synced = async {
         let (client, config) = cf()?;
-        // Body → R2.
-        cloudflare::upload_to_r2(&client, &config, &format!("posts/{}.md", saved.slug), &body).await?;
-        // Referenced local images → R2 under the same key the Markdown uses, so
-        // the relative `assets/…` links resolve against the bucket.
+
+        // Referenced local images → R2 under `posts/<slug>/<sha256>.<ext>`, and
+        // the body's local `assets/<uuid>.<ext>` reference is rewritten to the
+        // bare stored name. The blog resolves that against the post's own media
+        // prefix, so the published Markdown carries no local paths and no
+        // hard-coded bucket host.
+        //
+        // Images go up before the body, so the body never lands referencing an
+        // object that isn't there yet.
+        let mut published = body.clone();
         for r in extract_asset_refs(&body) {
             let file_name = r.strip_prefix("assets/").unwrap_or(&r);
             if let Ok(bytes) = tokio::fs::read(assets_dir.join(file_name)).await {
                 let ext = file_name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-                cloudflare::upload_bytes_to_r2(&client, &config, &r, bytes, content_type_for(&ext))
+                let stored = media_keys::stored_name(&bytes, &ext);
+                let key = media_keys::body_image_key(&saved.slug, &stored);
+                cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, content_type_for(&ext))
                     .await?;
+                published = published.replace(&r, &stored);
             }
         }
+
+        // Body → R2.
+        cloudflare::upload_to_r2(&client, &config, &media_keys::body_key(&saved.slug), &published)
+            .await?;
         // Metadata → D1.
         cloudflare::d1_post_upsert(&client, &config, saved.clone()).await?;
         Ok::<(), String>(())
@@ -810,6 +824,64 @@ pub async fn stage_image(app: tauri::AppHandle, src_path: String) -> Result<Stag
     Ok(StagedImage { rel: format!("assets/{file_name}"), name })
 }
 
+/// Extensions accepted for a post thumbnail. Narrower than the editor's image
+/// list because the thumbnail is always stored as AVIF, and the decoder is only
+/// built with JPEG and PNG support — an already-AVIF file passes straight
+/// through. WebP/GIF/SVG would need decoders that aren't compiled in.
+const THUMBNAIL_EXTS: &[&str] = &["png", "jpg", "jpeg", "avif"];
+
+/// Pick an image and store it as the post's thumbnail at
+/// `posts/<slug>/thumbnail.avif`, the key the blog derives from the slug alone.
+///
+/// Replaces any existing thumbnail. Returns `Err("cancelled")` when the dialog
+/// is dismissed.
+#[tauri::command]
+pub async fn set_post_thumbnail(app: tauri::AppHandle, slug: String) -> Result<String, String> {
+    if !is_safe_slug(&slug) {
+        return Err(format!("Invalid post slug: {slug}"));
+    }
+
+    let app_clone = app.clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        app_clone
+            .dialog()
+            .file()
+            .add_filter("Image", THUMBNAIL_EXTS)
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|e| format!("Dialog thread panicked: {e}"))?;
+
+    let src = match picked {
+        None => return Err("cancelled".to_string()),
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        Some(tauri_plugin_dialog::FilePath::Path(p)) => p,
+        #[allow(unreachable_patterns)]
+        Some(_) => return Err("Unsupported path format on this platform".to_string()),
+    };
+
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|e| THUMBNAIL_EXTS.contains(&e.as_str()))
+        .ok_or_else(|| "Unsupported thumbnail type".to_string())?;
+
+    let bytes = tokio::fs::read(&src)
+        .await
+        .map_err(|e| format!("Failed to read image: {e}"))?;
+    let bytes = if imaging::is_convertible(&ext) {
+        imaging::convert_to_avif(bytes).await?
+    } else {
+        bytes
+    };
+
+    let key = media_keys::thumbnail_key(&slug);
+    let (client, config) = cf()?;
+    cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, "image/avif").await?;
+    Ok(key)
+}
+
 // ─── Media library (R2 + local cache) ─────────────────────────────────────────
 
 /// A media object stored in R2, cached locally for display.
@@ -889,6 +961,62 @@ pub async fn upload_media(app: tauri::AppHandle) -> Result<MediaItem, String> {
     let _ = tokio::fs::write(dir.join(&file_name), &bytes).await;
 
     Ok(MediaItem { key, name: file_name, size })
+}
+
+/// Copy a media-library object into the post's local assets directory so the
+/// editor can insert it, backing the "Insert media → Select from Media library"
+/// flow.
+///
+/// The library stays a reusable pool under `media/`; nothing there is read by
+/// the blog. Staging locally means the object then travels the same publish
+/// path as a dropped image — hashed and uploaded to `posts/<slug>/<sha256>.ext`
+/// — so one image reused across posts lands under each post's own prefix and
+/// the reader never has to know the library exists.
+#[tauri::command]
+pub async fn stage_media_from_library(
+    app: tauri::AppHandle,
+    key: String,
+) -> Result<StagedImage, String> {
+    let file_name = key
+        .strip_prefix("media/")
+        .filter(|n| is_safe_file_name(n))
+        .ok_or_else(|| format!("Not a media library key: {key}"))?
+        .to_string();
+
+    let ext = file_name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    if ext.is_empty() {
+        return Err(format!("Media object has no extension: {key}"));
+    }
+
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?;
+
+    // Prefer the local cache the media library already maintains; fall back to
+    // R2 for an object listed but not yet cached.
+    let cached = data_dir.join("media").join(&file_name);
+    let bytes = match tokio::fs::read(&cached).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let (client, config) = cf()?;
+            cloudflare::download_bytes_from_r2(&client, &config, &key)
+                .await?
+                .ok_or_else(|| format!("Media object not found: {key}"))?
+        }
+    };
+
+    let assets_dir = data_dir.join("assets");
+    tokio::fs::create_dir_all(&assets_dir)
+        .await
+        .map_err(|e| format!("Failed to create assets dir: {e}"))?;
+
+    let staged_name = format!("{}.{ext}", uuid::Uuid::new_v4());
+    tokio::fs::write(assets_dir.join(&staged_name), &bytes)
+        .await
+        .map_err(|e| format!("Failed to stage media: {e}"))?;
+
+    Ok(StagedImage { rel: format!("assets/{staged_name}"), name: file_name })
 }
 
 /// List media objects in R2 (prefix `media/`), caching any not already local.
