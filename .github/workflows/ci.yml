@@ -13,6 +13,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# `@ign1s-reiga/marked-presets` is hosted on GitHub Packages, so installs
+# need read access to it (see the "Authenticate to GitHub Packages" steps).
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   frontend:
     name: Lint & build frontend
@@ -31,6 +37,16 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+
+      - name: Authenticate to GitHub Packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "@ign1s-reiga:registry=https://npm.pkg.github.com/"
+            echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}"
+          } >> .npmrc
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -66,6 +82,16 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+
+      - name: Authenticate to GitHub Packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "@ign1s-reiga:registry=https://npm.pkg.github.com/"
+            echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}"
+          } >> .npmrc
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
