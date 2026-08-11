@@ -3,6 +3,7 @@ mod cloudflare;
 mod commands;
 mod db;
 mod entities;
+mod update;
 
 use sea_orm::DatabaseConnection;
 use tauri::Manager;
@@ -46,7 +47,9 @@ pub fn run() {
 
             Ok(())
         })
+        .manage(update::PendingUpdate::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             // Auth / session
             auth::save_credentials,
@@ -95,6 +98,10 @@ pub fn run() {
             commands::upload_media,
             commands::list_media,
             commands::delete_media,
+            // Self-update (GitHub Releases)
+            update::check_for_update,
+            update::install_update,
+            update::restart_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

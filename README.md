@@ -12,6 +12,7 @@ A cross-platform **desktop CMS for blog content**, built with [Tauri](https://ta
 - **Markdown-first editor** — a distraction-free writing surface with live word and character counts.
 - **Post management** — a searchable, filterable posts table (All / Published / Drafts) with status pills and tags.
 - **One-step Cloudflare sync** — pick a `.md` file and it is uploaded to **R2** and registered in **D1** in a single action. YAML front-matter (`title`, `tags`) is parsed on the Rust side.
+- **In-app updates** — checks GitHub Releases on launch and installs signed updates from `Settings → Software update`.
 - **Built with [shadcn/ui](https://ui.shadcn.com)** — accessible Radix-based primitives (Button, Tabs, Badge, Input, Card, Alert, Avatar, Breadcrumb, Separator) themed to the design system.
 
 ## Tech stack
@@ -129,6 +130,39 @@ When you upload an article, the Rust backend:
 4. On success, inserts the post's metadata into **D1**.
 
 The frontend surfaces success and error states (and treats a cancelled dialog as a no-op).
+
+## Releases & auto-update
+
+The app updates itself from this repository's **GitHub Releases**.
+
+**How it works.** Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the
+Windows installers, signs the updater bundle, and attaches a `latest.json` manifest to a **draft**
+release. Installed apps poll `releases/latest/download/latest.json`, compare its version against
+their own, and verify the bundle's minisign signature before installing — so an update is only
+offered once you **publish** the draft.
+
+In the app, `Settings → Software update` shows the running version and drives
+check → download → install → restart; the sidebar surfaces a notice when a check finds
+a newer version. Checks run once per launch and are cached for the session.
+
+**One-time setup.** The workflow signs updates with a minisign key that must not live in the repo.
+Generate one and add it to the repository secrets:
+
+```bash
+pnpm tauri signer generate -w ~/.tauri/blog-cms-app.key
+```
+
+| Secret                               | Value                            |
+| ------------------------------------ | -------------------------------- |
+| `TAURI_SIGNING_PRIVATE_KEY`          | Contents of the private key file |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The passphrase you chose         |
+
+Give the key a real passphrase — GitHub rejects empty secret values, so a passphrase-less key
+has nothing valid to put in the second secret.
+
+The matching **public** key lives in `src-tauri/tauri.conf.json` under `plugins.updater.pubkey`.
+The two must stay paired: replacing the key means already-installed apps can no longer verify
+updates and have to be reinstalled manually. Keep a backup of the private key.
 
 ## Available scripts
 

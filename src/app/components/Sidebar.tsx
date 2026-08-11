@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ArrowUpCircle,
   BarChart2,
   BookOpen,
   ChevronDown,
@@ -15,13 +16,14 @@ import {
   Zap,
 } from "lucide-react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { useSidebar } from "@/components/SidebarProvider";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { onPostsRefreshed } from "@/lib/sync";
+import { checkForUpdate, getCachedStatus, onUpdateStatusChanged } from "@/lib/updater";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -127,13 +129,18 @@ function UtilLink({
   icon,
   label,
   end,
+  onClick,
 }: {
   icon: React.ReactNode;
   label: string;
   end?: React.ReactNode;
+  onClick?: () => void;
 }) {
   return (
-    <button className="group w-full flex items-center gap-2 h-[28px] px-2 rounded-[5px] transition-[background-color] duration-100 hover:bg-zinc-50 dark:hover:bg-white/[0.04]">
+    <button
+      onClick={onClick}
+      className="group w-full flex items-center gap-2 h-[28px] px-2 rounded-[5px] transition-[background-color] duration-100 hover:bg-zinc-50 dark:hover:bg-white/[0.04]"
+    >
       <span className="shrink-0 text-zinc-400 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-500 transition-colors duration-100">
         {icon}
       </span>
@@ -149,6 +156,7 @@ function UtilLink({
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
   const { collapsed, toggle } = useSidebar();
 
   // Live post count for the Posts badge, from the local cache.
@@ -174,6 +182,26 @@ export function Sidebar() {
 
   // Re-read the count after a cloud refresh.
   useEffect(() => onPostsRefreshed(() => void loadCount()), [loadCount]);
+
+  // The launch-time update check. The helper caches per session, so mounting
+  // this (or opening Settings) later replays the same answer instead of hitting
+  // GitHub again. `null` keeps the notice hidden — including in the browser.
+  const [newVersion, setNewVersion] = useState<string | null>(() => {
+    const cached = getCachedStatus();
+    return cached?.available ? cached.version : null;
+  });
+
+  useEffect(() => {
+    const show = (s: { available: boolean; version: string | null }) =>
+      setNewVersion(s.available ? s.version : null);
+    // Listen before checking so a fast resolve can't slip past the subscription,
+    // then apply the result directly (it may be a replay of the cached status).
+    const unlisten = onUpdateStatusChanged(show);
+    void checkForUpdate()
+      .then((s) => s && show(s))
+      .catch(() => {}); // offline / no release yet — stay quiet
+    return unlisten;
+  }, []);
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/");
@@ -282,6 +310,18 @@ export function Sidebar() {
       >
         {!collapsed && (
           <div className="space-y-px mb-2">
+            {newVersion && (
+              <UtilLink
+                icon={<ArrowUpCircle size={13} strokeWidth={1.8} />}
+                label="Update available"
+                onClick={() => router.push("/settings")}
+                end={
+                  <Badge className="shrink-0 h-[16px] px-1.5 rounded-full border-transparent bg-emerald-500/10 text-[10px] font-bold tabular-nums text-emerald-600 dark:text-emerald-500">
+                    v{newVersion}
+                  </Badge>
+                }
+              />
+            )}
             <UtilLink
               icon={<BookOpen size={13} strokeWidth={1.8} />}
               label="Documentation"
