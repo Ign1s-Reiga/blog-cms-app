@@ -13,16 +13,23 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
   const [apiToken, setApiToken] = useState("");
   const [r2Bucket, setR2Bucket] = useState("");
   const [d1Id, setD1Id] = useState("");
+  const [r2PublicUrl, setR2PublicUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const ready = accountId && apiToken && r2Bucket && d1Id;
+  const ready = accountId && apiToken && r2Bucket && d1Id && r2PublicUrl;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!ready || busy) return;
     if (!UUID_RE.test(d1Id.trim())) {
       setError("D1 Database ID must be the database's UUID (8-4-4-4-12 hex) — not its name.");
+      return;
+    }
+    // This is written into published Markdown as the base for image links, so a
+    // typo here silently breaks every image on the blog rather than failing here.
+    if (!/^https?:\/\/[^\s/]+/i.test(r2PublicUrl.trim())) {
+      setError("R2 Public URL must be the bucket's public origin, e.g. https://cdn.example.com");
       return;
     }
     const { invoke, isTauri } = await import("@tauri-apps/api/core");
@@ -38,6 +45,7 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
         apiToken,
         r2Bucket,
         d1DatabaseId: d1Id,
+        r2PublicUrl,
       });
       onAuthed();
     } catch (err) {
@@ -73,6 +81,12 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
           <Field label="API Token" value={apiToken} onChange={setApiToken} placeholder="R2 + D1 edit token" type="password" />
           <Field label="R2 Bucket" value={r2Bucket} onChange={setR2Bucket} placeholder="bucket name" />
           <Field label="D1 Database ID" value={d1Id} onChange={setD1Id} placeholder="database id" />
+          <Field
+            label="R2 Public URL"
+            value={r2PublicUrl}
+            onChange={setR2PublicUrl}
+            placeholder="https://cdn.example.com"
+          />
         </div>
 
         {error && <p className="text-[12px] font-medium text-red-600 dark:text-red-400">{error}</p>}

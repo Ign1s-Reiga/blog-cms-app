@@ -54,6 +54,11 @@ pub fn init_keystore() {
     }
 }
 
+/// A stored value, or the default when the file predates the field.
+fn or_default(stored: String, default: &str) -> String {
+    if stored.trim().is_empty() { default.to_string() } else { stored }
+}
+
 fn keyring_entry() -> Option<keyring_core::Entry> {
     keyring_core::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()
 }
@@ -90,6 +95,17 @@ struct StoredCreds {
     account_id: String,
     r2_bucket: String,
     d1_database_id: String,
+    /// Absent in files written before publishing needed a public base URL;
+    /// defaults to empty and is reported at publish time rather than here, so
+    /// an existing sign-in keeps working for everything else.
+    #[serde(default)]
+    r2_public_url: String,
+    /// Empty in files written before the layout was configurable; the defaults
+    /// are applied on load so an existing sign-in keeps its current behaviour.
+    #[serde(default)]
+    thumbnail_key_pattern: String,
+    #[serde(default)]
+    media_key_pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     api_token: Option<String>,
 }
@@ -114,6 +130,15 @@ pub fn load_from_disk(app: &tauri::AppHandle) -> Option<CloudflareConfig> {
         api_token,
         r2_bucket: stored.r2_bucket,
         d1_database_id: stored.d1_database_id,
+        r2_public_url: stored.r2_public_url,
+        thumbnail_key_pattern: or_default(
+            stored.thumbnail_key_pattern,
+            crate::media_keys::DEFAULT_THUMBNAIL_PATTERN,
+        ),
+        media_key_pattern: or_default(
+            stored.media_key_pattern,
+            crate::media_keys::DEFAULT_MEDIA_PATTERN,
+        ),
     })
 }
 
@@ -124,6 +149,9 @@ fn save_to_disk(app: &tauri::AppHandle, config: &CloudflareConfig) -> Result<(),
         account_id: config.account_id.clone(),
         r2_bucket: config.r2_bucket.clone(),
         d1_database_id: config.d1_database_id.clone(),
+        r2_public_url: config.r2_public_url.clone(),
+        thumbnail_key_pattern: config.thumbnail_key_pattern.clone(),
+        media_key_pattern: config.media_key_pattern.clone(),
         api_token: (!in_keyring).then(|| config.api_token.clone()),
     };
 
@@ -152,6 +180,9 @@ pub struct PublicCreds {
     pub account_id: String,
     pub r2_bucket: String,
     pub d1_database_id: String,
+    pub r2_public_url: String,
+    pub thumbnail_key_pattern: String,
+    pub media_key_pattern: String,
 }
 
 /// Whether the app is signed in, plus whether credentials are stored at all.
@@ -169,6 +200,7 @@ pub fn save_credentials(
     api_token: String,
     r2_bucket: String,
     d1_database_id: String,
+    r2_public_url: String,
 ) -> Result<(), String> {
     // Trim stray whitespace/newlines that sneak in when pasting values.
     let config = CloudflareConfig {
@@ -176,7 +208,47 @@ pub fn save_credentials(
         api_token: api_token.trim().to_string(),
         r2_bucket: r2_bucket.trim().to_string(),
         d1_database_id: d1_database_id.trim().to_string(),
+        // Trailing slashes would double up when joined with an object key.
+        r2_public_url: r2_public_url.trim().trim_end_matches('/').to_string(),
+        thumbnail_key_pattern: crate::media_keys::DEFAULT_THUMBNAIL_PATTERN.to_string(),
+        media_key_pattern: crate::media_keys::DEFAULT_MEDIA_PATTERN.to_string(),
     };
+    save_to_disk(&app, &config)?;
+    set_creds(Some(config));
+    Ok(())
+}
+
+/// Update the settings editable from the Settings screen, leaving the account
+/// and API token untouched — the token lives in the keychain and should not
+/// have to be re-pasted to change a URL.
+///
+/// Patterns are validated here rather than only in the UI, because a bad one
+/// does not fail at publish: it writes objects to the wrong keys, and the blog
+/// simply 404s.
+#[tauri::command]
+pub fn save_settings(
+    app: tauri::AppHandle,
+    r2_public_url: String,
+    thumbnail_key_pattern: String,
+    media_key_pattern: String,
+) -> Result<(), String> {
+    use crate::media_keys::{validate_pattern, PatternKind};
+
+    let mut config = get_creds().ok_or("Not signed in")?;
+    let public_url = r2_public_url.trim().trim_end_matches('/').to_string();
+    if !public_url.is_empty() && !public_url.starts_with("http") {
+        return Err("R2 Public URL must start with http:// or https://".into());
+    }
+
+    let thumbnail = thumbnail_key_pattern.trim().to_string();
+    let media = media_key_pattern.trim().to_string();
+    validate_pattern(&thumbnail, PatternKind::Thumbnail)?;
+    validate_pattern(&media, PatternKind::Media)?;
+
+    config.r2_public_url = public_url;
+    config.thumbnail_key_pattern = thumbnail;
+    config.media_key_pattern = media;
+
     save_to_disk(&app, &config)?;
     set_creds(Some(config));
     Ok(())
@@ -195,6 +267,9 @@ pub fn get_credentials() -> Option<PublicCreds> {
         account_id: c.account_id,
         r2_bucket: c.r2_bucket,
         d1_database_id: c.d1_database_id,
+        r2_public_url: c.r2_public_url,
+        thumbnail_key_pattern: c.thumbnail_key_pattern,
+        media_key_pattern: c.media_key_pattern,
     })
 }
 

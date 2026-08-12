@@ -4,6 +4,7 @@ mod commands;
 mod db;
 mod entities;
 mod imaging;
+mod media_keys;
 mod update;
 
 use sea_orm::DatabaseConnection;
@@ -57,6 +58,7 @@ pub fn run() {
             auth::clear_credentials,
             auth::get_credentials,
             auth::session_status,
+            auth::save_settings,
             commands::upload_article,
             commands::stage_image,
             // Posts — local SQLite
@@ -99,6 +101,9 @@ pub fn run() {
             commands::upload_media,
             commands::list_media,
             commands::delete_media,
+            commands::stage_media_from_library,
+            // Post thumbnail
+            commands::set_post_thumbnail,
             // Self-update (GitHub Releases)
             update::check_for_update,
             update::install_update,
