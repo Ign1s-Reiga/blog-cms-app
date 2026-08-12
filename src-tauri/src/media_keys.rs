@@ -48,6 +48,21 @@ pub fn body_image_key(slug: &str, stored_name: &str) -> String {
     format!("{}{stored_name}", media_prefix(slug))
 }
 
+/// The public URL written into published Markdown for a body image.
+///
+/// `public_base` is the bucket's public origin and must match the blog's
+/// `R2_PUBLIC_URL`. Writing the URL out in full means the reader renders the
+/// Markdown as-is, with no rewriting step and no need to know this layout for
+/// body images — at the cost of a domain change becoming a rewrite of every
+/// published post.
+pub fn body_image_url(public_base: &str, slug: &str, stored_name: &str) -> String {
+    format!(
+        "{}/{}",
+        public_base.trim_end_matches('/'),
+        body_image_key(slug, stored_name)
+    )
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(digest.len() * 2);
@@ -67,6 +82,14 @@ mod tests {
         assert_eq!(body_key("my-post"), "posts/my-post.md");
         assert_eq!(thumbnail_key("my-post"), "posts/my-post/thumbnail.avif");
         assert_eq!(body_image_key("my-post", "abc.avif"), "posts/my-post/abc.avif");
+    }
+
+    #[test]
+    fn body_image_url_joins_without_doubling_slashes() {
+        let want = "https://cdn.example.com/posts/my-post/abc.avif";
+        assert_eq!(body_image_url("https://cdn.example.com", "my-post", "abc.avif"), want);
+        // A base pasted with a trailing slash must not produce `.com//posts`.
+        assert_eq!(body_image_url("https://cdn.example.com/", "my-post", "abc.avif"), want);
     }
 
     #[test]

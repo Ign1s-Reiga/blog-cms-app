@@ -712,13 +712,21 @@ pub async fn save_post(
         let (client, config) = cf()?;
 
         // Referenced local images → R2 under `posts/<slug>/<sha256>.<ext>`, and
-        // the body's local `assets/<uuid>.<ext>` reference is rewritten to the
-        // bare stored name. The blog resolves that against the post's own media
-        // prefix, so the published Markdown carries no local paths and no
-        // hard-coded bucket host.
+        // the body's local `assets/<uuid>.<ext>` reference is rewritten to that
+        // object's public URL. The published Markdown is then self-contained:
+        // the blog renders it as-is with no rewriting step.
         //
         // Images go up before the body, so the body never lands referencing an
         // object that isn't there yet.
+        let public_base = config.r2_public_url.trim_end_matches('/');
+        if public_base.is_empty() {
+            return Err(
+                "No R2 public URL is configured, so image links cannot be written. \
+                 Sign out and sign in again to set it."
+                    .to_string(),
+            );
+        }
+
         let mut published = body.clone();
         for r in extract_asset_refs(&body) {
             let file_name = r.strip_prefix("assets/").unwrap_or(&r);
@@ -728,7 +736,8 @@ pub async fn save_post(
                 let key = media_keys::body_image_key(&saved.slug, &stored);
                 cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, content_type_for(&ext))
                     .await?;
-                published = published.replace(&r, &stored);
+                published =
+                    published.replace(&r, &media_keys::body_image_url(public_base, &saved.slug, &stored));
             }
         }
 
