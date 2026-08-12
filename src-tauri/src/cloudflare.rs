@@ -22,6 +22,12 @@ pub struct CloudflareConfig {
     pub api_token:     String,
     pub r2_bucket:     String,
     pub d1_database_id: String,
+    /// Public origin the bucket is served from, e.g. `https://cdn.example.com`.
+    /// Written into published Markdown as the base for image URLs, so it must
+    /// match the blog's `R2_PUBLIC_URL`. Empty for credentials saved before
+    /// this field existed; publishing reports that rather than emitting broken
+    /// links.
+    pub r2_public_url: String,
 }
 
 impl CloudflareConfig {
@@ -32,6 +38,7 @@ impl CloudflareConfig {
             api_token:      std::env::var("CF_API_TOKEN")     .map_err(|_| missing("CF_API_TOKEN"))?,
             r2_bucket:      std::env::var("CF_R2_BUCKET")     .map_err(|_| missing("CF_R2_BUCKET"))?,
             d1_database_id: std::env::var("CF_D1_DATABASE_ID").map_err(|_| missing("CF_D1_DATABASE_ID"))?,
+            r2_public_url:  std::env::var("CF_R2_PUBLIC_URL") .map_err(|_| missing("CF_R2_PUBLIC_URL"))?,
         })
     }
 }

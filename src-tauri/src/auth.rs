@@ -90,6 +90,11 @@ struct StoredCreds {
     account_id: String,
     r2_bucket: String,
     d1_database_id: String,
+    /// Absent in files written before publishing needed a public base URL;
+    /// defaults to empty and is reported at publish time rather than here, so
+    /// an existing sign-in keeps working for everything else.
+    #[serde(default)]
+    r2_public_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     api_token: Option<String>,
 }
@@ -114,6 +119,7 @@ pub fn load_from_disk(app: &tauri::AppHandle) -> Option<CloudflareConfig> {
         api_token,
         r2_bucket: stored.r2_bucket,
         d1_database_id: stored.d1_database_id,
+        r2_public_url: stored.r2_public_url,
     })
 }
 
@@ -124,6 +130,7 @@ fn save_to_disk(app: &tauri::AppHandle, config: &CloudflareConfig) -> Result<(),
         account_id: config.account_id.clone(),
         r2_bucket: config.r2_bucket.clone(),
         d1_database_id: config.d1_database_id.clone(),
+        r2_public_url: config.r2_public_url.clone(),
         api_token: (!in_keyring).then(|| config.api_token.clone()),
     };
 
@@ -152,6 +159,7 @@ pub struct PublicCreds {
     pub account_id: String,
     pub r2_bucket: String,
     pub d1_database_id: String,
+    pub r2_public_url: String,
 }
 
 /// Whether the app is signed in, plus whether credentials are stored at all.
@@ -169,6 +177,7 @@ pub fn save_credentials(
     api_token: String,
     r2_bucket: String,
     d1_database_id: String,
+    r2_public_url: String,
 ) -> Result<(), String> {
     // Trim stray whitespace/newlines that sneak in when pasting values.
     let config = CloudflareConfig {
@@ -176,6 +185,8 @@ pub fn save_credentials(
         api_token: api_token.trim().to_string(),
         r2_bucket: r2_bucket.trim().to_string(),
         d1_database_id: d1_database_id.trim().to_string(),
+        // Trailing slashes would double up when joined with an object key.
+        r2_public_url: r2_public_url.trim().trim_end_matches('/').to_string(),
     };
     save_to_disk(&app, &config)?;
     set_creds(Some(config));
@@ -195,6 +206,7 @@ pub fn get_credentials() -> Option<PublicCreds> {
         account_id: c.account_id,
         r2_bucket: c.r2_bucket,
         d1_database_id: c.d1_database_id,
+        r2_public_url: c.r2_public_url,
     })
 }
 

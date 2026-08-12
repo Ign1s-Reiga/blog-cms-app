@@ -5,7 +5,12 @@ import { LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { UpdateCard } from "@/components/UpdateCard";
 
-type Creds = { account_id: string; r2_bucket: string; d1_database_id: string };
+type Creds = {
+  account_id: string;
+  r2_bucket: string;
+  d1_database_id: string;
+  r2_public_url: string;
+};
 
 export default function SettingsPage() {
   const [creds, setCreds]     = useState<Creds | null>(null);
@@ -63,6 +68,7 @@ export default function SettingsPage() {
                 <Row label="Account ID" value={creds.account_id} />
                 <Row label="R2 Bucket" value={creds.r2_bucket} />
                 <Row label="D1 Database" value={creds.d1_database_id} />
+                <Row label="R2 Public URL" value={creds.r2_public_url || "not set"} />
                 <div className="pt-2">
                   <Button
                     variant="outline"
