@@ -473,7 +473,7 @@ pub async fn d1_series_update(
 // ─── Client ─────────────────────────────────────────────────────────────────
 
 /// A reqwest client plus the signed-in Cloudflare credentials.
-pub fn cf() -> Result<(reqwest::Client, CloudflareConfig), String> {
+pub fn cf() -> Result<(Client, CloudflareConfig), String> {
     let config = crate::auth::get_creds().ok_or_else(|| "Not signed in to Cloudflare".to_string())?;
-    Ok((reqwest::Client::new(), config))
+    Ok((Client::new(), config))
 }

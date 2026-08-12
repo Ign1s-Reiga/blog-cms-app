@@ -83,53 +83,77 @@ fn extract_asset_refs(body: &str) -> Vec<String> {
     refs
 }
 
-// ─── Frontmatter parser ───────────────────────────────────────────────────────
+// ─── Front matter ─────────────────────────────────────────────────────────────
 
-struct Frontmatter {
-    title: Option<String>,
-    tags:  Option<String>,
+/// Remove a leading YAML front-matter block, if the file opens with one.
+///
+/// Nothing reads front matter: the blog takes a post's metadata from D1 and
+/// renders the body as given, so a block left in place publishes as a
+/// horizontal rule followed by a heading made of the raw `title:`/`tags:`
+/// lines. Imported files may still carry one from whatever wrote them, so it is
+/// dropped on the way in.
+///
+/// The block must open on the very first line and close on a line of its own.
+/// Without a closing delimiter the document is returned untouched, so a file
+/// that merely starts with a `---` rule is not truncated.
+fn strip_frontmatter(content: &str) -> &str {
+    let Some(after_open) = content.strip_prefix("---") else {
+        return content;
+    };
+    // The opening `---` has to be alone on its line, or it is a rule or a
+    // setext heading underline rather than a delimiter.
+    let Some(body) = after_open
+        .strip_prefix('\n')
+        .or_else(|| after_open.strip_prefix("\r\n"))
+    else {
+        return content;
+    };
+
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        if matches!(line.trim_end_matches(['\r', '\n']), "---" | "...") {
+            return body[offset + line.len()..].trim_start_matches(['\r', '\n']);
+        }
+        offset += line.len();
+    }
+    content
 }
 
-/// Parse YAML-style front matter delimited by `---`.
-/// Recognises `title:` and `tags:` fields; ignores everything else.
-fn parse_frontmatter(content: &str) -> Frontmatter {
-    // Front matter must begin at the very first character.
-    let body = match content.strip_prefix("---") {
-        Some(s) => s,
-        None => return Frontmatter { title: None, tags: None },
-    };
+#[cfg(test)]
+mod tests {
+    use super::strip_frontmatter;
 
-    // Find the closing delimiter (handles both LF and CRLF).
-    let end = body.find("\n---").or_else(|| body.find("\r\n---"));
-    let block = match end {
-        Some(pos) => &body[..pos],
-        None => return Frontmatter { title: None, tags: None },
-    };
+    #[test]
+    fn strips_a_leading_block() {
+        let doc = "---\ntitle: My Post\ntags: rust, tauri\n---\n\nReal body.\n";
+        assert_eq!(strip_frontmatter(doc), "Real body.\n");
+    }
 
-    let mut title = None;
-    let mut tags  = None;
+    #[test]
+    fn handles_crlf_and_the_dots_terminator() {
+        assert_eq!(strip_frontmatter("---\r\ntitle: x\r\n---\r\nBody\r\n"), "Body\r\n");
+        assert_eq!(strip_frontmatter("---\ntitle: x\n...\nBody\n"), "Body\n");
+    }
 
-    for raw in block.lines() {
-        let line = raw.trim();
-        if let Some(val) = line.strip_prefix("title:") {
-            title = Some(
-                val.trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            );
-        } else if let Some(val) = line.strip_prefix("tags:") {
-            // Accept both `tags: rust, tauri` and `tags: "rust, tauri"`
-            tags = Some(
-                val.trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            );
+    /// A document that merely opens with a rule must survive intact — otherwise
+    /// importing it would silently delete everything up to the next `---`.
+    #[test]
+    fn leaves_documents_without_a_closing_delimiter_alone() {
+        let rule_only = "---\n\nJust a rule, then prose.\n";
+        assert_eq!(strip_frontmatter(rule_only), rule_only);
+    }
+
+    #[test]
+    fn leaves_ordinary_documents_alone() {
+        for doc in ["# Heading\n\nBody\n", "Body only\n", "", "----\nnot a delimiter\n"] {
+            assert_eq!(strip_frontmatter(doc), doc);
         }
     }
 
-    Frontmatter { title, tags }
+    #[test]
+    fn an_empty_block_still_goes() {
+        assert_eq!(strip_frontmatter("---\n---\nBody\n"), "Body\n");
+    }
 }
 
 // ─── Command ──────────────────────────────────────────────────────────────────
@@ -173,15 +197,17 @@ pub async fn upload_article(
         .map_err(|e| format!("Failed to read file: {e}"))?;
 
     // ── 3. Extract metadata ───────────────────────────────────────────────────
-    let fm = parse_frontmatter(&content);
+    // The file name is the only metadata an imported document carries that the
+    // blog can use; tags are added afterwards in the app.
+    let body = strip_frontmatter(&content);
 
     let stem = file_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("untitled");
 
-    let title = fm.title.unwrap_or_else(|| stem.to_string());
-    let tags  = fm.tags.unwrap_or_default();
+    let title = stem.to_string();
+    let tags = String::new();
 
     // ── 4. Derive slug + R2 key ───────────────────────────────────────────────
     // The id is auto-assigned by the DB, so the R2 object key is keyed by slug.
@@ -198,7 +224,7 @@ pub async fn upload_article(
     let (client, config) = cf()?;
 
     // ── 6. Upload to R2 ───────────────────────────────────────────────────────
-    cloudflare::upload_to_r2(&client, &config, &r2_key, &content).await?;
+    cloudflare::upload_to_r2(&client, &config, &r2_key, body).await?;
 
     // ── 7. Record metadata in D1 and the local cache ─────────────────────────
     // R2 succeeded; mirror the metadata to D1, then cache it locally. If D1
