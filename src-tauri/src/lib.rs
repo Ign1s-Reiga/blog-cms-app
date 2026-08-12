@@ -1,3 +1,4 @@
+mod analytics;
 mod auth;
 mod cloudflare;
 mod commands;
@@ -59,6 +60,8 @@ pub fn run() {
             auth::get_credentials,
             auth::session_status,
             auth::save_settings,
+            // Analytics (Cloudflare GraphQL)
+            analytics::fetch_analytics,
             commands::upload_article,
             commands::stage_image,
             // Posts — local SQLite
