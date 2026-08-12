@@ -5,11 +5,12 @@
 //! mirror the Drizzle schema (`series` and `blog-db`).
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
-    QueryFilter, QueryOrder, Schema, Set,
+    ActiveModelBehavior, ActiveModelTrait, ColumnTrait, ConnectionTrait, Database,
+    DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Schema, Set,
 };
 use tauri::Manager;
 
+use crate::entities::record::{Id, Record};
 use crate::entities::{post, post_stage, series};
 
 /// Open (creating if needed) the local SQLite database and ensure its schema
@@ -65,41 +66,52 @@ async fn ensure_schema(db: &DatabaseConnection) -> Result<(), String> {
     Ok(())
 }
 
-// ─── Posts ────────────────────────────────────────────────────────────────────
+// ─── CRUD ─────────────────────────────────────────────────────────────────────
+//
+// One implementation per operation, shared by every entity that implements
+// `Record`. `post` and `series` previously had five identical functions each,
+// differing only in the type they named.
 
-pub async fn post_create(db: &DatabaseConnection, model: post::Model) -> Result<post::Model, String> {
-    model
-        .into_insert()
-        .insert(db)
-        .await
-        .map_err(|e| e.to_string())
+/// Insert a model, returning it as stored (with its assigned primary key).
+pub async fn create<M>(db: &DatabaseConnection, model: M) -> Result<M, String>
+where
+    M: Record + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>,
+    <M::Entity as EntityTrait>::ActiveModel:
+        ActiveModelTrait<Entity = M::Entity> + ActiveModelBehavior + Send,
+{
+    model.into_insert().insert(db).await.map_err(|e| e.to_string())
 }
 
-pub async fn post_list(db: &DatabaseConnection) -> Result<Vec<post::Model>, String> {
-    post::Entity::find()
-        .order_by_desc(post::Column::CreatedAt)
+/// Every row, newest first by the record's own ordering column.
+pub async fn list<M: Record>(db: &DatabaseConnection) -> Result<Vec<M>, String> {
+    M::Entity::find()
+        .order_by_desc(M::order_column())
         .all(db)
         .await
         .map_err(|e| e.to_string())
 }
 
-pub async fn post_get(db: &DatabaseConnection, id: i32) -> Result<Option<post::Model>, String> {
-    post::Entity::find_by_id(id)
+/// One row by primary key, or `None` when it does not exist.
+pub async fn get<M: Record>(db: &DatabaseConnection, id: Id<M>) -> Result<Option<M>, String> {
+    M::Entity::find_by_id(id)
         .one(db)
         .await
         .map_err(|e| e.to_string())
 }
 
-pub async fn post_update(db: &DatabaseConnection, model: post::Model) -> Result<post::Model, String> {
-    model
-        .into_update()
-        .update(db)
-        .await
-        .map_err(|e| e.to_string())
+/// Overwrite the row this model's primary key points at.
+pub async fn update<M>(db: &DatabaseConnection, model: M) -> Result<M, String>
+where
+    M: Record + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>,
+    <M::Entity as EntityTrait>::ActiveModel:
+        ActiveModelTrait<Entity = M::Entity> + ActiveModelBehavior + Send,
+{
+    model.into_update().update(db).await.map_err(|e| e.to_string())
 }
 
-pub async fn post_delete(db: &DatabaseConnection, id: i32) -> Result<(), String> {
-    post::Entity::delete_by_id(id)
+/// Delete by primary key. Deleting an absent row is not an error.
+pub async fn delete<M: Record>(db: &DatabaseConnection, id: Id<M>) -> Result<(), String> {
+    M::Entity::delete_by_id(id)
         .exec(db)
         .await
         .map_err(|e| e.to_string())?;
@@ -175,53 +187,6 @@ async fn upsert_post_from_remote(db: &DatabaseConnection, remote: post::Model) -
         post_stage::Model { post_id: saved.id, stage: stage.to_string(), staged_at: saved.updated_at },
     )
     .await?;
-    Ok(())
-}
-
-// ─── Series ───────────────────────────────────────────────────────────────────
-
-pub async fn series_create(
-    db: &DatabaseConnection,
-    model: series::Model,
-) -> Result<series::Model, String> {
-    model
-        .into_insert()
-        .insert(db)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-pub async fn series_list(db: &DatabaseConnection) -> Result<Vec<series::Model>, String> {
-    series::Entity::find()
-        .order_by_desc(series::Column::CreatedAt)
-        .all(db)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-pub async fn series_get(db: &DatabaseConnection, id: i32) -> Result<Option<series::Model>, String> {
-    series::Entity::find_by_id(id)
-        .one(db)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-pub async fn series_update(
-    db: &DatabaseConnection,
-    model: series::Model,
-) -> Result<series::Model, String> {
-    model
-        .into_update()
-        .update(db)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-pub async fn series_delete(db: &DatabaseConnection, id: i32) -> Result<(), String> {
-    series::Entity::delete_by_id(id)
-        .exec(db)
-        .await
-        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

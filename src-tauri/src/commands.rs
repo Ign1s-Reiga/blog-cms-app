@@ -217,8 +217,8 @@ pub async fn upload_article(
         created_at: now,
         updated_at: now,
     };
-    cloudflare::d1_post_insert(&client, &config, post.clone()).await?;
-    let created = db::post_create(conn.inner(), post).await?;
+    cloudflare::d1_insert::<PostModel>(&client, &config, post.clone()).await?;
+    let created = db::create::<PostModel>(conn.inner(), post).await?;
     // Imported posts start staged as Draft.
     db::stage_set(
         conn.inner(),
@@ -251,7 +251,7 @@ pub async fn create_post(
     let now = now_ts();
     post.created_at = now;
     post.updated_at = now;
-    let created = db::post_create(conn.inner(), post).await?;
+    let created = db::create::<PostModel>(conn.inner(), post).await?;
     // New posts start staged as Draft.
     db::stage_set(
         conn.inner(),
@@ -267,7 +267,7 @@ pub async fn create_post(
 
 #[tauri::command]
 pub async fn list_posts(conn: State<'_, DatabaseConnection>) -> Result<Vec<PostModel>, String> {
-    db::post_list(conn.inner()).await
+    db::list::<PostModel>(conn.inner()).await
 }
 
 #[tauri::command]
@@ -275,7 +275,7 @@ pub async fn get_post(
     conn: State<'_, DatabaseConnection>,
     id: i32,
 ) -> Result<Option<PostModel>, String> {
-    db::post_get(conn.inner(), id).await
+    db::get::<PostModel>(conn.inner(), id).await
 }
 
 #[tauri::command]
@@ -285,12 +285,12 @@ pub async fn update_post(
 ) -> Result<PostModel, String> {
     let mut post = post;
     post.updated_at = now_ts();
-    db::post_update(conn.inner(), post).await
+    db::update::<PostModel>(conn.inner(), post).await
 }
 
 #[tauri::command]
 pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: i32) -> Result<(), String> {
-    db::post_delete(conn.inner(), id).await
+    db::delete::<PostModel>(conn.inner(), id).await
 }
 
 // ── Posts: Cloudflare D1 ────────────────────────────────────────────────────────
@@ -302,19 +302,19 @@ pub async fn d1_create_post(post: PostModel) -> Result<i64, String> {
     let now = now_ts();
     post.created_at = now;
     post.updated_at = now;
-    cloudflare::d1_post_insert(&client, &config, post).await
+    cloudflare::d1_insert::<PostModel>(&client, &config, post).await
 }
 
 #[tauri::command]
 pub async fn d1_list_posts() -> Result<Vec<PostModel>, String> {
     let (client, config) = cf()?;
-    cloudflare::d1_post_list(&client, &config).await
+    cloudflare::d1_list::<PostModel>(&client, &config).await
 }
 
 #[tauri::command]
 pub async fn d1_get_post(id: i32) -> Result<Option<PostModel>, String> {
     let (client, config) = cf()?;
-    cloudflare::d1_post_get(&client, &config, id).await
+    cloudflare::d1_get::<PostModel>(&client, &config, id).await
 }
 
 #[tauri::command]
@@ -328,7 +328,7 @@ pub async fn d1_update_post(post: PostModel) -> Result<(), String> {
 #[tauri::command]
 pub async fn d1_delete_post(id: i32) -> Result<(), String> {
     let (client, config) = cf()?;
-    cloudflare::d1_post_delete(&client, &config, id).await
+    cloudflare::d1_delete::<PostModel>(&client, &config, id).await
 }
 
 // ── Series: local SQLite ────────────────────────────────────────────────────────
@@ -340,12 +340,12 @@ pub async fn create_series(
 ) -> Result<SeriesModel, String> {
     let mut series = series;
     series.created_at = now_ts();
-    db::series_create(conn.inner(), series).await
+    db::create::<SeriesModel>(conn.inner(), series).await
 }
 
 #[tauri::command]
 pub async fn list_series(conn: State<'_, DatabaseConnection>) -> Result<Vec<SeriesModel>, String> {
-    db::series_list(conn.inner()).await
+    db::list::<SeriesModel>(conn.inner()).await
 }
 
 #[tauri::command]
@@ -353,7 +353,7 @@ pub async fn get_series(
     conn: State<'_, DatabaseConnection>,
     id: i32,
 ) -> Result<Option<SeriesModel>, String> {
-    db::series_get(conn.inner(), id).await
+    db::get::<SeriesModel>(conn.inner(), id).await
 }
 
 #[tauri::command]
@@ -361,12 +361,12 @@ pub async fn update_series(
     conn: State<'_, DatabaseConnection>,
     series: SeriesModel,
 ) -> Result<SeriesModel, String> {
-    db::series_update(conn.inner(), series).await
+    db::update::<SeriesModel>(conn.inner(), series).await
 }
 
 #[tauri::command]
 pub async fn delete_series(conn: State<'_, DatabaseConnection>, id: i32) -> Result<(), String> {
-    db::series_delete(conn.inner(), id).await
+    db::delete::<SeriesModel>(conn.inner(), id).await
 }
 
 // ── Series: Cloudflare D1 ───────────────────────────────────────────────────────
@@ -376,19 +376,19 @@ pub async fn d1_create_series(series: SeriesModel) -> Result<i64, String> {
     let (client, config) = cf()?;
     let mut series = series;
     series.created_at = now_ts();
-    cloudflare::d1_series_insert(&client, &config, series).await
+    cloudflare::d1_insert::<SeriesModel>(&client, &config, series).await
 }
 
 #[tauri::command]
 pub async fn d1_list_series() -> Result<Vec<SeriesModel>, String> {
     let (client, config) = cf()?;
-    cloudflare::d1_series_list(&client, &config).await
+    cloudflare::d1_list::<SeriesModel>(&client, &config).await
 }
 
 #[tauri::command]
 pub async fn d1_get_series(id: i32) -> Result<Option<SeriesModel>, String> {
     let (client, config) = cf()?;
-    cloudflare::d1_series_get(&client, &config, id).await
+    cloudflare::d1_get::<SeriesModel>(&client, &config, id).await
 }
 
 #[tauri::command]
@@ -400,7 +400,7 @@ pub async fn d1_update_series(series: SeriesModel) -> Result<(), String> {
 #[tauri::command]
 pub async fn d1_delete_series(id: i32) -> Result<(), String> {
     let (client, config) = cf()?;
-    cloudflare::d1_series_delete(&client, &config, id).await
+    cloudflare::d1_delete::<SeriesModel>(&client, &config, id).await
 }
 
 // ─── Publish staging ────────────────────────────────────────────────────────
@@ -474,13 +474,13 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> Result<Po
     let now = now_ts();
 
     // 1. Flip the post's published state in the local cache.
-    let mut post = db::post_get(conn, post_id)
+    let mut post = db::get::<PostModel>(conn, post_id)
         .await?
         .ok_or_else(|| format!("post {post_id} not found"))?;
     post.published = publish;
     post.published_at = if publish { Some(now) } else { None };
     post.updated_at = now;
-    let post = db::post_update(conn, post).await?;
+    let post = db::update::<PostModel>(conn, post).await?;
 
     // 2. Push the change to Cloudflare D1.
     let synced = match cf() {
@@ -515,7 +515,7 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> Result<Po
 /// errors with a summary if any failed.
 #[tauri::command]
 pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, String> {
-    let posts = db::post_list(conn.inner()).await?;
+    let posts = db::list::<PostModel>(conn.inner()).await?;
     let (client, config) = cf()?;
     let now = now_ts();
 
@@ -556,7 +556,7 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, St
 #[tauri::command]
 pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> Result<usize, String> {
     let (client, config) = cf()?;
-    let remote = cloudflare::d1_post_list(&client, &config).await?;
+    let remote = cloudflare::d1_list::<PostModel>(&client, &config).await?;
     let (upserted, _deleted) = db::mirror_posts(conn.inner(), remote).await?;
     Ok(upserted)
 }
@@ -632,7 +632,7 @@ pub async fn save_post(
     // Start from the existing row (preserving slug/created_at/series/excerpt) or
     // build a fresh one for a new post.
     let mut model = match id {
-        Some(id) => db::post_get(conn.inner(), id)
+        Some(id) => db::get::<PostModel>(conn.inner(), id)
             .await?
             .ok_or_else(|| format!("post {id} not found"))?,
         None => {
@@ -663,8 +663,8 @@ pub async fn save_post(
 
     // 1. Persist metadata locally.
     let saved = match id {
-        Some(_) => db::post_update(conn.inner(), model).await?,
-        None => db::post_create(conn.inner(), model).await?,
+        Some(_) => db::update::<PostModel>(conn.inner(), model).await?,
+        None => db::create::<PostModel>(conn.inner(), model).await?,
     };
 
     // 2. Write the Markdown body to the local cache.
