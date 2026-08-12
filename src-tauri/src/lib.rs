@@ -3,6 +3,7 @@ mod cloudflare;
 mod commands;
 mod db;
 mod entities;
+mod imaging;
 mod update;
 
 use sea_orm::DatabaseConnection;

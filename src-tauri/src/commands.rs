@@ -10,6 +10,7 @@ use crate::db;
 use crate::entities::post::Model as PostModel;
 use crate::entities::post_stage;
 use crate::entities::series::Model as SeriesModel;
+use crate::imaging;
 use sea_orm::DatabaseConnection as Db;
 
 /// Current time as a Unix timestamp in seconds (the schema's date encoding).
@@ -781,11 +782,24 @@ pub async fn stage_image(app: tauri::AppHandle, src_path: String) -> Result<Stag
         .await
         .map_err(|e| format!("Failed to create assets dir: {e}"))?;
 
-    let file_name = format!("{}.{ext}", uuid::Uuid::new_v4());
+    // JPG/PNG are converted to AVIF here rather than at publish, so the editor
+    // preview shows the same bytes that will reach readers. Other formats are
+    // copied through untouched.
+    let file_name = format!("{}.{}", uuid::Uuid::new_v4(), imaging::stored_ext(&ext));
     let dest = assets_dir.join(&file_name);
-    tokio::fs::copy(&src, &dest)
-        .await
-        .map_err(|e| format!("Failed to copy image: {e}"))?;
+    if imaging::is_convertible(&ext) {
+        let bytes = tokio::fs::read(&src)
+            .await
+            .map_err(|e| format!("Failed to read image: {e}"))?;
+        let avif = imaging::convert_to_avif(bytes).await?;
+        tokio::fs::write(&dest, &avif)
+            .await
+            .map_err(|e| format!("Failed to write converted image: {e}"))?;
+    } else {
+        tokio::fs::copy(&src, &dest)
+            .await
+            .map_err(|e| format!("Failed to copy image: {e}"))?;
+    }
 
     let name = src
         .file_name()
@@ -847,6 +861,14 @@ pub async fn upload_media(app: tauri::AppHandle) -> Result<MediaItem, String> {
     let bytes = tokio::fs::read(&src)
         .await
         .map_err(|e| format!("Failed to read file: {e}"))?;
+
+    // JPG/PNG become AVIF; everything else is uploaded as picked. `size` is
+    // measured after conversion so the library reports what R2 actually holds.
+    let (ext, bytes) = if imaging::is_convertible(&ext) {
+        ("avif".to_string(), imaging::convert_to_avif(bytes).await?)
+    } else {
+        (ext, bytes)
+    };
     let size = bytes.len() as u64;
 
     let file_name = format!("{}.{ext}", uuid::Uuid::new_v4());
