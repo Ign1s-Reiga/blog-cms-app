@@ -112,13 +112,59 @@ jobs:
       - name: cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked
 
+  # `paths:` only exists on the workflow trigger, not per job, so filtering
+  # there would skip the lint and check jobs too. This computes the answer for
+  # the one expensive job instead.
+  detect:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      bundle: ${{ steps.filter.outputs.bundle }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Does this change reach the installers?
+        id: filter
+        shell: bash
+        run: |
+          # Anything not a pull request (a manual run) has no base to diff
+          # against, so it builds.
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "bundle=true" >> "$GITHUB_OUTPUT"
+            echo "Not a pull request — building."
+            exit 0
+          fi
+
+          changed=$(git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD")
+          echo "Changed files:"
+          echo "$changed" | sed 's/^/  /'
+
+          # The frontend is embedded in the installer, so a .tsx change does
+          # alter the shipped binary — but `Lint & build frontend` already
+          # compiles it, and what this job uniquely proves is NSIS/MSI
+          # packaging, which turns on the Rust crate, the Tauri config, and the
+          # dependency set. `ci.yml` is included so a change to this job is
+          # still exercised by it.
+          if echo "$changed" | grep -qE '^(src-tauri/|package\.json$|pnpm-lock\.yaml$|\.github/workflows/ci\.yml$)'; then
+            echo "bundle=true" >> "$GITHUB_OUTPUT"
+            echo "-> installers affected; building."
+          else
+            echo "bundle=false" >> "$GITHUB_OUTPUT"
+            echo "-> nothing the installers depend on changed; skipping."
+          fi
+
   bundle:
     name: Build installers
     runs-on: windows-latest
+    needs: detect
     # Bundling only ever ran at tag time, so a change that broke the installers
     # surfaced during a release instead of on the PR that caused it. Skipped on
-    # pushes to main, which are squash-merges of already-built pull requests.
-    if: github.event_name != 'push'
+    # pushes to main, which are squash-merges of already-built pull requests,
+    # and on changes that cannot reach the installers (see `detect`).
+    if: github.event_name != 'push' && needs.detect.outputs.bundle == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
