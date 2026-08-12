@@ -17,6 +17,7 @@ import {
 import Link from "next/link";
 import { SectionHeader } from "@/components/SectionHeader";
 import { StatusDot } from "@/components/StatusDot";
+import { AnalyticsCard } from "@/components/AnalyticsCard";
 import { Card } from "@/components/ui/card";
 import { onPostsRefreshed, pullFromCloud, pushToCloud } from "@/lib/sync";
 
@@ -211,6 +212,8 @@ export default function DashboardPage() {
             ))}
           </div>
         </section>
+
+        <AnalyticsCard />
 
         {/* Recent posts */}
         <section>
