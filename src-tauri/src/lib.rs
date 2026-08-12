@@ -58,6 +58,7 @@ pub fn run() {
             auth::clear_credentials,
             auth::get_credentials,
             auth::session_status,
+            auth::save_settings,
             commands::upload_article,
             commands::stage_image,
             // Posts — local SQLite

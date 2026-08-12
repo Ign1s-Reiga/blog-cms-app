@@ -732,12 +732,11 @@ pub async fn save_post(
             let file_name = r.strip_prefix("assets/").unwrap_or(&r);
             if let Ok(bytes) = tokio::fs::read(assets_dir.join(file_name)).await {
                 let ext = file_name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-                let stored = media_keys::stored_name(&bytes, &ext);
-                let key = media_keys::body_image_key(&saved.slug, &stored);
+                let key =
+                    media_keys::media_key(&config.media_key_pattern, &saved.slug, &bytes, &ext);
                 cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, content_type_for(&ext))
                     .await?;
-                published =
-                    published.replace(&r, &media_keys::body_image_url(public_base, &saved.slug, &stored));
+                published = published.replace(&r, &media_keys::public_url(public_base, &key));
             }
         }
 
@@ -885,8 +884,8 @@ pub async fn set_post_thumbnail(app: tauri::AppHandle, slug: String) -> Result<S
         bytes
     };
 
-    let key = media_keys::thumbnail_key(&slug);
     let (client, config) = cf()?;
+    let key = media_keys::thumbnail_key(&config.thumbnail_key_pattern, &slug, "avif");
     cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, "image/avif").await?;
     Ok(key)
 }

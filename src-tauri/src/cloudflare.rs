@@ -28,6 +28,12 @@ pub struct CloudflareConfig {
     /// this field existed; publishing reports that rather than emitting broken
     /// links.
     pub r2_public_url: String,
+    /// Key layout for a post's thumbnail. Must match the blog's `thumbnailKey`,
+    /// which derives it from the slug alone.
+    pub thumbnail_key_pattern: String,
+    /// Key layout for images used in a post body. Free to change: the reader
+    /// never derives these, it follows the URL written into the Markdown.
+    pub media_key_pattern: String,
 }
 
 impl CloudflareConfig {
@@ -39,6 +45,10 @@ impl CloudflareConfig {
             r2_bucket:      std::env::var("CF_R2_BUCKET")     .map_err(|_| missing("CF_R2_BUCKET"))?,
             d1_database_id: std::env::var("CF_D1_DATABASE_ID").map_err(|_| missing("CF_D1_DATABASE_ID"))?,
             r2_public_url:  std::env::var("CF_R2_PUBLIC_URL") .map_err(|_| missing("CF_R2_PUBLIC_URL"))?,
+            thumbnail_key_pattern: std::env::var("CF_THUMBNAIL_KEY_PATTERN")
+                .unwrap_or_else(|_| crate::media_keys::DEFAULT_THUMBNAIL_PATTERN.to_string()),
+            media_key_pattern: std::env::var("CF_MEDIA_KEY_PATTERN")
+                .unwrap_or_else(|_| crate::media_keys::DEFAULT_MEDIA_PATTERN.to_string()),
         })
     }
 }
