@@ -495,3 +495,11 @@ pub async fn d1_series_get(
     let env = d1_run(client, config, series::Entity::find_by_id(id)).await?;
     Ok(decode_rows::<series::Model>(env)?.into_iter().next())
 }
+
+// ─── Client ─────────────────────────────────────────────────────────────────
+
+/// A reqwest client plus the signed-in Cloudflare credentials.
+pub fn cf() -> Result<(reqwest::Client, CloudflareConfig), String> {
+    let config = crate::auth::get_creds().ok_or_else(|| "Not signed in to Cloudflare".to_string())?;
+    Ok((reqwest::Client::new(), config))
+}

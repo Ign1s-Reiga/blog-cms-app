@@ -1,16 +1,14 @@
-use std::path::PathBuf;
-
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::cloudflare::{self, CloudflareConfig};
+use crate::cloudflare::{self, cf};
 use crate::db;
 use crate::entities::post::Model as PostModel;
 use crate::entities::post_stage;
 use crate::entities::series::Model as SeriesModel;
-use crate::imaging;
+use crate::imaging::{self, StagedImage};
 use crate::media_keys;
 use sea_orm::DatabaseConnection as Db;
 
@@ -41,12 +39,6 @@ fn tags_to_json(csv: &str) -> String {
         .filter(|t| !t.is_empty())
         .collect();
     serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
-}
-
-/// A strict, filesystem-safe slug: non-empty, only lowercase-friendly
-/// alphanumerics plus `-`/`_` (no path separators, dots, or `..`).
-fn is_safe_slug(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// A safe single path segment for the local media cache: no separators or `..`.
@@ -247,12 +239,6 @@ pub async fn upload_article(
 // operate on Cloudflare D1 for cloud sync. Ids are auto-assigned by the database,
 // so create ignores any incoming id and D1 creates return the new row id.
 // `created_at` / `updated_at` are stamped server-side here.
-
-/// A reqwest client plus the signed-in Cloudflare credentials.
-fn cf() -> Result<(reqwest::Client, CloudflareConfig), String> {
-    let config = crate::auth::get_creds().ok_or_else(|| "Not signed in to Cloudflare".to_string())?;
-    Ok((reqwest::Client::new(), config))
-}
 
 // ── Posts: local SQLite ─────────────────────────────────────────────────────────
 
@@ -590,7 +576,7 @@ pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> Resul
 pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> Result<String, String> {
     // The slug builds a local file path and an R2 key, so reject anything that
     // isn't a strict slug (guards against path traversal / injection).
-    if !is_safe_slug(&slug) {
+    if !media_keys::is_safe_slug(&slug) {
         return Err(format!("Invalid post slug: {slug}"));
     }
 
@@ -760,134 +746,6 @@ pub async fn save_post(
         Ok(()) => Ok(saved),
         Err(e) => Err(format!("post saved locally but publish sync failed: {e}")),
     }
-}
-
-// ─── Image staging ──────────────────────────────────────────────────────────
-
-/// A dropped image after it has been copied into the local assets directory.
-#[derive(Serialize)]
-pub struct StagedImage {
-    /// Markdown-relative reference, e.g. `"assets/<uuid>.png"`.
-    pub rel: String,
-    /// Original file name — used as the inserted image's alt text.
-    pub name: String,
-}
-
-/// Copy a dropped image into the app's local `assets` directory so it can be
-/// referenced from a post and rendered in the preview via the asset protocol.
-/// Cloud (R2) upload is deferred to the save/publish sync.
-///
-/// `src_path` is an absolute path from an OS drag-and-drop. The extension is
-/// validated against a fixed allow-list; other files are rejected.
-#[tauri::command]
-pub async fn stage_image(app: tauri::AppHandle, src_path: String) -> Result<StagedImage, String> {
-    let src = PathBuf::from(&src_path);
-
-    let ext = src
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .filter(|e| {
-            matches!(
-                e.as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "svg" | "bmp" | "ico"
-            )
-        })
-        .ok_or_else(|| format!("Unsupported image type: {src_path}"))?;
-
-    let assets_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
-        .join("assets");
-    tokio::fs::create_dir_all(&assets_dir)
-        .await
-        .map_err(|e| format!("Failed to create assets dir: {e}"))?;
-
-    // JPG/PNG are converted to AVIF here rather than at publish, so the editor
-    // preview shows the same bytes that will reach readers. Other formats are
-    // copied through untouched.
-    let file_name = format!("{}.{}", uuid::Uuid::new_v4(), imaging::stored_ext(&ext));
-    let dest = assets_dir.join(&file_name);
-    if imaging::is_convertible(&ext) {
-        let bytes = tokio::fs::read(&src)
-            .await
-            .map_err(|e| format!("Failed to read image: {e}"))?;
-        let avif = imaging::convert_to_avif(bytes).await?;
-        tokio::fs::write(&dest, &avif)
-            .await
-            .map_err(|e| format!("Failed to write converted image: {e}"))?;
-    } else {
-        tokio::fs::copy(&src, &dest)
-            .await
-            .map_err(|e| format!("Failed to copy image: {e}"))?;
-    }
-
-    let name = src
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("image")
-        .to_string();
-
-    Ok(StagedImage { rel: format!("assets/{file_name}"), name })
-}
-
-/// Extensions accepted for a post thumbnail. Narrower than the editor's image
-/// list because the thumbnail is always stored as AVIF, and the decoder is only
-/// built with JPEG and PNG support — an already-AVIF file passes straight
-/// through. WebP/GIF/SVG would need decoders that aren't compiled in.
-const THUMBNAIL_EXTS: &[&str] = &["png", "jpg", "jpeg", "avif"];
-
-/// Pick an image and store it as the post's thumbnail at
-/// `posts/<slug>/thumbnail.avif`, the key the blog derives from the slug alone.
-///
-/// Replaces any existing thumbnail. Returns `Err("cancelled")` when the dialog
-/// is dismissed.
-#[tauri::command]
-pub async fn set_post_thumbnail(app: tauri::AppHandle, slug: String) -> Result<String, String> {
-    if !is_safe_slug(&slug) {
-        return Err(format!("Invalid post slug: {slug}"));
-    }
-
-    let app_clone = app.clone();
-    let picked = tokio::task::spawn_blocking(move || {
-        app_clone
-            .dialog()
-            .file()
-            .add_filter("Image", THUMBNAIL_EXTS)
-            .blocking_pick_file()
-    })
-    .await
-    .map_err(|e| format!("Dialog thread panicked: {e}"))?;
-
-    let src = match picked {
-        None => return Err("cancelled".to_string()),
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        Some(tauri_plugin_dialog::FilePath::Path(p)) => p,
-        #[allow(unreachable_patterns)]
-        Some(_) => return Err("Unsupported path format on this platform".to_string()),
-    };
-
-    let ext = src
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .filter(|e| THUMBNAIL_EXTS.contains(&e.as_str()))
-        .ok_or_else(|| "Unsupported thumbnail type".to_string())?;
-
-    let bytes = tokio::fs::read(&src)
-        .await
-        .map_err(|e| format!("Failed to read image: {e}"))?;
-    let bytes = if imaging::is_convertible(&ext) {
-        imaging::convert_to_avif(bytes).await?
-    } else {
-        bytes
-    };
-
-    let (client, config) = cf()?;
-    let key = media_keys::thumbnail_key(&config.thumbnail_key_pattern, &slug, "avif");
-    cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, "image/avif").await?;
-    Ok(key)
 }
 
 // ─── Media library (R2 + local cache) ─────────────────────────────────────────

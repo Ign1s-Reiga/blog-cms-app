@@ -36,6 +36,12 @@ pub const DEFAULT_THUMBNAIL_PATTERN: &str = "posts/{slug}/thumbnail.{ext}";
 /// Default layout for an image used in a post body.
 pub const DEFAULT_MEDIA_PATTERN: &str = "posts/{slug}/{hash}.{ext}";
 
+/// A strict, filesystem-safe slug: non-empty, only lowercase-friendly
+/// alphanumerics plus `-`/`_` (no path separators, dots, or `..`).
+pub fn is_safe_slug(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// The post body's key. Not configurable: the reader fetches it through the
 /// bucket binding by this exact name.
 pub fn body_key(slug: &str) -> String {
