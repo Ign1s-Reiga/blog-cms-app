@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { CheckCircle2, Plus, Search, Upload } from "lucide-react";
+import { CheckCircle2, Import, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { StatusDot } from "@/components/StatusDot";
@@ -17,7 +17,7 @@ import { onPostsRefreshed } from "@/lib/sync";
 
 type FilterId = "all" | "published" | "draft" | "failed";
 
-type UploadStatus =
+type ImportStatus =
   | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "success"; title: string }
@@ -67,7 +67,7 @@ export default function PostsPage() {
   const router = useRouter();
   const [filter, setFilter]             = useState<FilterId>("all");
   const [search, setSearch]             = useState("");
-  const [uploadStatus, setUploadStatus] = useState<UploadStatus>({ kind: "idle" });
+  const [importStatus, setImportStatus] = useState<ImportStatus>({ kind: "idle" });
 
   const [posts, setPosts]     = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
@@ -110,22 +110,22 @@ export default function PostsPage() {
   // Re-read local data after a cloud refresh.
   useEffect(() => onPostsRefreshed(() => void loadPosts()), [loadPosts]);
 
-  const handleUploadArticle = async () => {
-    setUploadStatus({ kind: "loading" });
+  const handleImportArticle = async () => {
+    setImportStatus({ kind: "loading" });
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const title = await invoke<string>("upload_article");
-      setUploadStatus({ kind: "success", title });
-      void loadPosts(); // show the newly imported post
-      setTimeout(() => setUploadStatus({ kind: "idle" }), 4000);
+      const title = await invoke<string>("import_article");
+      setImportStatus({ kind: "success", title });
+      void loadPosts(); // show the newly imported draft
+      setTimeout(() => setImportStatus({ kind: "idle" }), 4000);
     } catch (err) {
       const msg = String(err);
       if (msg === "cancelled") {
-        setUploadStatus({ kind: "idle" });
+        setImportStatus({ kind: "idle" });
         return;
       }
-      setUploadStatus({ kind: "error", message: msg });
-      setTimeout(() => setUploadStatus({ kind: "idle" }), 6000);
+      setImportStatus({ kind: "error", message: msg });
+      setTimeout(() => setImportStatus({ kind: "idle" }), 6000);
     }
   };
 
@@ -195,16 +195,16 @@ export default function PostsPage() {
 
           {/* Right: CTAs */}
           <div className="flex items-center gap-2 shrink-0">
-            {/* Upload Article */}
+            {/* Import Article */}
             <Button
               variant="outline"
               size="sm"
-              onClick={handleUploadArticle}
-              disabled={uploadStatus.kind === "loading"}
+              onClick={handleImportArticle}
+              disabled={importStatus.kind === "loading"}
               className="h-[30px] px-3 gap-[6px] rounded-[6px] text-[13px] font-semibold text-zinc-600 dark:text-zinc-400"
             >
-              <Upload size={13} strokeWidth={2} />
-              {uploadStatus.kind === "loading" ? "Uploading…" : "Upload Article"}
+              <Import size={13} strokeWidth={2} />
+              {importStatus.kind === "loading" ? "Importing…" : "Import Article"}
             </Button>
 
             {/* New Post */}
@@ -222,19 +222,19 @@ export default function PostsPage() {
         </div>
 
         {/* Upload feedback banner */}
-        {uploadStatus.kind !== "idle" && uploadStatus.kind !== "loading" && (
-          uploadStatus.kind === "success" ? (
+        {importStatus.kind !== "idle" && importStatus.kind !== "loading" && (
+          importStatus.kind === "success" ? (
             <Alert className="items-center rounded-[6px] px-3 py-2 border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/[0.08] dark:text-emerald-400">
               <CheckCircle2 size={13} strokeWidth={2} className="size-3.5" />
               <AlertDescription className="text-[12px] font-medium text-emerald-700 dark:text-emerald-400">
-                <span className="font-semibold">&ldquo;{uploadStatus.title}&rdquo;</span>
-                {" "}uploaded to R2 and registered in D1.
+                <span className="font-semibold">&ldquo;{importStatus.title}&rdquo;</span>
+                {" "}imported as a draft. Publish it to send it to the cloud.
               </AlertDescription>
             </Alert>
           ) : (
             <Alert className="items-center rounded-[6px] px-3 py-2 border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/[0.08] dark:text-red-400">
               <AlertDescription className="text-[12px] font-medium text-red-700 dark:text-red-400">
-                <span className="font-bold">Error:</span> {uploadStatus.message}
+                <span className="font-bold">Error:</span> {importStatus.message}
               </AlertDescription>
             </Alert>
           )

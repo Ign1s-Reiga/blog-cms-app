@@ -158,14 +158,17 @@ mod tests {
 
 // ─── Command ──────────────────────────────────────────────────────────────────
 
-/// Open a native file picker, upload the selected Markdown file to R2,
-/// and register its metadata in D1.
+/// Open a native file picker and import the selected Markdown file as a draft.
+///
+/// The post is created locally only — body in the app's cache, metadata in the
+/// local database, staged as a draft. Publishing or an explicit push is what
+/// sends it to the cloud.
 ///
 /// Returns the post title on success.
 /// Returns `Err("cancelled")` when the user dismisses the dialog without
 /// choosing a file — the frontend treats this differently from real errors.
 #[tauri::command]
-pub async fn upload_article(
+pub async fn import_article(
     app: tauri::AppHandle,
     conn: State<'_, DatabaseConnection>,
 ) -> Result<String, String> {
@@ -218,18 +221,24 @@ pub async fn upload_article(
         // Fall back to a unique, non-empty slug (e.g. non-ASCII titles).
         if s.is_empty() { format!("post-{now}") } else { s }
     };
-    let r2_key = media_keys::body_key(&slug);
+    // ── 5. Cache the body locally ────────────────────────────────────────────
+    // An import lands as a draft, and a draft is local-only — the same rule
+    // `save_post` follows. Nothing reaches R2 or D1 until the post is published
+    // from the editor or pushed with "Push to cloud", so importing needs no
+    // credentials and never puts an unpublished body in the bucket.
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .join("posts");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("Failed to create posts dir: {e}"))?;
+    tokio::fs::write(dir.join(format!("{slug}.md")), body)
+        .await
+        .map_err(|e| format!("Failed to write local markdown: {e}"))?;
 
-    // ── 5. Load Cloudflare credentials ───────────────────────────────────────
-    let (client, config) = cf()?;
-
-    // ── 6. Upload to R2 ───────────────────────────────────────────────────────
-    cloudflare::upload_to_r2(&client, &config, &r2_key, body).await?;
-
-    // ── 7. Record metadata in D1 and the local cache ─────────────────────────
-    // R2 succeeded; mirror the metadata to D1, then cache it locally. If D1
-    // fails we surface the error — the caller should decide whether to retry or
-    // clean up the orphaned R2 object.
+    // ── 6. Record the metadata locally ───────────────────────────────────────
     let post = PostModel {
         id: 0, // ignored on insert (auto-increment)
         slug,
@@ -243,7 +252,6 @@ pub async fn upload_article(
         created_at: now,
         updated_at: now,
     };
-    cloudflare::d1_insert::<PostModel>(&client, &config, post.clone()).await?;
     let created = db::create::<PostModel>(conn.inner(), post).await?;
     // Imported posts start staged as Draft.
     db::stage_set(

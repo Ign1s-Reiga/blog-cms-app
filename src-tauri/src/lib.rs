@@ -62,7 +62,7 @@ pub fn run() {
             auth::save_settings,
             // Analytics (Cloudflare GraphQL)
             analytics::fetch_analytics,
-            commands::upload_article,
+            commands::import_article,
             imaging::stage_image,
             // Posts — local SQLite
             commands::create_post,
