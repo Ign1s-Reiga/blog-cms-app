@@ -2,9 +2,17 @@ name: CI
 
 # Fast checks on pull requests and pushes to main so broken code never
 # reaches a release tag.
+#
+# Pull requests are deliberately not filtered by base branch. A stacked PR
+# opened against a feature branch would otherwise get no checks at all, and
+# retargeting it to main doesn't fix that: the base change fires `edited`,
+# which isn't one of `pull_request`'s default types, and the pushes that fire
+# `synchronize` happened while the base was still filtered out. The PR then
+# reads as ready to merge having never been built. Results attach per commit,
+# so a stacked PR is checked when it opens and keeps those results through the
+# retarget.
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
