@@ -95,7 +95,7 @@ export default function SettingsPage() {
 
   return (
     <main className="flex-1 overflow-y-auto p-6">
-      <div className="max-w-[560px] space-y-6">
+      <div className="max-w-[1100px] space-y-6">
         <div>
           <h1 className="text-[15px] font-semibold text-zinc-800 dark:text-zinc-200">Settings</h1>
           <p className="text-[12px] text-zinc-500 dark:text-zinc-600">
@@ -103,96 +103,107 @@ export default function SettingsPage() {
           </p>
         </div>
 
-        <section className="rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]">
-          <div className="px-4 py-3 border-b border-zinc-100 dark:border-white/[0.05]">
-            <h2 className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">Cloudflare</h2>
-          </div>
-          <div className="px-4 py-3 space-y-2 text-[12px]">
-            {loading ? (
-              <p className="text-zinc-400 dark:text-zinc-600">Loading…</p>
-            ) : creds ? (
-              <>
-                <Row label="Account ID" value={creds.account_id} />
-                <Row label="R2 Bucket" value={creds.r2_bucket} />
-                <Row label="D1 Database" value={creds.d1_database_id} />
-                <div className="pt-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={signOut}
-                    className="h-[30px] gap-1.5 text-[12px] font-semibold text-red-600 dark:text-red-400"
-                  >
-                    <LogOut size={13} strokeWidth={2} />
-                    Sign out
-                  </Button>
-                </div>
-              </>
-            ) : (
-              <p className="text-zinc-400 dark:text-zinc-600">Not connected.</p>
-            )}
-          </div>
-        </section>
-
-        {creds && (
-          <section className="rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]">
-            <div className="px-4 py-3 border-b border-zinc-100 dark:border-white/[0.05]">
-              <h2 className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">Media</h2>
-              <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-600">
-                Where uploaded media is stored in R2, and the URL it is served from.
-              </p>
-            </div>
-
-            <div className="px-4 py-3 space-y-4 text-[12px]">
-              <Field
-                label="R2 Public URL"
-                value={publicUrl}
-                onChange={setPublicUrl}
-                placeholder="https://cdn.example.com"
-                hint="Written into published posts as the base for image links. Must match the blog's R2_PUBLIC_URL."
-              />
-
-              <Field
-                label="Thumbnail key pattern"
-                value={thumbPat}
-                onChange={setThumbPat}
-                placeholder="posts/{slug}/thumbnail.{ext}"
-                hint="Supports {slug} and {ext}."
-                warning="The blog derives this key from the slug alone, so it must match thumbnailKey in the blog's content.ts. A mismatch hides every thumbnail with no error anywhere."
-              />
-
-              <Field
-                label="Media key pattern"
-                value={mediaPat}
-                onChange={setMediaPat}
-                placeholder="posts/{slug}/{hash}.{ext}"
-                hint="Supports {slug}, {hash} and {ext}. Safe to change — published posts carry each image's full URL, so the blog never derives these. {hash} is required: without it, two images in one post overwrite each other."
-              />
-
-              <div className="flex items-center gap-3 pt-0.5">
-                <Button
-                  size="sm"
-                  onClick={commit}
-                  disabled={!dirty || save.kind === "saving"}
-                  className="h-[30px] text-[12px] font-semibold"
-                >
-                  {save.kind === "saving" ? "Saving…" : "Save changes"}
-                </Button>
-                {save.kind === "saved" && (
-                  <span className="text-[12px] font-medium text-emerald-600 dark:text-emerald-500">
-                    Saved
-                  </span>
-                )}
-                {save.kind === "error" && (
-                  <span className="text-[12px] font-medium text-red-600 dark:text-red-400">
-                    {save.message}
-                  </span>
+        {/* Two equal columns. `items-start` keeps each card at its natural
+            height — stretching the short Cloudflare card to match the much
+            taller Media one would leave it mostly empty. */}
+        <div className="grid items-start gap-6 lg:grid-cols-2">
+          {/* Left: connection, then updates. */}
+          <div className="space-y-6">
+            <section className="rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]">
+              <div className="px-4 py-3 border-b border-zinc-100 dark:border-white/[0.05]">
+                <h2 className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">Cloudflare</h2>
+              </div>
+              <div className="px-4 py-3 space-y-2 text-[12px]">
+                {loading ? (
+                  <p className="text-zinc-400 dark:text-zinc-600">Loading…</p>
+                ) : creds ? (
+                  <>
+                    <Row label="Account ID" value={creds.account_id} />
+                    <Row label="R2 Bucket" value={creds.r2_bucket} />
+                    <Row label="D1 Database" value={creds.d1_database_id} />
+                    <div className="pt-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={signOut}
+                        className="h-[30px] gap-1.5 text-[12px] font-semibold text-red-600 dark:text-red-400"
+                      >
+                        <LogOut size={13} strokeWidth={2} />
+                        Sign out
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-zinc-400 dark:text-zinc-600">Not connected.</p>
                 )}
               </div>
-            </div>
-          </section>
-        )}
+            </section>
 
-        <UpdateCard />
+            <UpdateCard />
+          </div>
+
+          {/* Right: media settings. */}
+          <div className="space-y-6">
+            {creds && (
+              <section className="rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]">
+                <div className="px-4 py-3 border-b border-zinc-100 dark:border-white/[0.05]">
+                  <h2 className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">Media</h2>
+                  <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-600">
+                    Where uploaded media is stored in R2, and the URL it is served from.
+                  </p>
+                </div>
+
+                <div className="px-4 py-3 space-y-4 text-[12px]">
+                  <Field
+                    label="R2 Public URL"
+                    value={publicUrl}
+                    onChange={setPublicUrl}
+                    placeholder="https://cdn.example.com"
+                    hint="Written into published posts as the base for image links. Must match the blog's R2_PUBLIC_URL."
+                  />
+
+                  <Field
+                    label="Thumbnail key pattern"
+                    value={thumbPat}
+                    onChange={setThumbPat}
+                    placeholder="posts/{slug}/thumbnail.{ext}"
+                    hint="Supports {slug} and {ext}."
+                    warning="The blog derives this key from the slug alone, so it must match thumbnailKey in the blog's content.ts. A mismatch hides every thumbnail with no error anywhere."
+                  />
+
+                  <Field
+                    label="Media key pattern"
+                    value={mediaPat}
+                    onChange={setMediaPat}
+                    placeholder="posts/{slug}/{hash}.{ext}"
+                    hint="Supports {slug}, {hash} and {ext}. Safe to change — published posts carry each image's full URL, so the blog never derives these. {hash} is required: without it, two images in one post overwrite each other."
+                  />
+
+                  <div className="flex items-center gap-3 pt-0.5">
+                    <Button
+                      size="sm"
+                      onClick={commit}
+                      disabled={!dirty || save.kind === "saving"}
+                      className="h-[30px] text-[12px] font-semibold"
+                    >
+                      {save.kind === "saving" ? "Saving…" : "Save changes"}
+                    </Button>
+                    {save.kind === "saved" && (
+                      <span className="text-[12px] font-medium text-emerald-600 dark:text-emerald-500">
+                        Saved
+                      </span>
+                    )}
+                    {save.kind === "error" && (
+                      <span className="text-[12px] font-medium text-red-600 dark:text-red-400">
+                        {save.message}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </section>
+            )}
+          </div>
+        </div>
       </div>
     </main>
   );
