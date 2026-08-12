@@ -7,6 +7,7 @@ import {
   Bold,
   Columns2,
   Eye,
+  ImagePlus,
   Italic,
   Link2,
   PenLine,
@@ -24,6 +25,7 @@ import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { Button } from "@/components/ui/button";
+import { MediaPicker, type MediaEntry } from "@/components/MediaPicker";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 
@@ -237,6 +239,7 @@ export function PostEditor() {
 
   // ── Inline formatting: right-click menu + keyboard shortcuts ────────────────
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const savedSel = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
 
@@ -298,6 +301,38 @@ export function PostEditor() {
     e.preventDefault();
     savedSel.current = { start: el.selectionStart, end: el.selectionEnd };
     setMenu({ x: e.clientX, y: e.clientY });
+  }
+
+  // Drop a Markdown block in at the caret, sitting it on its own lines and
+  // adding blank lines only where the surrounding text doesn't already have
+  // them. Shared by drag-and-drop and the media picker.
+  function insertBlock(markdown: string) {
+    const el = textareaRef.current;
+    if (!el) return;
+    const value = el.value;
+    const at = el.selectionStart;
+    const before = value.slice(0, at);
+    const after = value.slice(at);
+    const lead = before !== "" && !before.endsWith("\n") ? "\n" : "";
+    const trail = after !== "" && !after.startsWith("\n") ? "\n" : "";
+    const insertion = lead + markdown + trail;
+    applyEdit(before + insertion + after, at + insertion.length);
+  }
+
+  // "Insert media" → pick from the library. The chosen object is staged into
+  // the post's local assets so it publishes under the post's own prefix, the
+  // same route a dropped image takes.
+  async function pickFromLibrary(entry: MediaEntry) {
+    setPickerOpen(false);
+    const { invoke, isTauri } = await import("@tauri-apps/api/core");
+    if (!isTauri()) return;
+    try {
+      const staged = await invoke<StagedImage>("stage_media_from_library", { key: entry.key });
+      const alt = staged.name.replace(/\.[^.]+$/, "");
+      insertBlock(`![${alt}](${staged.rel})`);
+    } catch (err) {
+      console.error("Failed to insert media from library:", err);
+    }
   }
 
   const formatActions: {
@@ -620,6 +655,12 @@ export function PostEditor() {
   return (
     <div className="flex flex-col flex-1 min-h-0 bg-white dark:bg-[#161616]">
 
+      <MediaPicker
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        onPick={pickFromLibrary}
+      />
+
       {/* ── Topbar ──────────────────────────────────────────────────────── */}
       <div className="relative flex items-center justify-between px-5 h-[48px] shrink-0 border-b border-zinc-200 dark:border-white/[0.06]">
         {/* Back */}
@@ -675,6 +716,17 @@ export function PostEditor() {
               {saveState.message}
             </span>
           )}
+
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setPickerOpen(true)}
+            title="Insert an image from the media library"
+            className="h-[28px] px-2 gap-1.5 rounded-[5px] text-[12px] font-medium text-zinc-500 dark:text-zinc-400"
+          >
+            <ImagePlus size={13} strokeWidth={2} />
+            Insert media
+          </Button>
 
           <Button
             variant="outline"
