@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Manifest for `cargo test` binaries only. See build.rs.
+
+  The library links `rfd` (through tauri-plugin-dialog), which statically
+  imports `TaskDialogIndirect`. That symbol lives in version 6 of
+  comctl32.dll, which the Windows loader binds only when the executable
+  declares a dependency on it — System32's comctl32.dll is 5.82 and does not
+  export it. The app binary gets such a declaration from tauri-build; test
+  harnesses are built straight from the library and get none, so without this
+  they fail to start with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before a
+  single test runs.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>
