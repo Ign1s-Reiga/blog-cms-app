@@ -609,6 +609,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "uuid",
+ "webview2-com",
  "windows-native-keyring-store",
 ]
 

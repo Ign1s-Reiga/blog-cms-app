@@ -43,8 +43,13 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 # OS keychain backend for the Cloudflare API token. Windows Credential Manager
 # on Windows; other platforms fall back to the credentials file for now.
+#
+# `webview2-com` reaches the WebView2 settings behind the main window (see
+# `webview.rs`). Tauri re-exports these interfaces, so the version must track
+# whatever `tauri` itself depends on — it bumps in Tauri's minor releases.
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = "1"
+webview2-com = "0.38"
 
 # The AVIF encoder's dependency tree pushes the debug build past the Windows
 # linker's PDB size cap (LNK1140) when linking the test binary. Line tables keep
