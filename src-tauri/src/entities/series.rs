@@ -39,9 +39,15 @@ impl Related<super::post::Entity> for Entity {
 
 impl ActiveModelBehavior for ActiveModel {}
 
-impl Model {
+impl crate::entities::record::Record for Model {
+    type Entity = Entity;
+
+    fn order_column() -> Column {
+        Column::CreatedAt
+    }
+
     /// `ActiveModel` for an insert — the primary key is auto-assigned.
-    pub fn into_insert(self) -> ActiveModel {
+    fn into_insert(self) -> ActiveModel {
         ActiveModel {
             id: sea_orm::ActiveValue::NotSet,
             slug: Set(self.slug),
@@ -52,7 +58,7 @@ impl Model {
     }
 
     /// `ActiveModel` for an update — locate by the (unchanged) id, write the rest.
-    pub fn into_update(self) -> ActiveModel {
+    fn into_update(self) -> ActiveModel {
         ActiveModel {
             id: sea_orm::ActiveValue::Unchanged(self.id),
             slug: Set(self.slug),

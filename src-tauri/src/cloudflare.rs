@@ -1,11 +1,13 @@
 use reqwest::Client;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QueryTrait, Value, Values,
+    ColumnTrait, DbBackend, EntityTrait, Insert, QueryFilter, QueryOrder, QueryTrait, Value,
+    Values,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::entities::record::{Id, Record};
 use crate::entities::{post, series};
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -349,16 +351,61 @@ fn last_row_id(env: &D1Envelope) -> i64 {
     env.result.first().map(|r| r.meta.last_row_id).unwrap_or_default()
 }
 
-// ── Posts ──────────────────────────────────────────────────────────────────────
+// ─── D1 CRUD ──────────────────────────────────────────────────────────────────
+//
+// One implementation per operation, shared by every entity implementing
+// `Record`. Update stays per-entity below: it names each column explicitly, so
+// there is nothing common to factor out.
 
-pub async fn d1_post_insert(
-    client: &Client,
-    config: &CloudflareConfig,
-    model: post::Model,
-) -> Result<i64, String> {
-    let env = d1_run(client, config, post::Entity::insert(model.into_insert())).await?;
+/// Insert a row, returning the id D1 assigned it.
+pub async fn d1_insert<M>(client: &Client, config: &CloudflareConfig, model: M) -> Result<i64, String>
+where
+    M: Record,
+    Insert<<M::Entity as EntityTrait>::ActiveModel>: QueryTrait,
+{
+    let env = d1_run(client, config, M::Entity::insert(model.into_insert())).await?;
     Ok(last_row_id(&env))
 }
+
+/// Every row, newest first by the record's own ordering column.
+pub async fn d1_list<M>(client: &Client, config: &CloudflareConfig) -> Result<Vec<M>, String>
+where
+    M: Record + DeserializeOwned,
+{
+    let env = d1_run(
+        client,
+        config,
+        M::Entity::find().order_by_desc(M::order_column()),
+    )
+    .await?;
+    decode_rows(env)
+}
+
+/// One row by primary key, or `None` when it does not exist.
+pub async fn d1_get<M>(
+    client: &Client,
+    config: &CloudflareConfig,
+    id: Id<M>,
+) -> Result<Option<M>, String>
+where
+    M: Record + DeserializeOwned,
+{
+    let env = d1_run(client, config, M::Entity::find_by_id(id)).await?;
+    Ok(decode_rows::<M>(env)?.into_iter().next())
+}
+
+/// Delete by primary key.
+pub async fn d1_delete<M: Record>(
+    client: &Client,
+    config: &CloudflareConfig,
+    id: Id<M>,
+) -> Result<(), String> {
+    d1_run(client, config, M::Entity::delete_by_id(id))
+        .await
+        .map(|_| ())
+}
+
+// ── Posts ──────────────────────────────────────────────────────────────────────
 
 /// Insert a post into D1, or update the existing row with the same `slug`
 /// (local wins). Used by the sync action to push local posts to the cloud
@@ -407,48 +454,7 @@ pub async fn d1_post_update(
     d1_run(client, config, stmt).await.map(|_| ())
 }
 
-pub async fn d1_post_delete(
-    client: &Client,
-    config: &CloudflareConfig,
-    id: i32,
-) -> Result<(), String> {
-    d1_run(client, config, post::Entity::delete_by_id(id))
-        .await
-        .map(|_| ())
-}
-
-pub async fn d1_post_list(
-    client: &Client,
-    config: &CloudflareConfig,
-) -> Result<Vec<post::Model>, String> {
-    let env = d1_run(
-        client,
-        config,
-        post::Entity::find().order_by_desc(post::Column::CreatedAt),
-    )
-    .await?;
-    decode_rows(env)
-}
-
-pub async fn d1_post_get(
-    client: &Client,
-    config: &CloudflareConfig,
-    id: i32,
-) -> Result<Option<post::Model>, String> {
-    let env = d1_run(client, config, post::Entity::find_by_id(id)).await?;
-    Ok(decode_rows::<post::Model>(env)?.into_iter().next())
-}
-
 // ── Series ─────────────────────────────────────────────────────────────────────
-
-pub async fn d1_series_insert(
-    client: &Client,
-    config: &CloudflareConfig,
-    model: series::Model,
-) -> Result<i64, String> {
-    let env = d1_run(client, config, series::Entity::insert(model.into_insert())).await?;
-    Ok(last_row_id(&env))
-}
 
 pub async fn d1_series_update(
     client: &Client,
@@ -464,34 +470,10 @@ pub async fn d1_series_update(
     d1_run(client, config, stmt).await.map(|_| ())
 }
 
-pub async fn d1_series_delete(
-    client: &Client,
-    config: &CloudflareConfig,
-    id: i32,
-) -> Result<(), String> {
-    d1_run(client, config, series::Entity::delete_by_id(id))
-        .await
-        .map(|_| ())
-}
+// ─── Client ─────────────────────────────────────────────────────────────────
 
-pub async fn d1_series_list(
-    client: &Client,
-    config: &CloudflareConfig,
-) -> Result<Vec<series::Model>, String> {
-    let env = d1_run(
-        client,
-        config,
-        series::Entity::find().order_by_desc(series::Column::CreatedAt),
-    )
-    .await?;
-    decode_rows(env)
-}
-
-pub async fn d1_series_get(
-    client: &Client,
-    config: &CloudflareConfig,
-    id: i32,
-) -> Result<Option<series::Model>, String> {
-    let env = d1_run(client, config, series::Entity::find_by_id(id)).await?;
-    Ok(decode_rows::<series::Model>(env)?.into_iter().next())
+/// A reqwest client plus the signed-in Cloudflare credentials.
+pub fn cf() -> Result<(Client, CloudflareConfig), String> {
+    let config = crate::auth::get_creds().ok_or_else(|| "Not signed in to Cloudflare".to_string())?;
+    Ok((Client::new(), config))
 }

@@ -62,8 +62,8 @@ pub fn run() {
             auth::save_settings,
             // Analytics (Cloudflare GraphQL)
             analytics::fetch_analytics,
-            commands::upload_article,
-            commands::stage_image,
+            commands::import_article,
+            imaging::stage_image,
             // Posts — local SQLite
             commands::create_post,
             commands::list_posts,
@@ -106,7 +106,7 @@ pub fn run() {
             commands::delete_media,
             commands::stage_media_from_library,
             // Post thumbnail
-            commands::set_post_thumbnail,
+            imaging::set_post_thumbnail,
             // Self-update (GitHub Releases)
             update::check_for_update,
             update::install_update,

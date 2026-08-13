@@ -13,8 +13,21 @@
 //! Encoding is CPU-bound and takes real wall-clock time on a large photo, so
 //! callers should use [`convert_to_avif`], which moves the work off the async
 //! runtime.
+//!
+//! The two commands that bring an image into a post live here rather than in
+//! `commands.rs`: converting on the way in is the whole of what they do, and
+//! keeping them beside the encoder means the allow-lists and the encoder agree
+//! by construction.
+
+use std::path::PathBuf;
 
 use image::codecs::avif::AvifEncoder;
+use serde::Serialize;
+use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
+
+use crate::cloudflare::{self, cf};
+use crate::media_keys;
 
 /// Extensions converted to AVIF on upload; anything else is stored unchanged.
 pub const CONVERTIBLE: &[&str] = &["jpg", "jpeg", "png"];
@@ -59,6 +72,134 @@ pub async fn convert_to_avif(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     tokio::task::spawn_blocking(move || to_avif(&bytes))
         .await
         .map_err(|e| format!("Image conversion thread panicked: {e}"))?
+}
+
+// ─── Commands ───────────────────────────────────────────────────────────────
+
+/// A dropped image after it has been copied into the local assets directory.
+#[derive(Serialize)]
+pub struct StagedImage {
+    /// Markdown-relative reference, e.g. `"assets/<uuid>.png"`.
+    pub rel: String,
+    /// Original file name — used as the inserted image's alt text.
+    pub name: String,
+}
+
+/// Copy a dropped image into the app's local `assets` directory so it can be
+/// referenced from a post and rendered in the preview via the asset protocol.
+/// Cloud (R2) upload is deferred to the save/publish sync.
+///
+/// `src_path` is an absolute path from an OS drag-and-drop. The extension is
+/// validated against a fixed allow-list; other files are rejected.
+#[tauri::command]
+pub async fn stage_image(app: tauri::AppHandle, src_path: String) -> Result<StagedImage, String> {
+    let src = PathBuf::from(&src_path);
+
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|e| {
+            matches!(
+                e.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "svg" | "bmp" | "ico"
+            )
+        })
+        .ok_or_else(|| format!("Unsupported image type: {src_path}"))?;
+
+    let assets_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .join("assets");
+    tokio::fs::create_dir_all(&assets_dir)
+        .await
+        .map_err(|e| format!("Failed to create assets dir: {e}"))?;
+
+    // JPG/PNG are converted to AVIF here rather than at publish, so the editor
+    // preview shows the same bytes that will reach readers. Other formats are
+    // copied through untouched.
+    let file_name = format!("{}.{}", uuid::Uuid::new_v4(), stored_ext(&ext));
+    let dest = assets_dir.join(&file_name);
+    if is_convertible(&ext) {
+        let bytes = tokio::fs::read(&src)
+            .await
+            .map_err(|e| format!("Failed to read image: {e}"))?;
+        let avif = convert_to_avif(bytes).await?;
+        tokio::fs::write(&dest, &avif)
+            .await
+            .map_err(|e| format!("Failed to write converted image: {e}"))?;
+    } else {
+        tokio::fs::copy(&src, &dest)
+            .await
+            .map_err(|e| format!("Failed to copy image: {e}"))?;
+    }
+
+    let name = src
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image")
+        .to_string();
+
+    Ok(StagedImage { rel: format!("assets/{file_name}"), name })
+}
+
+/// Extensions accepted for a post thumbnail. Narrower than the editor's image
+/// list because the thumbnail is always stored as AVIF, and the decoder is only
+/// built with JPEG and PNG support — an already-AVIF file passes straight
+/// through. WebP/GIF/SVG would need decoders that aren't compiled in.
+const THUMBNAIL_EXTS: &[&str] = &["png", "jpg", "jpeg", "avif"];
+
+/// Pick an image and store it as the post's thumbnail at
+/// `posts/<slug>/thumbnail.avif`, the key the blog derives from the slug alone.
+///
+/// Replaces any existing thumbnail. Returns `Err("cancelled")` when the dialog
+/// is dismissed.
+#[tauri::command]
+pub async fn set_post_thumbnail(app: tauri::AppHandle, slug: String) -> Result<String, String> {
+    if !media_keys::is_safe_slug(&slug) {
+        return Err(format!("Invalid post slug: {slug}"));
+    }
+
+    let app_clone = app.clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        app_clone
+            .dialog()
+            .file()
+            .add_filter("Image", THUMBNAIL_EXTS)
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|e| format!("Dialog thread panicked: {e}"))?;
+
+    let src = match picked {
+        None => return Err("cancelled".to_string()),
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        Some(tauri_plugin_dialog::FilePath::Path(p)) => p,
+        #[allow(unreachable_patterns)]
+        Some(_) => return Err("Unsupported path format on this platform".to_string()),
+    };
+
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|e| THUMBNAIL_EXTS.contains(&e.as_str()))
+        .ok_or_else(|| "Unsupported thumbnail type".to_string())?;
+
+    let bytes = tokio::fs::read(&src)
+        .await
+        .map_err(|e| format!("Failed to read image: {e}"))?;
+    let bytes = if is_convertible(&ext) {
+        convert_to_avif(bytes).await?
+    } else {
+        bytes
+    };
+
+    let (client, config) = cf()?;
+    let key = media_keys::thumbnail_key(&config.thumbnail_key_pattern, &slug, "avif");
+    cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, "image/avif").await?;
+    Ok(key)
 }
 
 #[cfg(test)]
