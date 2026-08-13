@@ -115,19 +115,28 @@ fn keyring_set(token: &str) -> bool {
     }
 }
 
-/// The current token, generating and persisting one the first time.
-fn ensure_token(app: &tauri::AppHandle) -> Result<String, String> {
-    let mut stored = load_stored(app);
-    if let Some(token) = keyring_entry()
+/// The token, if one has ever been issued. Never creates one.
+///
+/// Kept separate from [`ensure_token`] so that merely looking at the Settings
+/// screen does not mint a credential: a token exists only once the server has
+/// actually been switched on, which is also the first moment it can be used.
+fn load_token(app: &tauri::AppHandle) -> Option<String> {
+    keyring_entry()
         .and_then(|e| e.get_password().ok())
-        .or_else(|| stored.token.clone())
-    {
+        .or_else(|| load_stored(app).token)
+}
+
+/// The token, issuing and persisting one the first time it is genuinely needed
+/// — starting the server, or an explicit rotation.
+fn ensure_token(app: &tauri::AppHandle) -> Result<String, String> {
+    if let Some(token) = load_token(app) {
         return Ok(token);
     }
 
     // 122 bits of randomness from the OS CSPRNG, hex-encoded — long enough that
     // guessing it is not a concern even though the endpoint answers fast.
     let token = uuid::Uuid::new_v4().simple().to_string();
+    let mut stored = load_stored(app);
     stored.token = (!keyring_set(&token)).then(|| token.clone());
     save_stored(app, &stored)?;
     Ok(token)
@@ -301,8 +310,9 @@ pub struct McpStatus {
     pub port: u16,
     /// Full URL to paste into an MCP client.
     pub endpoint: String,
-    /// The bearer token clients must send.
-    pub token: String,
+    /// The bearer token clients must send, or `None` before the server has ever
+    /// been started — there is nothing to copy until one is issued.
+    pub token: Option<String>,
 }
 
 #[tauri::command]
@@ -319,7 +329,8 @@ pub fn mcp_status(app: tauri::AppHandle) -> Result<McpStatus, String> {
         running: running.is_some(),
         port,
         endpoint: format!("http://127.0.0.1:{port}{ENDPOINT_PATH}"),
-        token: ensure_token(&app)?,
+        // Deliberately a read: opening Settings must not create a credential.
+        token: load_token(&app),
     })
 }
 

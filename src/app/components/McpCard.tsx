@@ -11,7 +11,9 @@ type McpStatus = {
   running: boolean;
   port: number;
   endpoint: string;
-  token: string;
+  /// Null until the server has been started for the first time — nothing is
+  /// issued just for opening this screen.
+  token: string | null;
 };
 
 type PublishState = "awaiting_approval" | "rejected" | "published" | "failed";
@@ -217,25 +219,36 @@ export function McpCard() {
             {status && (
               <div className="space-y-2 rounded-[6px] border border-zinc-100 dark:border-white/[0.05] bg-zinc-50 dark:bg-white/[0.02] px-3 py-2.5">
                 <Secret label="Endpoint" value={status.endpoint} />
-                <Secret
-                  label="Token"
-                  value={status.token}
-                  masked={!reveal}
-                  onToggle={() => setReveal((v) => !v)}
-                />
-                <div className="flex flex-wrap items-center gap-2 pt-1">
-                  <CopyButton label="Copy client config" value={clientConfig(status)} />
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void regenerate()}
-                    disabled={busy}
-                    className="h-[28px] gap-1.5 text-[11px] font-semibold"
-                  >
-                    <KeyRound size={12} strokeWidth={2} />
-                    New token
-                  </Button>
-                </div>
+                {status.token ? (
+                  <Secret
+                    label="Token"
+                    value={status.token}
+                    masked={!reveal}
+                    onToggle={() => setReveal((v) => !v)}
+                  />
+                ) : (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="shrink-0 text-zinc-500 dark:text-zinc-500">Token</span>
+                    <span className="truncate text-[11px] text-zinc-400 dark:text-zinc-600">
+                      Issued when you first turn the server on
+                    </span>
+                  </div>
+                )}
+                {status.token && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <CopyButton label="Copy client config" value={clientConfig(status.endpoint, status.token)} />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void regenerate()}
+                      disabled={busy}
+                      className="h-[28px] gap-1.5 text-[11px] font-semibold"
+                    >
+                      <KeyRound size={12} strokeWidth={2} />
+                      New token
+                    </Button>
+                  </div>
+                )}
                 <p className="text-[11px] leading-[1.5] text-zinc-500 dark:text-zinc-600">
                   Paste the config into your MCP client. The endpoint listens on this machine only, and
                   rejects any request without the token.
@@ -417,15 +430,16 @@ function CopyButton({ label, value, iconOnly }: { label: string; value: string; 
 }
 
 /// The block an MCP client needs to reach this app, in the shape Claude Desktop
-/// and Claude Code both read.
-function clientConfig(status: McpStatus): string {
+/// and Claude Code both read. Takes the token separately so it cannot be called
+/// before one exists.
+function clientConfig(endpoint: string, token: string): string {
   return JSON.stringify(
     {
       mcpServers: {
         "blog-cms": {
           type: "http",
-          url: status.endpoint,
-          headers: { Authorization: `Bearer ${status.token}` },
+          url: endpoint,
+          headers: { Authorization: `Bearer ${token}` },
         },
       },
     },
