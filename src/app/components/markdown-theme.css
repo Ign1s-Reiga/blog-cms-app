@@ -16,25 +16,25 @@
  */
 
 .md-body {
-  --mp-text-primary:      #111827;
-  --mp-text-secondary:    #374151;
-  --mp-text-ternary:      #6b7280;
-  --mp-text-link:         #2563eb;
-  --mp-text-inline-code:  #dc2626;
-  --mp-surface-primary:   #f3f4f6;
+  --mp-text-primary: #111827;
+  --mp-text-secondary: #374151;
+  --mp-text-ternary: #6b7280;
+  --mp-text-link: #2563eb;
+  --mp-text-inline-code: #dc2626;
+  --mp-surface-primary: #f3f4f6;
   --mp-surface-secondary: #e5e7eb;
-  --mp-surface-tertiary:  #d1d5db;
+  --mp-surface-tertiary: #d1d5db;
 }
 
 .dark .md-body {
-  --mp-text-primary:      #e6edf3;
-  --mp-text-secondary:    #adbac7;
-  --mp-text-ternary:      #768390;
-  --mp-text-link:         #7aa2f7;
-  --mp-text-inline-code:  #e06c75;
-  --mp-surface-primary:   #222222;
+  --mp-text-primary: #e6edf3;
+  --mp-text-secondary: #adbac7;
+  --mp-text-ternary: #768390;
+  --mp-text-link: #7aa2f7;
+  --mp-text-inline-code: #e06c75;
+  --mp-surface-primary: #222222;
   --mp-surface-secondary: #2d2d2d;
-  --mp-surface-tertiary:  #393939;
+  --mp-surface-tertiary: #393939;
 }
 
 /*
@@ -43,10 +43,20 @@
  * list-style — so bullets and numbers disappear in the preview. Put them back
  * here (this file loads after both), following the browser's default nesting.
  */
-.md-body ul       { list-style: disc; }
-.md-body ul ul    { list-style: circle; }
-.md-body ul ul ul { list-style: square; }
-.md-body ol       { list-style: decimal; }
+.md-body ul {
+  list-style: disc;
+}
+.md-body ul ul {
+  list-style: circle;
+}
+.md-body ul ul ul {
+  list-style: square;
+}
+.md-body ol {
+  list-style: decimal;
+}
 
 /* GFM task-list items render their own checkbox — drop the redundant bullet. */
-.md-body li:has(> input[type="checkbox"]) { list-style: none; }
+.md-body li:has(> input[type='checkbox']) {
+  list-style: none;
+}

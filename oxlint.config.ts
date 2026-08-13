@@ -11,10 +11,10 @@ export default defineConfig({
       {
         argsIgnorePattern: '^_',
         destructuredArrayIgnorePattern: '^_',
-      }
+      },
     ],
     'typescript/no-explicit-any': 'error',
     'import/no-absolute-path': 'warn',
     'react/jsx-curly-brace-presence': ['warn', { propElementValues: 'always' }],
-  }
+  },
 });

@@ -1,9 +1,9 @@
-"use client";
+'use client';
 
-import { useCallback, useEffect, useState } from "react";
-import { ImageOff, Loader2, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { useCallback, useEffect, useState } from 'react';
+import { ImageOff, Loader2, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 
 export interface MediaEntry {
   /** R2 key, e.g. `media/<uuid>.avif`. */
@@ -27,17 +27,17 @@ export function MediaPicker({
   onClose: () => void;
   onPick: (entry: MediaEntry) => void;
 }) {
-  const [items, setItems]     = useState<MediaEntry[]>([]);
+  const [items, setItems] = useState<MediaEntry[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError]     = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const { invoke, isTauri } = await import("@tauri-apps/api/core");
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setLoading(true);
     setError(null);
     try {
-      setItems(await invoke<MediaEntry[]>("list_media"));
+      setItems(await invoke<MediaEntry[]>('list_media'));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -53,71 +53,69 @@ export function MediaPicker({
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === 'Escape') onClose();
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, [open, onClose]);
 
   if (!open) return null;
 
   return (
     <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Select from Media library"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
+      role='dialog'
+      aria-modal='true'
+      aria-label='Select from Media library'
+      className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6'
       onPointerDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="flex max-h-[70vh] w-full max-w-[620px] flex-col rounded-[8px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616]">
-        <div className="flex items-center justify-between border-b border-zinc-100 dark:border-white/[0.05] px-4 py-3">
-          <h2 className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">
-            Select from Media library
-          </h2>
+      <div className='flex max-h-[70vh] w-full max-w-[620px] flex-col rounded-[8px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616]'>
+        <div className='flex items-center justify-between border-b border-zinc-100 dark:border-white/[0.05] px-4 py-3'>
+          <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>Select from Media library</h2>
           <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Close"
+            variant='ghost'
+            size='icon'
+            aria-label='Close'
             onClick={onClose}
-            className="size-[26px] rounded-[5px] text-zinc-400 dark:text-zinc-500"
+            className='size-[26px] rounded-[5px] text-zinc-400 dark:text-zinc-500'
           >
             <X size={13} strokeWidth={2} />
           </Button>
         </div>
 
-        <div className="min-h-[120px] flex-1 overflow-y-auto p-3">
+        <div className='min-h-[120px] flex-1 overflow-y-auto p-3'>
           {loading ? (
-            <p className="flex items-center gap-2 p-3 text-[12px] text-zinc-500 dark:text-zinc-500">
-              <Loader2 size={13} strokeWidth={2} className="animate-spin" />
+            <p className='flex items-center gap-2 p-3 text-[12px] text-zinc-500 dark:text-zinc-500'>
+              <Loader2 size={13} strokeWidth={2} className='animate-spin' />
               Loading media…
             </p>
           ) : error ? (
-            <p className="p-3 text-[12px] text-red-600 dark:text-red-400">{error}</p>
+            <p className='p-3 text-[12px] text-red-600 dark:text-red-400'>{error}</p>
           ) : items.length === 0 ? (
-            <p className="flex items-center gap-2 p-3 text-[12px] text-zinc-400 dark:text-zinc-600">
+            <p className='flex items-center gap-2 p-3 text-[12px] text-zinc-400 dark:text-zinc-600'>
               <ImageOff size={13} strokeWidth={1.8} />
               Nothing in the library yet — upload from the Media page.
             </p>
           ) : (
-            <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            <ul className='grid grid-cols-2 gap-2 sm:grid-cols-3'>
               {items.map((item) => (
                 <li key={item.key}>
                   <button
                     onClick={() => onPick(item)}
                     title={item.name}
                     className={cn(
-                      "w-full rounded-[6px] border px-2.5 py-2 text-left",
-                      "border-zinc-200 dark:border-white/[0.07]",
-                      "hover:bg-zinc-50 dark:hover:bg-white/[0.04]",
-                      "active:scale-[0.98] transition-[background-color,transform] duration-100",
+                      'w-full rounded-[6px] border px-2.5 py-2 text-left',
+                      'border-zinc-200 dark:border-white/[0.07]',
+                      'hover:bg-zinc-50 dark:hover:bg-white/[0.04]',
+                      'active:scale-[0.98] transition-[background-color,transform] duration-100',
                     )}
                   >
-                    <span className="block truncate font-mono text-[11px] text-zinc-700 dark:text-zinc-300">
+                    <span className='block truncate font-mono text-[11px] text-zinc-700 dark:text-zinc-300'>
                       {item.name}
                     </span>
-                    <span className="mt-0.5 block text-[10px] tabular-nums text-zinc-400 dark:text-zinc-600">
+                    <span className='mt-0.5 block text-[10px] tabular-nums text-zinc-400 dark:text-zinc-600'>
                       {formatBytes(item.size)}
                     </span>
                   </button>

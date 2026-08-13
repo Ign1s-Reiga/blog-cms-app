@@ -1,6 +1,6 @@
-"use client";
+'use client';
 
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useState } from 'react';
 
 interface SidebarContextValue {
   collapsed: boolean;
@@ -15,9 +15,7 @@ const SidebarCtx = createContext<SidebarContextValue>({
 export function SidebarProvider({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
-    <SidebarCtx.Provider value={{ collapsed, toggle: () => setCollapsed((c) => !c) }}>
-      {children}
-    </SidebarCtx.Provider>
+    <SidebarCtx.Provider value={{ collapsed, toggle: () => setCollapsed((c) => !c) }}>{children}</SidebarCtx.Provider>
   );
 }
 

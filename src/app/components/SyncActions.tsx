@@ -1,10 +1,10 @@
-"use client";
+'use client';
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { CloudDownload, CloudUpload, type LucideIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
-import { pullFromCloud, pushToCloud } from "@/lib/sync";
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CloudDownload, CloudUpload, type LucideIcon } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
+import { pullFromCloud, pushToCloud } from '@/lib/sync';
 
 /// A single header sync control. `runOnMount` runs the action once when the app
 /// shell mounts (used for the launch-time pull). No-ops outside the Tauri
@@ -43,15 +43,15 @@ function SyncAction({
 
   return (
     <Button
-      variant="ghost"
-      size="icon"
+      variant='ghost'
+      size='icon'
       aria-label={label}
       title={label}
       onClick={trigger}
       disabled={busy}
-      className="size-[30px] rounded-[6px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+      className='size-[30px] rounded-[6px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
     >
-      <Icon size={15} strokeWidth={1.8} className={cn(busy && "animate-pulse")} />
+      <Icon size={15} strokeWidth={1.8} className={cn(busy && 'animate-pulse')} />
     </Button>
   );
 }
@@ -61,8 +61,8 @@ function SyncAction({
 export function SyncActions() {
   return (
     <>
-      <SyncAction icon={CloudDownload} label="Pull from cloud" run={pullFromCloud} runOnMount />
-      <SyncAction icon={CloudUpload} label="Push to cloud" run={pushToCloud} />
+      <SyncAction icon={CloudDownload} label='Pull from cloud' run={pullFromCloud} runOnMount />
+      <SyncAction icon={CloudUpload} label='Push to cloud' run={pushToCloud} />
     </>
   );
 }

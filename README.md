@@ -17,15 +17,15 @@ A cross-platform **desktop CMS for blog content**, built with [Tauri](https://ta
 
 ## Tech stack
 
-| Layer            | Technology                                                        |
-| ---------------- | ----------------------------------------------------------------- |
-| Desktop shell    | Tauri 2 (Rust)                                                    |
-| Frontend         | Next.js 16 (App Router) · React 19                                |
-| Styling          | Tailwind CSS v4 · shadcn/ui · lucide-react                        |
-| Theming          | next-themes (dark / light)                                        |
-| Backend (Rust)   | reqwest (Cloudflare REST API) · tokio · uuid · chrono            |
-| Cloud            | Cloudflare R2 (files & media) · Cloudflare D1 (metadata)          |
-| Tooling          | pnpm · oxlint · oxfmt                                             |
+| Layer          | Technology                                               |
+| -------------- | -------------------------------------------------------- |
+| Desktop shell  | Tauri 2 (Rust)                                           |
+| Frontend       | Next.js 16 (App Router) · React 19                       |
+| Styling        | Tailwind CSS v4 · shadcn/ui · lucide-react               |
+| Theming        | next-themes (dark / light)                               |
+| Backend (Rust) | reqwest (Cloudflare REST API) · tokio · uuid · chrono    |
+| Cloud          | Cloudflare R2 (files & media) · Cloudflare D1 (metadata) |
+| Tooling        | pnpm · oxlint · oxfmt                                    |
 
 ## Project structure
 
@@ -99,12 +99,12 @@ This launches the full desktop app with hot-reloading. To work on the frontend a
 
 ### Environment variables
 
-| Variable            | Description                                             |
-| ------------------- | ------------------------------------------------------- |
-| `CF_ACCOUNT_ID`     | Your Cloudflare account ID                              |
-| `CF_API_TOKEN`      | API token with **R2 Edit** and **D1 Edit** permissions  |
-| `CF_R2_BUCKET`      | Target R2 bucket name                                   |
-| `CF_D1_DATABASE_ID` | D1 database ID (UUID from the dashboard)                |
+| Variable            | Description                                            |
+| ------------------- | ------------------------------------------------------ |
+| `CF_ACCOUNT_ID`     | Your Cloudflare account ID                             |
+| `CF_API_TOKEN`      | API token with **R2 Edit** and **D1 Edit** permissions |
+| `CF_R2_BUCKET`      | Target R2 bucket name                                  |
+| `CF_D1_DATABASE_ID` | D1 database ID (UUID from the dashboard)               |
 
 ### D1 schema
 
@@ -166,13 +166,13 @@ updates and have to be reinstalled manually. Keep a backup of the private key.
 
 ## Available scripts
 
-| Command            | Description                                                          |
+| Command            | Description                                                         |
 | ------------------ | ------------------------------------------------------------------- |
-| `pnpm tauri dev`   | Run the desktop app in development mode with hot-reloading           |
+| `pnpm tauri dev`   | Run the desktop app in development mode with hot-reloading          |
 | `pnpm run dev`     | Run the Next.js frontend only in the browser (limited Tauri access) |
-| `pnpm tauri build` | Build production installers (MSI, DMG, AppImage, …)                  |
-| `pnpm run lint`    | Lint with oxlint (auto-fix)                                          |
-| `pnpm run fmt`     | Format with oxfmt                                                    |
+| `pnpm tauri build` | Build production installers (MSI, DMG, AppImage, …)                 |
+| `pnpm run lint`    | Lint with oxlint (auto-fix)                                         |
+| `pnpm run fmt`     | Format with oxfmt                                                   |
 
 ### Adding UI components
 
