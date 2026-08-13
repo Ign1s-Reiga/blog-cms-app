@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { LogOut, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { McpCard } from "@/components/McpCard";
 import { UpdateCard } from "@/components/UpdateCard";
 
 type Creds = {
@@ -142,7 +143,7 @@ export default function SettingsPage() {
             <UpdateCard />
           </div>
 
-          {/* Right: media settings. */}
+          {/* Right: media settings, then the MCP endpoint. */}
           <div className="space-y-6">
             {creds && (
               <section className="rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]">
@@ -202,6 +203,10 @@ export default function SettingsPage() {
                 </div>
               </section>
             )}
+
+            {/* Outside the `creds` guard: drafting over MCP is local-only and
+                works before Cloudflare is connected. */}
+            <McpCard />
           </div>
         </div>
       </div>
