@@ -3,7 +3,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "fmt": "oxfmt",
+    "fmt": "oxfmt src \"*.ts\" \"*.md\"",
+    "fmt:check": "oxfmt --check src \"*.ts\" \"*.md\"",
     "lint": "oxlint --fix"
   },
   "devDependencies": {

@@ -1,18 +1,12 @@
-import { Separator } from "@/components/ui/separator";
+import { Separator } from '@/components/ui/separator';
 
-export function SectionHeader({
-  children,
-  action,
-}: {
-  children: React.ReactNode;
-  action?: React.ReactNode;
-}) {
+export function SectionHeader({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-3 mb-5">
-      <h2 className="text-[10px] font-bold text-zinc-400 dark:text-zinc-600 uppercase tracking-[0.12em] shrink-0">
+    <div className='flex items-center gap-3 mb-5'>
+      <h2 className='text-[10px] font-bold text-zinc-400 dark:text-zinc-600 uppercase tracking-[0.12em] shrink-0'>
         {children}
       </h2>
-      <Separator className="flex-1 bg-zinc-100 dark:bg-white/[0.04]" />
+      <Separator className='flex-1 bg-zinc-100 dark:bg-white/[0.04]' />
       {action}
     </div>
   );
