@@ -10,6 +10,7 @@ mod imaging;
 pub mod mcp;
 mod media_keys;
 mod update;
+mod webview;
 
 use sea_orm::DatabaseConnection;
 use tauri::Manager;
@@ -26,10 +27,15 @@ pub fn run() {
                 )?;
             }
 
+            let handle = app.handle().clone();
+
+            // Strip the WebView2 right-click menu before the window is worth
+            // interacting with.
+            webview::disable_context_menu(&handle);
+
             // Open the local SQLite cache and expose the connection to commands
             // through managed state. Blocking here keeps the DB ready before the
             // first command can run.
-            let handle = app.handle().clone();
             let conn: DatabaseConnection = tauri::async_runtime::block_on(db::connect(&handle))
                 .expect("failed to initialise local database");
 
