@@ -5,6 +5,9 @@ mod commands;
 mod db;
 mod entities;
 mod imaging;
+// Public so `tests/mcp_tools.rs` can assert the tool surface from outside the
+// library; every other module stays crate-private.
+pub mod mcp;
 mod media_keys;
 mod update;
 
@@ -47,6 +50,13 @@ pub fn run() {
             let initial_creds =
                 auth::load_from_disk(&handle).or_else(|| cloudflare::CloudflareConfig::from_env().ok());
             auth::set_creds(initial_creds);
+
+            // Register before `init`, which spawns a task that reaches for this
+            // state as soon as it is scheduled.
+            app.manage(mcp::McpServer::default());
+            // Bring the MCP endpoint up if it was left enabled. Spawned, so a
+            // busy port delays nothing at startup.
+            mcp::init(app.handle());
 
             Ok(())
         })
@@ -107,6 +117,13 @@ pub fn run() {
             commands::stage_media_from_library,
             // Post thumbnail
             imaging::set_post_thumbnail,
+            // MCP server (local endpoint + guarded publish approvals)
+            mcp::mcp_status,
+            mcp::mcp_configure,
+            mcp::mcp_regenerate_token,
+            mcp::mcp_list_publish_requests,
+            mcp::mcp_approve_publish,
+            mcp::mcp_reject_publish,
             // Self-update (GitHub Releases)
             update::check_for_update,
             update::install_update,
