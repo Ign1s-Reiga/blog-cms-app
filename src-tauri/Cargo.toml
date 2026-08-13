@@ -6,7 +6,8 @@ authors = ["you"]
 license = ""
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+# Raised from the Tauri template's 1.77.2 by `rmcp`, which declares 1.88.
+rust-version = "1.88"
 
 [lib]
 name = "app_lib"
@@ -25,12 +26,20 @@ tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 sea-orm = { version = "2.0.0-rc", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio = { version = "1", features = ["fs", "rt"] }
+tokio = { version = "1", features = ["fs", "net", "rt", "sync"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 keyring-core = "1"
 image = { version = "0.25.6", default-features = false, features = ["jpeg", "png", "avif"] }
 sha2 = "0.10.9"
+rmcp = { version = "3", features = ["server", "transport-streamable-http-server"] }
+axum = { version = "0.8.4", default-features = false, features = ["http1", "tokio"] }
+schemars = "1"
+
+# `tests/mcp_endpoint.rs` drives the MCP endpoint over real HTTP, which needs a
+# multi-threaded runtime and `#[tokio::test]`.
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 # OS keychain backend for the Cloudflare API token. Windows Credential Manager
 # on Windows; other platforms fall back to the credentials file for now.
