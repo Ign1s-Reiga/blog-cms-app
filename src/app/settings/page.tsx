@@ -102,7 +102,7 @@ export default function SettingsPage() {
             height — stretching the short Cloudflare card to match the much
             taller Media one would leave it mostly empty. */}
         <div className='grid items-start gap-6 lg:grid-cols-2'>
-          {/* Left: connection, then updates. */}
+          {/* Left: connection, then the MCP endpoint. */}
           <div className='space-y-6'>
             <section className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]'>
               <div className='px-4 py-3 border-b border-zinc-100 dark:border-white/[0.05]'>
@@ -134,10 +134,12 @@ export default function SettingsPage() {
               </div>
             </section>
 
-            <UpdateCard />
+            {/* Outside the `creds` guard: drafting over MCP is local-only and
+                works before Cloudflare is connected. */}
+            <McpCard />
           </div>
 
-          {/* Right: media settings, then the MCP endpoint. */}
+          {/* Right: media settings, then updates. */}
           <div className='space-y-6'>
             {creds && (
               <section className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]'>
@@ -194,9 +196,7 @@ export default function SettingsPage() {
               </section>
             )}
 
-            {/* Outside the `creds` guard: drafting over MCP is local-only and
-                works before Cloudflare is connected. */}
-            <McpCard />
+            <UpdateCard />
           </div>
         </div>
       </div>
