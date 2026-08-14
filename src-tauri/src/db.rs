@@ -88,9 +88,18 @@ async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
 // One implementation per operation, shared by every entity that implements
 // `Record`. `post` and `series` previously had five identical functions each,
 // differing only in the type they named.
+//
+// Each takes `&impl ConnectionTrait` rather than `&DatabaseConnection` so a
+// caller can hand it either the pool or an open transaction. `save_post` needs
+// the latter: a post's row and its staging row have to land together or not at
+// all, or a failed save leaves the two disagreeing about what happened.
+//
+// `impl Trait` rather than a named parameter deliberately — it keeps the
+// connection out of the turbofish, so every `db::get::<PostModel>(..)` call
+// site reads exactly as it did.
 
 /// Insert a model, returning it as stored (with its assigned primary key).
-pub async fn create<M>(db: &DatabaseConnection, model: M) -> AppResult<M>
+pub async fn create<M>(db: &impl ConnectionTrait, model: M) -> AppResult<M>
 where
     M: Record + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>,
     <M::Entity as EntityTrait>::ActiveModel:
@@ -100,7 +109,7 @@ where
 }
 
 /// Every row, newest first by the record's own ordering column.
-pub async fn list<M: Record>(db: &DatabaseConnection) -> AppResult<Vec<M>> {
+pub async fn list<M: Record>(db: &impl ConnectionTrait) -> AppResult<Vec<M>> {
     Ok(M::Entity::find()
         .order_by_desc(M::order_column())
         .all(db)
@@ -108,12 +117,12 @@ pub async fn list<M: Record>(db: &DatabaseConnection) -> AppResult<Vec<M>> {
 }
 
 /// One row by primary key, or `None` when it does not exist.
-pub async fn get<M: Record>(db: &DatabaseConnection, id: Id<M>) -> AppResult<Option<M>> {
+pub async fn get<M: Record>(db: &impl ConnectionTrait, id: Id<M>) -> AppResult<Option<M>> {
     Ok(M::Entity::find_by_id(id).one(db).await?)
 }
 
 /// Overwrite the row this model's primary key points at.
-pub async fn update<M>(db: &DatabaseConnection, model: M) -> AppResult<M>
+pub async fn update<M>(db: &impl ConnectionTrait, model: M) -> AppResult<M>
 where
     M: Record + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>,
     <M::Entity as EntityTrait>::ActiveModel:
@@ -123,14 +132,14 @@ where
 }
 
 /// Delete by primary key. Deleting an absent row is not an error.
-pub async fn delete<M: Record>(db: &DatabaseConnection, id: Id<M>) -> AppResult<()> {
+pub async fn delete<M: Record>(db: &impl ConnectionTrait, id: Id<M>) -> AppResult<()> {
     M::Entity::delete_by_id(id).exec(db).await?;
     Ok(())
 }
 
 /// The post with this slug, if there is one. The column is unique, so at most
 /// one row can match.
-pub async fn post_by_slug(db: &DatabaseConnection, slug: &str) -> AppResult<Option<post::Model>> {
+pub async fn post_by_slug(db: &impl ConnectionTrait, slug: &str) -> AppResult<Option<post::Model>> {
     Ok(post::Entity::find()
         .filter(post::Column::Slug.eq(slug))
         .one(db)
@@ -202,15 +211,21 @@ async fn upsert_post_from_remote(db: &DatabaseConnection, remote: post::Model) -
 // ─── Publish staging (local only) ───────────────────────────────────────────────
 
 pub async fn stage_get(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     post_id: i32,
 ) -> AppResult<Option<post_stage::Model>> {
     Ok(post_stage::Entity::find_by_id(post_id).one(db).await?)
 }
 
+/// Remove a post's staging row. Clearing an absent row is not an error.
+pub async fn stage_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
+    post_stage::Entity::delete_by_id(post_id).exec(db).await?;
+    Ok(())
+}
+
 /// Upsert a post's staging row (there is one row per post).
 pub async fn stage_set(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     model: post_stage::Model,
 ) -> AppResult<post_stage::Model> {
     let exists = post_stage::Entity::find_by_id(model.post_id)
