@@ -31,6 +31,8 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::error::{AppError, AppResult};
+
 /// Default layout for a post's thumbnail. Must match the blog's `thumbnailKey`.
 pub const DEFAULT_THUMBNAIL_PATTERN: &str = "posts/{slug}/thumbnail.{ext}";
 /// Default layout for an image used in a post body.
@@ -81,28 +83,30 @@ pub fn public_url(public_base: &str, key: &str) -> String {
 }
 
 /// Why a key pattern was rejected, phrased for display in Settings.
-pub fn validate_pattern(pattern: &str, kind: PatternKind) -> Result<(), String> {
+pub fn validate_pattern(pattern: &str, kind: PatternKind) -> AppResult<()> {
     let pattern = pattern.trim();
     if pattern.is_empty() {
-        return Err("Pattern cannot be empty".into());
+        return Err(AppError::InvalidPattern("Pattern cannot be empty"));
     }
     if pattern.contains("..") {
-        return Err("Pattern cannot contain `..`".into());
+        return Err(AppError::InvalidPattern("Pattern cannot contain `..`"));
     }
     if !pattern.contains("{slug}") {
-        return Err("Pattern must contain {slug}, or every post would share one key".into());
+        return Err(AppError::InvalidPattern(
+            "Pattern must contain {slug}, or every post would share one key",
+        ));
     }
     match kind {
         // Without the hash two different images in the same post collide, and
         // the second silently overwrites the first.
-        PatternKind::Media if !pattern.contains("{hash}") => {
-            Err("Media pattern must contain {hash}, or images in a post would overwrite each other".into())
-        }
+        PatternKind::Media if !pattern.contains("{hash}") => Err(AppError::InvalidPattern(
+            "Media pattern must contain {hash}, or images in a post would overwrite each other",
+        )),
         // The reader derives this from the slug alone; a hash makes it
         // underivable, so thumbnails would never be found.
-        PatternKind::Thumbnail if pattern.contains("{hash}") => {
-            Err("Thumbnail pattern cannot contain {hash} — the blog derives this key from the slug alone".into())
-        }
+        PatternKind::Thumbnail if pattern.contains("{hash}") => Err(AppError::InvalidPattern(
+            "Thumbnail pattern cannot contain {hash} — the blog derives this key from the slug alone",
+        )),
         _ => Ok(()),
     }
 }

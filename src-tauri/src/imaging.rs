@@ -27,6 +27,7 @@ use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::cloudflare::{self, cf};
+use crate::error::{AppError, AppResult};
 use crate::media_keys;
 
 /// Extensions converted to AVIF on upload; anything else is stored unchanged.
@@ -55,23 +56,24 @@ pub fn stored_ext(ext: &str) -> &str {
 }
 
 /// Decode `bytes` and re-encode as AVIF. Blocking and CPU-bound.
-pub fn to_avif(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let image = image::load_from_memory(bytes).map_err(|e| format!("Cannot decode image: {e}"))?;
+pub fn to_avif(bytes: &[u8]) -> AppResult<Vec<u8>> {
+    let image =
+        image::load_from_memory(bytes).map_err(|e| AppError::image("Cannot decode image", e))?;
 
     let mut out = Vec::new();
     image
         .write_with_encoder(AvifEncoder::new_with_speed_quality(&mut out, SPEED, QUALITY))
-        .map_err(|e| format!("AVIF encoding failed: {e}"))?;
+        .map_err(|e| AppError::image("AVIF encoding failed", e))?;
 
     Ok(out)
 }
 
 /// [`to_avif`] on a blocking thread, so a slow encode never stalls the async
 /// runtime (and with it the UI's other commands).
-pub async fn convert_to_avif(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+pub async fn convert_to_avif(bytes: Vec<u8>) -> AppResult<Vec<u8>> {
     tokio::task::spawn_blocking(move || to_avif(&bytes))
         .await
-        .map_err(|e| format!("Image conversion thread panicked: {e}"))?
+        .map_err(|e| AppError::join("Image conversion thread panicked", e))?
 }
 
 // ─── Commands ───────────────────────────────────────────────────────────────
@@ -92,7 +94,7 @@ pub struct StagedImage {
 /// `src_path` is an absolute path from an OS drag-and-drop. The extension is
 /// validated against a fixed allow-list; other files are rejected.
 #[tauri::command]
-pub async fn stage_image(app: tauri::AppHandle, src_path: String) -> Result<StagedImage, String> {
+pub async fn stage_image(app: tauri::AppHandle, src_path: String) -> AppResult<StagedImage> {
     let src = PathBuf::from(&src_path);
 
     let ext = src
@@ -105,16 +107,16 @@ pub async fn stage_image(app: tauri::AppHandle, src_path: String) -> Result<Stag
                 "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "svg" | "bmp" | "ico"
             )
         })
-        .ok_or_else(|| format!("Unsupported image type: {src_path}"))?;
+        .ok_or(AppError::UnsupportedImage(src_path))?;
 
     let assets_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .map_err(AppError::AppDataDir)?
         .join("assets");
     tokio::fs::create_dir_all(&assets_dir)
         .await
-        .map_err(|e| format!("Failed to create assets dir: {e}"))?;
+        .map_err(|e| AppError::io("Failed to create assets dir", e))?;
 
     // JPG/PNG are converted to AVIF here rather than at publish, so the editor
     // preview shows the same bytes that will reach readers. Other formats are
@@ -124,15 +126,15 @@ pub async fn stage_image(app: tauri::AppHandle, src_path: String) -> Result<Stag
     if is_convertible(&ext) {
         let bytes = tokio::fs::read(&src)
             .await
-            .map_err(|e| format!("Failed to read image: {e}"))?;
+            .map_err(|e| AppError::io("Failed to read image", e))?;
         let avif = convert_to_avif(bytes).await?;
         tokio::fs::write(&dest, &avif)
             .await
-            .map_err(|e| format!("Failed to write converted image: {e}"))?;
+            .map_err(|e| AppError::io("Failed to write converted image", e))?;
     } else {
         tokio::fs::copy(&src, &dest)
             .await
-            .map_err(|e| format!("Failed to copy image: {e}"))?;
+            .map_err(|e| AppError::io("Failed to copy image", e))?;
     }
 
     let name = src
@@ -156,9 +158,9 @@ const THUMBNAIL_EXTS: &[&str] = &["png", "jpg", "jpeg", "avif"];
 /// Replaces any existing thumbnail. Returns `Err("cancelled")` when the dialog
 /// is dismissed.
 #[tauri::command]
-pub async fn set_post_thumbnail(app: tauri::AppHandle, slug: String) -> Result<String, String> {
+pub async fn set_post_thumbnail(app: tauri::AppHandle, slug: String) -> AppResult<String> {
     if !media_keys::is_safe_slug(&slug) {
-        return Err(format!("Invalid post slug: {slug}"));
+        return Err(AppError::InvalidSlug(slug));
     }
 
     let app_clone = app.clone();
@@ -170,14 +172,14 @@ pub async fn set_post_thumbnail(app: tauri::AppHandle, slug: String) -> Result<S
             .blocking_pick_file()
     })
     .await
-    .map_err(|e| format!("Dialog thread panicked: {e}"))?;
+    .map_err(|e| AppError::join("Dialog thread panicked", e))?;
 
     let src = match picked {
-        None => return Err("cancelled".to_string()),
+        None => return Err(AppError::Cancelled),
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         Some(tauri_plugin_dialog::FilePath::Path(p)) => p,
         #[allow(unreachable_patterns)]
-        Some(_) => return Err("Unsupported path format on this platform".to_string()),
+        Some(_) => return Err(AppError::UnsupportedPathFormat),
     };
 
     let ext = src
@@ -185,11 +187,11 @@ pub async fn set_post_thumbnail(app: tauri::AppHandle, slug: String) -> Result<S
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
         .filter(|e| THUMBNAIL_EXTS.contains(&e.as_str()))
-        .ok_or_else(|| "Unsupported thumbnail type".to_string())?;
+        .ok_or(AppError::UnsupportedThumbnail)?;
 
     let bytes = tokio::fs::read(&src)
         .await
-        .map_err(|e| format!("Failed to read image: {e}"))?;
+        .map_err(|e| AppError::io("Failed to read image", e))?;
     let bytes = if is_convertible(&ext) {
         convert_to_avif(bytes).await?
     } else {

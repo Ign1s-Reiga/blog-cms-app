@@ -41,7 +41,14 @@ pub struct Analytics {
 
 /// Why analytics could not be read. `kind` is what the UI switches on; the
 /// message is for display underneath.
-#[derive(Serialize)]
+///
+/// The one error in the crate that does not fold into [`crate::error::AppError`].
+/// That type serializes as a bare string, which is all the other screens need,
+/// whereas `AnalyticsCard` branches on `kind` to tell a missing token permission
+/// — an expected, actionable state — from a real outage. Keeping the struct
+/// shape on the wire is the whole point of it.
+#[derive(Debug, Serialize, thiserror::Error)]
+#[error("{message}")]
 pub struct AnalyticsError {
     pub kind: ErrorKind,
     pub message: String,

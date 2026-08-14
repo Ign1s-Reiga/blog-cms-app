@@ -10,6 +10,7 @@
 //! leaves the macros behind.
 
 use crate::entities::post_stage;
+use crate::error::{AppError, AppResult};
 
 mod d1;
 mod local_db;
@@ -53,11 +54,9 @@ fn tags_to_json(csv: &str) -> String {
     serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn validate_stage(stage: &str) -> Result<(), String> {
+fn validate_stage(stage: &str) -> AppResult<()> {
     match stage {
         post_stage::DRAFT | post_stage::PUBLISHED | post_stage::SYNC_FAILED => Ok(()),
-        other => Err(format!(
-            "Invalid stage `{other}` (expected `draft`, `published`, or `sync_failed`)"
-        )),
+        other => Err(AppError::InvalidStage(other.to_string())),
     }
 }

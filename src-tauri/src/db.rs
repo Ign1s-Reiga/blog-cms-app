@@ -12,17 +12,15 @@ use tauri::Manager;
 
 use crate::entities::record::{Id, Record};
 use crate::entities::{post, post_stage, series};
+use crate::error::{AppError, AppResult};
 
 /// Open (creating if needed) the local SQLite database and ensure its schema
 /// exists. Returns a connection to store in Tauri's managed state.
-pub async fn connect(app: &tauri::AppHandle) -> Result<DatabaseConnection, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?;
+pub async fn connect(app: &tauri::AppHandle) -> AppResult<DatabaseConnection> {
+    let dir = app.path().app_data_dir().map_err(AppError::AppDataDir)?;
     tokio::fs::create_dir_all(&dir)
         .await
-        .map_err(|e| format!("Failed to create data dir: {e}"))?;
+        .map_err(|e| AppError::io("Failed to create data dir", e))?;
 
     let db_path = dir.join("blog-cms.db");
     // `mode=rwc` opens read/write and creates the file if it doesn't exist.
@@ -34,34 +32,34 @@ pub async fn connect(app: &tauri::AppHandle) -> Result<DatabaseConnection, Strin
 
     let db = Database::connect(&url)
         .await
-        .map_err(|e| format!("Failed to open local database: {e}"))?;
+        .map_err(|e| AppError::db_init("Failed to open local database", e))?;
     ensure_schema(&db).await?;
     Ok(db)
 }
 
 /// Create the tables from the entity definitions if they aren't there yet.
 /// `series` is created first because `blog-db` references it.
-async fn ensure_schema(db: &DatabaseConnection) -> Result<(), String> {
+async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
     let schema = Schema::new(db.get_database_backend());
 
     let mut series_tbl = schema.create_table_from_entity(series::Entity);
     series_tbl.if_not_exists();
     db.execute(&series_tbl)
         .await
-        .map_err(|e| format!("Failed to create `series` table: {e}"))?;
+        .map_err(|e| AppError::db_init("Failed to create `series` table", e))?;
 
     let mut post_tbl = schema.create_table_from_entity(post::Entity);
     post_tbl.if_not_exists();
     db.execute(&post_tbl)
         .await
-        .map_err(|e| format!("Failed to create `blog-db` table: {e}"))?;
+        .map_err(|e| AppError::db_init("Failed to create `blog-db` table", e))?;
 
     // Local-only staging table (no D1 counterpart).
     let mut stage_tbl = schema.create_table_from_entity(post_stage::Entity);
     stage_tbl.if_not_exists();
     db.execute(&stage_tbl)
         .await
-        .map_err(|e| format!("Failed to create `post_stage` table: {e}"))?;
+        .map_err(|e| AppError::db_init("Failed to create `post_stage` table", e))?;
 
     Ok(())
 }
@@ -73,48 +71,41 @@ async fn ensure_schema(db: &DatabaseConnection) -> Result<(), String> {
 // differing only in the type they named.
 
 /// Insert a model, returning it as stored (with its assigned primary key).
-pub async fn create<M>(db: &DatabaseConnection, model: M) -> Result<M, String>
+pub async fn create<M>(db: &DatabaseConnection, model: M) -> AppResult<M>
 where
     M: Record + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>,
     <M::Entity as EntityTrait>::ActiveModel:
         ActiveModelTrait<Entity = M::Entity> + ActiveModelBehavior + Send,
 {
-    model.into_insert().insert(db).await.map_err(|e| e.to_string())
+    Ok(model.into_insert().insert(db).await?)
 }
 
 /// Every row, newest first by the record's own ordering column.
-pub async fn list<M: Record>(db: &DatabaseConnection) -> Result<Vec<M>, String> {
-    M::Entity::find()
+pub async fn list<M: Record>(db: &DatabaseConnection) -> AppResult<Vec<M>> {
+    Ok(M::Entity::find()
         .order_by_desc(M::order_column())
         .all(db)
-        .await
-        .map_err(|e| e.to_string())
+        .await?)
 }
 
 /// One row by primary key, or `None` when it does not exist.
-pub async fn get<M: Record>(db: &DatabaseConnection, id: Id<M>) -> Result<Option<M>, String> {
-    M::Entity::find_by_id(id)
-        .one(db)
-        .await
-        .map_err(|e| e.to_string())
+pub async fn get<M: Record>(db: &DatabaseConnection, id: Id<M>) -> AppResult<Option<M>> {
+    Ok(M::Entity::find_by_id(id).one(db).await?)
 }
 
 /// Overwrite the row this model's primary key points at.
-pub async fn update<M>(db: &DatabaseConnection, model: M) -> Result<M, String>
+pub async fn update<M>(db: &DatabaseConnection, model: M) -> AppResult<M>
 where
     M: Record + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>,
     <M::Entity as EntityTrait>::ActiveModel:
         ActiveModelTrait<Entity = M::Entity> + ActiveModelBehavior + Send,
 {
-    model.into_update().update(db).await.map_err(|e| e.to_string())
+    Ok(model.into_update().update(db).await?)
 }
 
 /// Delete by primary key. Deleting an absent row is not an error.
-pub async fn delete<M: Record>(db: &DatabaseConnection, id: Id<M>) -> Result<(), String> {
-    M::Entity::delete_by_id(id)
-        .exec(db)
-        .await
-        .map_err(|e| e.to_string())?;
+pub async fn delete<M: Record>(db: &DatabaseConnection, id: Id<M>) -> AppResult<()> {
+    M::Entity::delete_by_id(id).exec(db).await?;
     Ok(())
 }
 
@@ -127,7 +118,7 @@ pub async fn delete<M: Record>(db: &DatabaseConnection, id: Id<M>) -> Result<(),
 pub async fn mirror_posts(
     db: &DatabaseConnection,
     remote: Vec<post::Model>,
-) -> Result<(usize, usize), String> {
+) -> AppResult<(usize, usize)> {
     let remote_slugs: std::collections::HashSet<String> =
         remote.iter().map(|p| p.slug.clone()).collect();
     let upserted = remote.len();
@@ -137,18 +128,12 @@ pub async fn mirror_posts(
     }
 
     // Drop anything local that no longer exists remotely (+ its staging row).
-    let locals = post::Entity::find()
-        .all(db)
-        .await
-        .map_err(|e| e.to_string())?;
+    let locals = post::Entity::find().all(db).await?;
     let mut deleted = 0usize;
     for local in locals {
         if !remote_slugs.contains(&local.slug) {
             let _ = post_stage::Entity::delete_by_id(local.id).exec(db).await;
-            post::Entity::delete_by_id(local.id)
-                .exec(db)
-                .await
-                .map_err(|e| e.to_string())?;
+            post::Entity::delete_by_id(local.id).exec(db).await?;
             deleted += 1;
         }
     }
@@ -162,12 +147,11 @@ pub async fn mirror_posts(
 /// local primary key; a new slug is inserted. Staging is reset to the post's
 /// published/draft state so a stale `sync_failed` doesn't linger. Series linkage
 /// is dropped — series aren't synced and remote ids don't map to local rows.
-async fn upsert_post_from_remote(db: &DatabaseConnection, remote: post::Model) -> Result<(), String> {
+async fn upsert_post_from_remote(db: &DatabaseConnection, remote: post::Model) -> AppResult<()> {
     let existing = post::Entity::find()
         .filter(post::Column::Slug.eq(remote.slug.clone()))
         .one(db)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
     let mut model = remote;
     model.series_id = None;
@@ -176,9 +160,9 @@ async fn upsert_post_from_remote(db: &DatabaseConnection, remote: post::Model) -
     let saved = match existing {
         Some(local) => {
             model.id = local.id;
-            model.into_update().update(db).await.map_err(|e| e.to_string())?
+            model.into_update().update(db).await?
         }
-        None => model.into_insert().insert(db).await.map_err(|e| e.to_string())?,
+        None => model.into_insert().insert(db).await?,
     };
 
     let stage = if saved.published { post_stage::PUBLISHED } else { post_stage::DRAFT };
@@ -195,22 +179,18 @@ async fn upsert_post_from_remote(db: &DatabaseConnection, remote: post::Model) -
 pub async fn stage_get(
     db: &DatabaseConnection,
     post_id: i32,
-) -> Result<Option<post_stage::Model>, String> {
-    post_stage::Entity::find_by_id(post_id)
-        .one(db)
-        .await
-        .map_err(|e| e.to_string())
+) -> AppResult<Option<post_stage::Model>> {
+    Ok(post_stage::Entity::find_by_id(post_id).one(db).await?)
 }
 
 /// Upsert a post's staging row (there is one row per post).
 pub async fn stage_set(
     db: &DatabaseConnection,
     model: post_stage::Model,
-) -> Result<post_stage::Model, String> {
+) -> AppResult<post_stage::Model> {
     let exists = post_stage::Entity::find_by_id(model.post_id)
         .one(db)
-        .await
-        .map_err(|e| e.to_string())?
+        .await?
         .is_some();
 
     if exists {
@@ -219,14 +199,14 @@ pub async fn stage_set(
             stage: Set(model.stage),
             staged_at: Set(model.staged_at),
         };
-        active.update(db).await.map_err(|e| e.to_string())
+        Ok(active.update(db).await?)
     } else {
         let active = post_stage::ActiveModel {
             post_id: Set(model.post_id),
             stage: Set(model.stage),
             staged_at: Set(model.staged_at),
         };
-        active.insert(db).await.map_err(|e| e.to_string())
+        Ok(active.insert(db).await?)
     }
 }
 
@@ -234,12 +214,11 @@ pub async fn stage_set(
 pub async fn posts_in_stage(
     db: &DatabaseConnection,
     stage: String,
-) -> Result<Vec<post::Model>, String> {
+) -> AppResult<Vec<post::Model>> {
     let ids: Vec<i32> = post_stage::Entity::find()
         .filter(post_stage::Column::Stage.eq(stage))
         .all(db)
-        .await
-        .map_err(|e| e.to_string())?
+        .await?
         .into_iter()
         .map(|s| s.post_id)
         .collect();
@@ -248,25 +227,19 @@ pub async fn posts_in_stage(
         return Ok(Vec::new());
     }
 
-    post::Entity::find()
+    Ok(post::Entity::find()
         .filter(post::Column::Id.is_in(ids))
         .order_by_desc(post::Column::CreatedAt)
         .all(db)
-        .await
-        .map_err(|e| e.to_string())
+        .await?)
 }
 
 // ─── Sample data ────────────────────────────────────────────────────────────────
 
 /// Populate an empty local database with a handful of sample posts (each also
 /// staged draft/published). No-ops once the table has any rows.
-pub async fn seed_sample_posts(db: &DatabaseConnection) -> Result<(), String> {
-    if post::Entity::find()
-        .one(db)
-        .await
-        .map_err(|e| e.to_string())?
-        .is_some()
-    {
+pub async fn seed_sample_posts(db: &DatabaseConnection) -> AppResult<()> {
+    if post::Entity::find().one(db).await?.is_some() {
         return Ok(());
     }
 
@@ -298,8 +271,7 @@ pub async fn seed_sample_posts(db: &DatabaseConnection) -> Result<(), String> {
         }
         .into_insert()
         .insert(db)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
         let stage = if published { post_stage::PUBLISHED } else { post_stage::DRAFT };
         stage_set(

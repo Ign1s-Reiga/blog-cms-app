@@ -11,6 +11,7 @@ use crate::cloudflare::{self, cf};
 use crate::db;
 use crate::entities::post::Model as PostModel;
 use crate::entities::post_stage;
+use crate::error::{AppError, AppResult};
 use crate::imaging::{self, StagedImage};
 use crate::media_keys;
 use super::*;
@@ -69,17 +70,17 @@ fn extract_asset_refs(body: &str) -> Vec<String> {
 /// Keyed by slug (not id) so it works for posts sourced from D1, whose ids don't
 /// match the local cache.
 #[tauri::command]
-pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> Result<String, String> {
+pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> AppResult<String> {
     // The slug builds a local file path and an R2 key, so reject anything that
     // isn't a strict slug (guards against path traversal / injection).
     if !media_keys::is_safe_slug(&slug) {
-        return Err(format!("Invalid post slug: {slug}"));
+        return Err(AppError::InvalidSlug(slug));
     }
 
     let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .map_err(AppError::AppDataDir)?
         .join("posts");
     let local_path = dir.join(format!("{slug}.md"));
 
@@ -122,7 +123,7 @@ pub async fn save_post(
     tags: String,
     body: String,
     published: bool,
-) -> Result<PostModel, String> {
+) -> AppResult<PostModel> {
     let now = now_ts();
 
     // Start from the existing row (preserving slug/created_at/series/excerpt) or
@@ -130,7 +131,7 @@ pub async fn save_post(
     let mut model = match id {
         Some(id) => db::get::<PostModel>(conn.inner(), id)
             .await?
-            .ok_or_else(|| format!("post {id} not found"))?,
+            .ok_or(AppError::PostNotFound(id))?,
         None => {
             let slug = slugify(&title);
             let slug = if slug.is_empty() { format!("post-{now}") } else { slug };
@@ -167,12 +168,12 @@ pub async fn save_post(
     let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .map_err(AppError::AppDataDir)?
         .join("posts");
     let _ = tokio::fs::create_dir_all(&dir).await;
     tokio::fs::write(dir.join(format!("{}.md", saved.slug)), &body)
         .await
-        .map_err(|e| format!("Failed to write local markdown: {e}"))?;
+        .map_err(|e| AppError::io("Failed to write local markdown", e))?;
 
     // 3. Draft → local only. Publish → push the body to R2 and metadata to D1.
     if !published {
@@ -187,7 +188,7 @@ pub async fn save_post(
     let assets_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .map_err(AppError::AppDataDir)?
         .join("assets");
 
     let synced = async {
@@ -202,11 +203,7 @@ pub async fn save_post(
         // object that isn't there yet.
         let public_base = config.r2_public_url.trim_end_matches('/');
         if public_base.is_empty() {
-            return Err(
-                "No R2 public URL is configured, so image links cannot be written. \
-                 Sign out and sign in again to set it."
-                    .to_string(),
-            );
+            return Err(AppError::NoPublicUrl);
         }
 
         let mut published = body.clone();
@@ -227,7 +224,7 @@ pub async fn save_post(
             .await?;
         // Metadata → D1.
         cloudflare::d1_post_upsert(&client, &config, saved.clone()).await?;
-        Ok::<(), String>(())
+        Ok::<(), AppError>(())
     }
     .await;
 
@@ -240,7 +237,7 @@ pub async fn save_post(
 
     match synced {
         Ok(()) => Ok(saved),
-        Err(e) => Err(format!("post saved locally but publish sync failed: {e}")),
+        Err(e) => Err(AppError::PublishSyncFailed(Box::new(e))),
     }
 }
 
@@ -265,7 +262,7 @@ const MEDIA_EXTS: &[&str] = &[
 /// Pick a media file, upload it to R2 under `media/<uuid>.<ext>`, and cache it
 /// locally. Returns the new item, or `Err("cancelled")` when the dialog closes.
 #[tauri::command]
-pub async fn upload_media(app: tauri::AppHandle) -> Result<MediaItem, String> {
+pub async fn upload_media(app: tauri::AppHandle) -> AppResult<MediaItem> {
     let app_clone = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
         app_clone
@@ -275,14 +272,14 @@ pub async fn upload_media(app: tauri::AppHandle) -> Result<MediaItem, String> {
             .blocking_pick_file()
     })
     .await
-    .map_err(|e| format!("Dialog thread panicked: {e}"))?;
+    .map_err(|e| AppError::join("Dialog thread panicked", e))?;
 
     let src = match picked {
-        None => return Err("cancelled".to_string()),
+        None => return Err(AppError::Cancelled),
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         Some(tauri_plugin_dialog::FilePath::Path(p)) => p,
         #[allow(unreachable_patterns)]
-        Some(_) => return Err("Unsupported path format on this platform".to_string()),
+        Some(_) => return Err(AppError::UnsupportedPathFormat),
     };
 
     let ext = src
@@ -290,11 +287,11 @@ pub async fn upload_media(app: tauri::AppHandle) -> Result<MediaItem, String> {
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
         .filter(|e| MEDIA_EXTS.contains(&e.as_str()))
-        .ok_or_else(|| "Unsupported media type".to_string())?;
+        .ok_or(AppError::UnsupportedMedia)?;
 
     let bytes = tokio::fs::read(&src)
         .await
-        .map_err(|e| format!("Failed to read file: {e}"))?;
+        .map_err(|e| AppError::io("Failed to read file", e))?;
 
     // JPG/PNG become AVIF; everything else is uploaded as picked. `size` is
     // measured after conversion so the library reports what R2 actually holds.
@@ -317,7 +314,7 @@ pub async fn upload_media(app: tauri::AppHandle) -> Result<MediaItem, String> {
     let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .map_err(AppError::AppDataDir)?
         .join("media");
     let _ = tokio::fs::create_dir_all(&dir).await;
     let _ = tokio::fs::write(dir.join(&file_name), &bytes).await;
@@ -338,22 +335,22 @@ pub async fn upload_media(app: tauri::AppHandle) -> Result<MediaItem, String> {
 pub async fn stage_media_from_library(
     app: tauri::AppHandle,
     key: String,
-) -> Result<StagedImage, String> {
+) -> AppResult<StagedImage> {
     let file_name = key
         .strip_prefix("media/")
         .filter(|n| is_safe_file_name(n))
-        .ok_or_else(|| format!("Not a media library key: {key}"))?
+        .ok_or_else(|| AppError::NotAMediaKey(key.clone()))?
         .to_string();
 
     let ext = file_name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     if ext.is_empty() {
-        return Err(format!("Media object has no extension: {key}"));
+        return Err(AppError::MediaKeyHasNoExtension(key));
     }
 
     let data_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?;
+        .map_err(AppError::AppDataDir)?;
 
     // Prefer the local cache the media library already maintains; fall back to
     // R2 for an object listed but not yet cached.
@@ -364,33 +361,33 @@ pub async fn stage_media_from_library(
             let (client, config) = cf()?;
             cloudflare::download_bytes_from_r2(&client, &config, &key)
                 .await?
-                .ok_or_else(|| format!("Media object not found: {key}"))?
+                .ok_or_else(|| AppError::MediaNotFound(key.clone()))?
         }
     };
 
     let assets_dir = data_dir.join("assets");
     tokio::fs::create_dir_all(&assets_dir)
         .await
-        .map_err(|e| format!("Failed to create assets dir: {e}"))?;
+        .map_err(|e| AppError::io("Failed to create assets dir", e))?;
 
     let staged_name = format!("{}.{ext}", uuid::Uuid::new_v4());
     tokio::fs::write(assets_dir.join(&staged_name), &bytes)
         .await
-        .map_err(|e| format!("Failed to stage media: {e}"))?;
+        .map_err(|e| AppError::io("Failed to stage media", e))?;
 
     Ok(StagedImage { rel: format!("assets/{staged_name}"), name: file_name })
 }
 
 /// List media objects in R2 (prefix `media/`), caching any not already local.
 #[tauri::command]
-pub async fn list_media(app: tauri::AppHandle) -> Result<Vec<MediaItem>, String> {
+pub async fn list_media(app: tauri::AppHandle) -> AppResult<Vec<MediaItem>> {
     let (client, config) = cf()?;
     let objects = cloudflare::list_r2(&client, &config, "media/").await?;
 
     let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .map_err(AppError::AppDataDir)?
         .join("media");
     let _ = tokio::fs::create_dir_all(&dir).await;
 
@@ -416,7 +413,7 @@ pub async fn list_media(app: tauri::AppHandle) -> Result<Vec<MediaItem>, String>
 
 /// Delete a media object from R2 and its local cache.
 #[tauri::command]
-pub async fn delete_media(app: tauri::AppHandle, key: String) -> Result<(), String> {
+pub async fn delete_media(app: tauri::AppHandle, key: String) -> AppResult<()> {
     let (client, config) = cf()?;
     cloudflare::delete_from_r2(&client, &config, &key).await?;
 
@@ -426,7 +423,7 @@ pub async fn delete_media(app: tauri::AppHandle, key: String) -> Result<(), Stri
             let local = app
                 .path()
                 .app_data_dir()
-                .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+                .map_err(AppError::AppDataDir)?
                 .join("media")
                 .join(file_name);
             let _ = tokio::fs::remove_file(local).await;
