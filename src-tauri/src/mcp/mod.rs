@@ -42,6 +42,7 @@ use rmcp::transport::streamable_http_server::{
 
 use crate::commands;
 use crate::db;
+use crate::error::{AppError, AppResult};
 use crate::entities::post::Model as PostModel;
 
 /// Port used until someone changes it. Picked to sit clear of the dev server
@@ -71,11 +72,11 @@ struct StoredMcp {
     token: Option<String>,
 }
 
-fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn settings_path(app: &tauri::AppHandle) -> AppResult<PathBuf> {
     Ok(app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .map_err(AppError::AppDataDir)?
         .join("mcp.json"))
 }
 
@@ -87,13 +88,15 @@ fn load_stored(app: &tauri::AppHandle) -> StoredMcp {
         .unwrap_or_default()
 }
 
-fn save_stored(app: &tauri::AppHandle, stored: &StoredMcp) -> Result<(), String> {
+fn save_stored(app: &tauri::AppHandle, stored: &StoredMcp) -> AppResult<()> {
     let path = settings_path(app)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create data dir: {e}"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AppError::io("Failed to create data dir", e))?;
     }
-    let data = serde_json::to_string_pretty(stored).map_err(|e| format!("Serialize failed: {e}"))?;
-    std::fs::write(&path, data).map_err(|e| format!("Failed to write MCP settings: {e}"))
+    let data =
+        serde_json::to_string_pretty(stored).map_err(|e| AppError::json("Serialize failed", e))?;
+    std::fs::write(&path, data).map_err(|e| AppError::io("Failed to write MCP settings", e))
 }
 
 // ─── Bearer token ─────────────────────────────────────────────────────────────
@@ -128,7 +131,7 @@ fn load_token(app: &tauri::AppHandle) -> Option<String> {
 
 /// The token, issuing and persisting one the first time it is genuinely needed
 /// — starting the server, or an explicit rotation.
-fn ensure_token(app: &tauri::AppHandle) -> Result<String, String> {
+fn ensure_token(app: &tauri::AppHandle) -> AppResult<String> {
     if let Some(token) = load_token(app) {
         return Ok(token);
     }
@@ -144,7 +147,7 @@ fn ensure_token(app: &tauri::AppHandle) -> Result<String, String> {
 
 /// Throw away the current token and issue a new one, invalidating every client
 /// config that carried the old one.
-fn rotate_token(app: &tauri::AppHandle) -> Result<String, String> {
+fn rotate_token(app: &tauri::AppHandle) -> AppResult<String> {
     if let Some(entry) = keyring_entry() {
         let _ = entry.delete_credential();
     }
@@ -219,7 +222,7 @@ where
 }
 
 /// Bring the endpoint up on `port`. Returns the port actually bound.
-pub async fn start(app: &tauri::AppHandle, port: u16) -> Result<u16, String> {
+pub async fn start(app: &tauri::AppHandle, port: u16) -> AppResult<u16> {
     if let Some(running) = app.state::<McpServer>().lock().as_ref() {
         return Ok(running.port);
     }
@@ -240,10 +243,10 @@ pub async fn start(app: &tauri::AppHandle, port: u16) -> Result<u16, String> {
     // Loopback only. Binding 0.0.0.0 here would put every draft on the LAN.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
-        .map_err(|e| format!("Cannot listen on 127.0.0.1:{port}: {e}"))?;
+        .map_err(|source| AppError::Bind { port, source })?;
     let bound = listener
         .local_addr()
-        .map_err(|e| format!("Cannot read local address: {e}"))?
+        .map_err(|e| AppError::io("Cannot read local address", e))?
         .port();
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -316,7 +319,7 @@ pub struct McpStatus {
 }
 
 #[tauri::command]
-pub fn mcp_status(app: tauri::AppHandle) -> Result<McpStatus, String> {
+pub fn mcp_status(app: tauri::AppHandle) -> AppResult<McpStatus> {
     let stored = load_stored(&app);
     let state = app.state::<McpServer>();
     let running = state.lock();
@@ -340,9 +343,9 @@ pub async fn mcp_configure(
     app: tauri::AppHandle,
     enabled: bool,
     port: u16,
-) -> Result<McpStatus, String> {
+) -> AppResult<McpStatus> {
     if port < 1024 {
-        return Err("Port must be 1024 or above".into());
+        return Err(AppError::PortTooLow);
     }
 
     let mut stored = load_stored(&app);
@@ -360,7 +363,7 @@ pub async fn mcp_configure(
 
 /// Issue a new bearer token. Existing client configs stop working until updated.
 #[tauri::command]
-pub async fn mcp_regenerate_token(app: tauri::AppHandle) -> Result<McpStatus, String> {
+pub async fn mcp_regenerate_token(app: tauri::AppHandle) -> AppResult<McpStatus> {
     rotate_token(&app)?;
 
     // The running service captured the old token, so it has to be rebuilt.
@@ -381,7 +384,7 @@ pub fn mcp_list_publish_requests() -> Vec<publish::PublishRequest> {
 pub async fn mcp_approve_publish(
     app: tauri::AppHandle,
     request_id: String,
-) -> Result<publish::PublishRequest, String> {
+) -> AppResult<publish::PublishRequest> {
     let request = publish::take_approved(&request_id)?;
 
     // Read the post fresh rather than trusting what was captured at request
@@ -389,7 +392,7 @@ pub async fn mcp_approve_publish(
     let outcome = async {
         let post = db::get::<PostModel>(app.state::<DatabaseConnection>().inner(), request.post_id)
             .await?
-            .ok_or_else(|| format!("Post {} no longer exists", request.post_id))?;
+            .ok_or(AppError::PostVanished(request.post_id))?;
 
         let body = commands::read_post_markdown(app.clone(), post.slug.clone()).await?;
         let tags = post
@@ -415,8 +418,10 @@ pub async fn mcp_approve_publish(
     }
     .await;
 
-    let settled = publish::settle(&request_id, outcome)
-        .ok_or_else(|| format!("Publish request {request_id} vanished"))?;
+    // The queue records the failure as text: `PublishRequest` is a wire type
+    // the Settings screen and MCP clients both read.
+    let settled = publish::settle(&request_id, outcome.map_err(|e| e.to_string()))
+        .ok_or_else(|| AppError::PublishRequestVanished(request_id.clone()))?;
     notify_publish_change(&app);
     Ok(settled)
 }
@@ -425,7 +430,7 @@ pub async fn mcp_approve_publish(
 pub fn mcp_reject_publish(
     app: tauri::AppHandle,
     request_id: String,
-) -> Result<publish::PublishRequest, String> {
+) -> AppResult<publish::PublishRequest> {
     let rejected = publish::reject(&request_id)?;
     notify_publish_change(&app);
     Ok(rejected)

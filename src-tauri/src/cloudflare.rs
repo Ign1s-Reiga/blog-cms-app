@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::record::{Id, Record};
 use crate::entities::{post, series};
+use crate::error::{AppError, AppResult};
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -39,8 +40,8 @@ pub struct CloudflareConfig {
 }
 
 impl CloudflareConfig {
-    pub fn from_env() -> Result<Self, String> {
-        let missing = |name: &str| format!("Environment variable `{}` is not set", name);
+    pub fn from_env() -> AppResult<Self> {
+        let missing = AppError::MissingEnv;
         Ok(Self {
             account_id:     std::env::var("CF_ACCOUNT_ID")    .map_err(|_| missing("CF_ACCOUNT_ID"))?,
             api_token:      std::env::var("CF_API_TOKEN")     .map_err(|_| missing("CF_API_TOKEN"))?,
@@ -64,6 +65,20 @@ fn r2_object_url(config: &CloudflareConfig, key: &str) -> String {
     )
 }
 
+/// Turn a non-success response into an error carrying its status and body.
+///
+/// Consumes the response, because reading the body is what makes the message
+/// worth having — Cloudflare explains the refusal there, not in the status.
+async fn status_error(
+    service: &'static str,
+    op: &'static str,
+    response: reqwest::Response,
+) -> AppError {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    AppError::Cloudflare { service, op, status, body }
+}
+
 /// Upload raw bytes to R2 at `key` with the given `content_type`.
 pub async fn upload_bytes_to_r2(
     client: &Client,
@@ -71,20 +86,17 @@ pub async fn upload_bytes_to_r2(
     key: &str,
     bytes: Vec<u8>,
     content_type: &str,
-) -> Result<(), String> {
+) -> AppResult<()> {
     let response = client
         .put(r2_object_url(config, key))
         .header("Authorization", format!("Bearer {}", config.api_token))
         .header("Content-Type", content_type)
         .body(bytes)
         .send()
-        .await
-        .map_err(|e| format!("R2 request failed: {e}"))?;
+        .await?;
 
     if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("R2 upload error ({status}): {body}"));
+        return Err(status_error("R2", "upload", response).await);
     }
     Ok(())
 }
@@ -95,7 +107,7 @@ pub async fn upload_to_r2(
     config: &CloudflareConfig,
     key: &str,
     content: &str,
-) -> Result<(), String> {
+) -> AppResult<()> {
     upload_bytes_to_r2(
         client,
         config,
@@ -111,27 +123,21 @@ pub async fn download_bytes_from_r2(
     client: &Client,
     config: &CloudflareConfig,
     key: &str,
-) -> Result<Option<Vec<u8>>, String> {
+) -> AppResult<Option<Vec<u8>>> {
     let response = client
         .get(r2_object_url(config, key))
         .header("Authorization", format!("Bearer {}", config.api_token))
         .send()
-        .await
-        .map_err(|e| format!("R2 request failed: {e}"))?;
+        .await?;
 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
     if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("R2 download error ({status}): {body}"));
+        return Err(status_error("R2", "download", response).await);
     }
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("R2 read failed: {e}"))?;
+    let bytes = response.bytes().await?;
     Ok(Some(bytes.to_vec()))
 }
 
@@ -140,11 +146,9 @@ pub async fn download_from_r2(
     client: &Client,
     config: &CloudflareConfig,
     key: &str,
-) -> Result<Option<String>, String> {
+) -> AppResult<Option<String>> {
     match download_bytes_from_r2(client, config, key).await? {
-        Some(bytes) => Ok(Some(
-            String::from_utf8(bytes).map_err(|e| format!("R2 object is not valid UTF-8: {e}"))?,
-        )),
+        Some(bytes) => Ok(Some(String::from_utf8(bytes)?)),
         None => Ok(None),
     }
 }
@@ -154,20 +158,17 @@ pub async fn delete_from_r2(
     client: &Client,
     config: &CloudflareConfig,
     key: &str,
-) -> Result<(), String> {
+) -> AppResult<()> {
     let response = client
         .delete(r2_object_url(config, key))
         .header("Authorization", format!("Bearer {}", config.api_token))
         .send()
-        .await
-        .map_err(|e| format!("R2 request failed: {e}"))?;
+        .await?;
 
     if response.status() == reqwest::StatusCode::NOT_FOUND || response.status().is_success() {
         return Ok(());
     }
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    Err(format!("R2 delete error ({status}): {body}"))
+    Err(status_error("R2", "delete", response).await)
 }
 
 /// An object listed from R2.
@@ -192,7 +193,7 @@ pub async fn list_r2(
     client: &Client,
     config: &CloudflareConfig,
     prefix: &str,
-) -> Result<Vec<R2Object>, String> {
+) -> AppResult<Vec<R2Object>> {
     let url = format!(
         "https://api.cloudflare.com/client/v4/accounts/{}/r2/buckets/{}/objects",
         config.account_id, config.r2_bucket
@@ -203,24 +204,25 @@ pub async fn list_r2(
         .query(&[("prefix", prefix)])
         .header("Authorization", format!("Bearer {}", config.api_token))
         .send()
-        .await
-        .map_err(|e| format!("R2 request failed: {e}"))?;
+        .await?;
 
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("R2 list error ({status}): {text}"));
+    if !response.status().is_success() {
+        return Err(status_error("R2", "list", response).await);
     }
+    let text = response.text().await.unwrap_or_default();
 
     let parsed: R2ListResponse =
-        serde_json::from_str(&text).map_err(|e| format!("R2 list parse error: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| AppError::json("R2 list parse error", e))?;
     if !parsed.success {
-        let msg = parsed
-            .errors
-            .first()
-            .map(|e| e.message.as_str())
-            .unwrap_or("unknown R2 error");
-        return Err(format!("R2 list failed: {msg}"));
+        return Err(AppError::CloudflareApi {
+            service: "R2",
+            op: "list",
+            message: parsed
+                .errors
+                .first()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "unknown R2 error".to_string()),
+        });
     }
     Ok(parsed.result)
 }
@@ -286,7 +288,7 @@ async fn d1_run<S: QueryTrait>(
     client: &Client,
     config: &CloudflareConfig,
     stmt: S,
-) -> Result<D1Envelope, String> {
+) -> AppResult<D1Envelope> {
     let statement = stmt.build(DbBackend::Sqlite);
     let params = params_json(statement.values.clone());
     d1_query(client, config, statement.sql.clone(), params).await
@@ -298,7 +300,7 @@ async fn d1_query(
     config: &CloudflareConfig,
     sql: String,
     params: Vec<serde_json::Value>,
-) -> Result<D1Envelope, String> {
+) -> AppResult<D1Envelope> {
     let url = format!(
         "https://api.cloudflare.com/client/v4/accounts/{}/d1/database/{}/query",
         config.account_id, config.d1_database_id
@@ -311,30 +313,31 @@ async fn d1_query(
         .header("Authorization", format!("Bearer {}", config.api_token))
         .json(&body)
         .send()
-        .await
-        .map_err(|e| format!("D1 request failed: {e}"))?;
+        .await?;
 
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(format!("D1 HTTP error ({status}): {text}"));
+    if !response.status().is_success() {
+        return Err(status_error("D1", "HTTP", response).await);
     }
+    let text = response.text().await.unwrap_or_default();
 
     let env: D1Envelope =
-        serde_json::from_str(&text).map_err(|e| format!("D1 response parse error: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| AppError::json("D1 response parse error", e))?;
     if !env.success {
-        let msg = env
-            .errors
-            .first()
-            .map(|e| e.message.as_str())
-            .unwrap_or("unknown D1 error");
-        return Err(format!("D1 query failed: {msg}"));
+        return Err(AppError::CloudflareApi {
+            service: "D1",
+            op: "query",
+            message: env
+                .errors
+                .first()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "unknown D1 error".to_string()),
+        });
     }
     Ok(env)
 }
 
 /// Decode the first result set's rows into models.
-fn decode_rows<M: DeserializeOwned>(env: D1Envelope) -> Result<Vec<M>, String> {
+fn decode_rows<M: DeserializeOwned>(env: D1Envelope) -> AppResult<Vec<M>> {
     let rows = env
         .result
         .into_iter()
@@ -342,7 +345,9 @@ fn decode_rows<M: DeserializeOwned>(env: D1Envelope) -> Result<Vec<M>, String> {
         .map(|r| r.results)
         .unwrap_or_default();
     rows.into_iter()
-        .map(|row| serde_json::from_value::<M>(row).map_err(|e| format!("D1 row decode error: {e}")))
+        .map(|row| {
+            serde_json::from_value::<M>(row).map_err(|e| AppError::json("D1 row decode error", e))
+        })
         .collect()
 }
 
@@ -358,7 +363,7 @@ fn last_row_id(env: &D1Envelope) -> i64 {
 // there is nothing common to factor out.
 
 /// Insert a row, returning the id D1 assigned it.
-pub async fn d1_insert<M>(client: &Client, config: &CloudflareConfig, model: M) -> Result<i64, String>
+pub async fn d1_insert<M>(client: &Client, config: &CloudflareConfig, model: M) -> AppResult<i64>
 where
     M: Record,
     Insert<<M::Entity as EntityTrait>::ActiveModel>: QueryTrait,
@@ -368,7 +373,7 @@ where
 }
 
 /// Every row, newest first by the record's own ordering column.
-pub async fn d1_list<M>(client: &Client, config: &CloudflareConfig) -> Result<Vec<M>, String>
+pub async fn d1_list<M>(client: &Client, config: &CloudflareConfig) -> AppResult<Vec<M>>
 where
     M: Record + DeserializeOwned,
 {
@@ -386,7 +391,7 @@ pub async fn d1_get<M>(
     client: &Client,
     config: &CloudflareConfig,
     id: Id<M>,
-) -> Result<Option<M>, String>
+) -> AppResult<Option<M>>
 where
     M: Record + DeserializeOwned,
 {
@@ -399,7 +404,7 @@ pub async fn d1_delete<M: Record>(
     client: &Client,
     config: &CloudflareConfig,
     id: Id<M>,
-) -> Result<(), String> {
+) -> AppResult<()> {
     d1_run(client, config, M::Entity::delete_by_id(id))
         .await
         .map(|_| ())
@@ -414,7 +419,7 @@ pub async fn d1_post_upsert(
     client: &Client,
     config: &CloudflareConfig,
     model: post::Model,
-) -> Result<(), String> {
+) -> AppResult<()> {
     let stmt = post::Entity::insert(model.into_insert()).on_conflict(
         OnConflict::column(post::Column::Slug)
             .update_columns([
@@ -437,7 +442,7 @@ pub async fn d1_post_update(
     client: &Client,
     config: &CloudflareConfig,
     model: post::Model,
-) -> Result<(), String> {
+) -> AppResult<()> {
     // UpdateOne isn't a `QueryTrait`, so build an UPDATE … WHERE id = ? explicitly.
     let stmt = post::Entity::update_many()
         .col_expr(post::Column::Slug, Expr::value(model.slug))
@@ -460,7 +465,7 @@ pub async fn d1_series_update(
     client: &Client,
     config: &CloudflareConfig,
     model: series::Model,
-) -> Result<(), String> {
+) -> AppResult<()> {
     let stmt = series::Entity::update_many()
         .col_expr(series::Column::Slug, Expr::value(model.slug))
         .col_expr(series::Column::Title, Expr::value(model.title))
@@ -473,7 +478,7 @@ pub async fn d1_series_update(
 // ─── Client ─────────────────────────────────────────────────────────────────
 
 /// A reqwest client plus the signed-in Cloudflare credentials.
-pub fn cf() -> Result<(Client, CloudflareConfig), String> {
-    let config = crate::auth::get_creds().ok_or_else(|| "Not signed in to Cloudflare".to_string())?;
+pub fn cf() -> AppResult<(Client, CloudflareConfig)> {
+    let config = crate::auth::get_creds().ok_or(AppError::NotConfigured)?;
     Ok((Client::new(), config))
 }

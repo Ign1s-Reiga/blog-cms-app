@@ -11,6 +11,7 @@ use crate::db;
 use crate::entities::post::Model as PostModel;
 use crate::entities::post_stage;
 use crate::entities::series::Model as SeriesModel;
+use crate::error::{AppError, AppResult};
 use super::*;
 
 // ─── Front matter ─────────────────────────────────────────────────────────────
@@ -101,7 +102,7 @@ mod tests {
 pub async fn import_article(
     app: tauri::AppHandle,
     conn: State<'_, DatabaseConnection>,
-) -> Result<String, String> {
+) -> AppResult<String> {
     // ── 1. File picker ────────────────────────────────────────────────────────
     // `blocking_pick_file` must not run on a tokio thread; use spawn_blocking.
     let app_clone = app.clone();
@@ -113,21 +114,21 @@ pub async fn import_article(
             .blocking_pick_file()
     })
     .await
-    .map_err(|e| format!("Dialog thread panicked: {e}"))?;
+    .map_err(|e| AppError::join("Dialog thread panicked", e))?;
 
     // Resolve to a PathBuf; return "cancelled" if the dialog was dismissed.
     let file_path = match picked {
-        None => return Err("cancelled".to_string()),
+        None => return Err(AppError::Cancelled),
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         Some(tauri_plugin_dialog::FilePath::Path(p)) => p,
         #[allow(unreachable_patterns)]
-        Some(_) => return Err("Unsupported path format on this platform".to_string()),
+        Some(_) => return Err(AppError::UnsupportedPathFormat),
     };
 
     // ── 2. Read file ──────────────────────────────────────────────────────────
     let content = tokio::fs::read_to_string(&file_path)
         .await
-        .map_err(|e| format!("Failed to read file: {e}"))?;
+        .map_err(|e| AppError::io("Failed to read file", e))?;
 
     // ── 3. Extract metadata ───────────────────────────────────────────────────
     // The file name is the only metadata an imported document carries that the
@@ -159,14 +160,14 @@ pub async fn import_article(
     let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .map_err(AppError::AppDataDir)?
         .join("posts");
     tokio::fs::create_dir_all(&dir)
         .await
-        .map_err(|e| format!("Failed to create posts dir: {e}"))?;
+        .map_err(|e| AppError::io("Failed to create posts dir", e))?;
     tokio::fs::write(dir.join(format!("{slug}.md")), body)
         .await
-        .map_err(|e| format!("Failed to write local markdown: {e}"))?;
+        .map_err(|e| AppError::io("Failed to write local markdown", e))?;
 
     // ── 6. Record the metadata locally ───────────────────────────────────────
     let post = PostModel {
@@ -203,7 +204,7 @@ pub async fn import_article(
 pub async fn create_post(
     conn: State<'_, DatabaseConnection>,
     post: PostModel,
-) -> Result<PostModel, String> {
+) -> AppResult<PostModel> {
     let mut post = post;
     let now = now_ts();
     post.created_at = now;
@@ -223,7 +224,7 @@ pub async fn create_post(
 }
 
 #[tauri::command]
-pub async fn list_posts(conn: State<'_, DatabaseConnection>) -> Result<Vec<PostModel>, String> {
+pub async fn list_posts(conn: State<'_, DatabaseConnection>) -> AppResult<Vec<PostModel>> {
     db::list::<PostModel>(conn.inner()).await
 }
 
@@ -231,7 +232,7 @@ pub async fn list_posts(conn: State<'_, DatabaseConnection>) -> Result<Vec<PostM
 pub async fn get_post(
     conn: State<'_, DatabaseConnection>,
     id: i32,
-) -> Result<Option<PostModel>, String> {
+) -> AppResult<Option<PostModel>> {
     db::get::<PostModel>(conn.inner(), id).await
 }
 
@@ -239,14 +240,14 @@ pub async fn get_post(
 pub async fn update_post(
     conn: State<'_, DatabaseConnection>,
     post: PostModel,
-) -> Result<PostModel, String> {
+) -> AppResult<PostModel> {
     let mut post = post;
     post.updated_at = now_ts();
     db::update::<PostModel>(conn.inner(), post).await
 }
 
 #[tauri::command]
-pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: i32) -> Result<(), String> {
+pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<()> {
     db::delete::<PostModel>(conn.inner(), id).await
 }
 
@@ -256,14 +257,14 @@ pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: i32) -> Result
 pub async fn create_series(
     conn: State<'_, DatabaseConnection>,
     series: SeriesModel,
-) -> Result<SeriesModel, String> {
+) -> AppResult<SeriesModel> {
     let mut series = series;
     series.created_at = now_ts();
     db::create::<SeriesModel>(conn.inner(), series).await
 }
 
 #[tauri::command]
-pub async fn list_series(conn: State<'_, DatabaseConnection>) -> Result<Vec<SeriesModel>, String> {
+pub async fn list_series(conn: State<'_, DatabaseConnection>) -> AppResult<Vec<SeriesModel>> {
     db::list::<SeriesModel>(conn.inner()).await
 }
 
@@ -271,7 +272,7 @@ pub async fn list_series(conn: State<'_, DatabaseConnection>) -> Result<Vec<Seri
 pub async fn get_series(
     conn: State<'_, DatabaseConnection>,
     id: i32,
-) -> Result<Option<SeriesModel>, String> {
+) -> AppResult<Option<SeriesModel>> {
     db::get::<SeriesModel>(conn.inner(), id).await
 }
 
@@ -279,12 +280,12 @@ pub async fn get_series(
 pub async fn update_series(
     conn: State<'_, DatabaseConnection>,
     series: SeriesModel,
-) -> Result<SeriesModel, String> {
+) -> AppResult<SeriesModel> {
     db::update::<SeriesModel>(conn.inner(), series).await
 }
 
 #[tauri::command]
-pub async fn delete_series(conn: State<'_, DatabaseConnection>, id: i32) -> Result<(), String> {
+pub async fn delete_series(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<()> {
     db::delete::<SeriesModel>(conn.inner(), id).await
 }
 
@@ -294,7 +295,7 @@ pub async fn set_post_stage(
     conn: State<'_, DatabaseConnection>,
     post_id: i32,
     stage: String,
-) -> Result<post_stage::Model, String> {
+) -> AppResult<post_stage::Model> {
     validate_stage(&stage)?;
     db::stage_set(
         conn.inner(),
@@ -307,7 +308,7 @@ pub async fn set_post_stage(
 pub async fn get_post_stage(
     conn: State<'_, DatabaseConnection>,
     post_id: i32,
-) -> Result<Option<post_stage::Model>, String> {
+) -> AppResult<Option<post_stage::Model>> {
     db::stage_get(conn.inner(), post_id).await
 }
 
@@ -315,7 +316,7 @@ pub async fn get_post_stage(
 pub async fn list_posts_by_stage(
     conn: State<'_, DatabaseConnection>,
     stage: String,
-) -> Result<Vec<PostModel>, String> {
+) -> AppResult<Vec<PostModel>> {
     validate_stage(&stage)?;
     db::posts_in_stage(conn.inner(), stage).await
 }

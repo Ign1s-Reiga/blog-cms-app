@@ -21,6 +21,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
+use crate::error::{AppError, AppResult};
+
 /// Emitted repeatedly while the bundle downloads.
 const EVENT_PROGRESS: &str = "update://download-progress";
 /// Emitted once the bundle is fully downloaded, before the installer runs.
@@ -61,17 +63,15 @@ struct DownloadProgress {
 pub async fn check_for_update(
     app: AppHandle,
     pending: State<'_, PendingUpdate>,
-) -> Result<UpdateStatus, String> {
+) -> AppResult<UpdateStatus> {
     let current_version = app.package_info().version.to_string();
 
-    let updater = app
-        .updater()
-        .map_err(|e| format!("Updater unavailable: {e}"))?;
+    let updater = app.updater().map_err(AppError::UpdaterUnavailable)?;
 
     let found = match updater.check().await {
         Ok(found) => found,
         Err(tauri_plugin_updater::Error::ReleaseNotFound) => None,
-        Err(e) => return Err(format!("Could not reach GitHub Releases: {e}")),
+        Err(e) => return Err(AppError::UpdateCheck(e)),
     };
 
     let Some(update) = found else {
@@ -110,16 +110,16 @@ pub async fn check_for_update(
 pub async fn install_update(
     app: AppHandle,
     pending: State<'_, PendingUpdate>,
-) -> Result<(), String> {
+) -> AppResult<()> {
     // Clone the update out rather than borrowing it: the lock must not be held
     // across the download's await points. Leaving it parked also means a failed
     // download can be retried without running another check.
     let update = pending
         .0
         .lock()
-        .map_err(|_| "Update state is poisoned".to_string())?
+        .map_err(|_| AppError::UpdateStatePoisoned)?
         .clone()
-        .ok_or("No update is pending — run a check first")?;
+        .ok_or(AppError::NoPendingUpdate)?;
 
     let mut downloaded: u64 = 0;
     let progress_app = app.clone();
@@ -137,7 +137,7 @@ pub async fn install_update(
         )
         .await;
 
-    result.map_err(|e| format!("Update failed: {e}"))
+    result.map_err(AppError::UpdateFailed)
 }
 
 /// Relaunch the app so the freshly installed version takes over.

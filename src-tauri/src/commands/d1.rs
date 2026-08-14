@@ -12,12 +12,13 @@ use crate::db;
 use crate::entities::post::Model as PostModel;
 use crate::entities::post_stage;
 use crate::entities::series::Model as SeriesModel;
+use crate::error::{AppError, AppResult};
 use super::*;
 
 // ── Posts: Cloudflare D1 ────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn d1_create_post(post: PostModel) -> Result<i64, String> {
+pub async fn d1_create_post(post: PostModel) -> AppResult<i64> {
     let (client, config) = cf()?;
     let mut post = post;
     let now = now_ts();
@@ -27,19 +28,19 @@ pub async fn d1_create_post(post: PostModel) -> Result<i64, String> {
 }
 
 #[tauri::command]
-pub async fn d1_list_posts() -> Result<Vec<PostModel>, String> {
+pub async fn d1_list_posts() -> AppResult<Vec<PostModel>> {
     let (client, config) = cf()?;
     cloudflare::d1_list::<PostModel>(&client, &config).await
 }
 
 #[tauri::command]
-pub async fn d1_get_post(id: i32) -> Result<Option<PostModel>, String> {
+pub async fn d1_get_post(id: i32) -> AppResult<Option<PostModel>> {
     let (client, config) = cf()?;
     cloudflare::d1_get::<PostModel>(&client, &config, id).await
 }
 
 #[tauri::command]
-pub async fn d1_update_post(post: PostModel) -> Result<(), String> {
+pub async fn d1_update_post(post: PostModel) -> AppResult<()> {
     let (client, config) = cf()?;
     let mut post = post;
     post.updated_at = now_ts();
@@ -47,7 +48,7 @@ pub async fn d1_update_post(post: PostModel) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn d1_delete_post(id: i32) -> Result<(), String> {
+pub async fn d1_delete_post(id: i32) -> AppResult<()> {
     let (client, config) = cf()?;
     cloudflare::d1_delete::<PostModel>(&client, &config, id).await
 }
@@ -55,7 +56,7 @@ pub async fn d1_delete_post(id: i32) -> Result<(), String> {
 // ── Series: Cloudflare D1 ───────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn d1_create_series(series: SeriesModel) -> Result<i64, String> {
+pub async fn d1_create_series(series: SeriesModel) -> AppResult<i64> {
     let (client, config) = cf()?;
     let mut series = series;
     series.created_at = now_ts();
@@ -63,25 +64,25 @@ pub async fn d1_create_series(series: SeriesModel) -> Result<i64, String> {
 }
 
 #[tauri::command]
-pub async fn d1_list_series() -> Result<Vec<SeriesModel>, String> {
+pub async fn d1_list_series() -> AppResult<Vec<SeriesModel>> {
     let (client, config) = cf()?;
     cloudflare::d1_list::<SeriesModel>(&client, &config).await
 }
 
 #[tauri::command]
-pub async fn d1_get_series(id: i32) -> Result<Option<SeriesModel>, String> {
+pub async fn d1_get_series(id: i32) -> AppResult<Option<SeriesModel>> {
     let (client, config) = cf()?;
     cloudflare::d1_get::<SeriesModel>(&client, &config, id).await
 }
 
 #[tauri::command]
-pub async fn d1_update_series(series: SeriesModel) -> Result<(), String> {
+pub async fn d1_update_series(series: SeriesModel) -> AppResult<()> {
     let (client, config) = cf()?;
     cloudflare::d1_series_update(&client, &config, series).await
 }
 
 #[tauri::command]
-pub async fn d1_delete_series(id: i32) -> Result<(), String> {
+pub async fn d1_delete_series(id: i32) -> AppResult<()> {
     let (client, config) = cf()?;
     cloudflare::d1_delete::<SeriesModel>(&client, &config, id).await
 }
@@ -92,7 +93,7 @@ pub async fn d1_delete_series(id: i32) -> Result<(), String> {
 pub async fn publish_post(
     conn: State<'_, DatabaseConnection>,
     post_id: i32,
-) -> Result<PostModel, String> {
+) -> AppResult<PostModel> {
     set_stage_and_sync(conn.inner(), post_id, true).await
 }
 
@@ -101,17 +102,17 @@ pub async fn publish_post(
 pub async fn unpublish_post(
     conn: State<'_, DatabaseConnection>,
     post_id: i32,
-) -> Result<PostModel, String> {
+) -> AppResult<PostModel> {
     set_stage_and_sync(conn.inner(), post_id, false).await
 }
 
-async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> Result<PostModel, String> {
+async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> AppResult<PostModel> {
     let now = now_ts();
 
     // 1. Flip the post's published state in the local cache.
     let mut post = db::get::<PostModel>(conn, post_id)
         .await?
-        .ok_or_else(|| format!("post {post_id} not found"))?;
+        .ok_or(AppError::PostNotFound(post_id))?;
     post.published = publish;
     post.published_at = if publish { Some(now) } else { None };
     post.updated_at = now;
@@ -138,7 +139,7 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> Result<Po
 
     match synced {
         Ok(()) => Ok(post),
-        Err(e) => Err(format!("post updated locally but cloud sync failed: {e}")),
+        Err(e) => Err(AppError::CloudSyncFailed(Box::new(e))),
     }
 }
 
@@ -149,7 +150,7 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> Result<Po
 /// that back to its draft/published stage. Returns the number of posts synced;
 /// errors with a summary if any failed.
 #[tauri::command]
-pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, String> {
+pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize> {
     let posts = db::list::<PostModel>(conn.inner()).await?;
     let (client, config) = cf()?;
     let now = now_ts();
@@ -178,7 +179,7 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, St
     }
 
     if failed > 0 {
-        return Err(format!("synced {synced}, {failed} failed to sync"));
+        return Err(AppError::PartialSync { synced, failed });
     }
     Ok(synced)
 }
@@ -189,7 +190,7 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> Result<usize, St
 /// local data, and this brings it in sync on app launch and when the refresh
 /// button is pressed. Returns the number of remote posts mirrored.
 #[tauri::command]
-pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> Result<usize, String> {
+pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> AppResult<usize> {
     let (client, config) = cf()?;
     let remote = cloudflare::d1_list::<PostModel>(&client, &config).await?;
     let (upserted, _deleted) = db::mirror_posts(conn.inner(), remote).await?;

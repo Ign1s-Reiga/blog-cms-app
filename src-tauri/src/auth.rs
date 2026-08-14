@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 use crate::cloudflare::CloudflareConfig;
+use crate::error::{AppError, AppResult};
 
 static CREDS: RwLock<Option<CloudflareConfig>> = RwLock::new(None);
 
@@ -110,11 +111,11 @@ struct StoredCreds {
     api_token: Option<String>,
 }
 
-fn creds_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn creds_path(app: &tauri::AppHandle) -> AppResult<PathBuf> {
     Ok(app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data dir: {e}"))?
+        .map_err(AppError::AppDataDir)?
         .join("credentials.json"))
 }
 
@@ -142,7 +143,7 @@ pub fn load_from_disk(app: &tauri::AppHandle) -> Option<CloudflareConfig> {
     })
 }
 
-fn save_to_disk(app: &tauri::AppHandle, config: &CloudflareConfig) -> Result<(), String> {
+fn save_to_disk(app: &tauri::AppHandle, config: &CloudflareConfig) -> AppResult<()> {
     // Keep the token out of the file whenever the keychain accepts it.
     let in_keyring = keyring_set_token(&config.api_token);
     let stored = StoredCreds {
@@ -157,18 +158,20 @@ fn save_to_disk(app: &tauri::AppHandle, config: &CloudflareConfig) -> Result<(),
 
     let path = creds_path(app)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create data dir: {e}"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AppError::io("Failed to create data dir", e))?;
     }
-    let data = serde_json::to_string_pretty(&stored).map_err(|e| format!("Serialize failed: {e}"))?;
-    std::fs::write(&path, data).map_err(|e| format!("Failed to write credentials: {e}"))
+    let data = serde_json::to_string_pretty(&stored)
+        .map_err(|e| AppError::json("Serialize failed", e))?;
+    std::fs::write(&path, data).map_err(|e| AppError::io("Failed to write credentials", e))
 }
 
-fn clear_disk(app: &tauri::AppHandle) -> Result<(), String> {
+fn clear_disk(app: &tauri::AppHandle) -> AppResult<()> {
     keyring_delete_token();
     match std::fs::remove_file(creds_path(app)?) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("Failed to remove credentials: {e}")),
+        Err(e) => Err(AppError::io("Failed to remove credentials", e)),
     }
 }
 
@@ -201,7 +204,7 @@ pub fn save_credentials(
     r2_bucket: String,
     d1_database_id: String,
     r2_public_url: String,
-) -> Result<(), String> {
+) -> AppResult<()> {
     // Trim stray whitespace/newlines that sneak in when pasting values.
     let config = CloudflareConfig {
         account_id: account_id.trim().to_string(),
@@ -231,13 +234,13 @@ pub fn save_settings(
     r2_public_url: String,
     thumbnail_key_pattern: String,
     media_key_pattern: String,
-) -> Result<(), String> {
+) -> AppResult<()> {
     use crate::media_keys::{validate_pattern, PatternKind};
 
-    let mut config = get_creds().ok_or("Not signed in")?;
+    let mut config = get_creds().ok_or(AppError::NotConfigured)?;
     let public_url = r2_public_url.trim().trim_end_matches('/').to_string();
     if !public_url.is_empty() && !public_url.starts_with("http") {
-        return Err("R2 Public URL must start with http:// or https://".into());
+        return Err(AppError::InvalidPublicUrl);
     }
 
     let thumbnail = thumbnail_key_pattern.trim().to_string();
@@ -255,7 +258,7 @@ pub fn save_settings(
 }
 
 #[tauri::command]
-pub fn clear_credentials(app: tauri::AppHandle) -> Result<(), String> {
+pub fn clear_credentials(app: tauri::AppHandle) -> AppResult<()> {
     clear_disk(&app)?;
     set_creds(None);
     Ok(())

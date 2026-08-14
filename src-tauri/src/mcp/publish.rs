@@ -16,6 +16,8 @@ use std::sync::{Mutex, OnceLock};
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::error::{AppError, AppResult};
+
 /// Where a publish request stands. Every state but
 /// [`PublishState::AwaitingApproval`] is terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
@@ -113,29 +115,32 @@ pub fn awaiting_for_post(post_id: i32) -> Option<PublishRequest> {
 /// Returns the request only if it was still awaiting approval, so two clicks on
 /// Approve cannot publish twice. The caller then runs the publish and reports
 /// back through [`settle`].
-pub fn take_approved(id: &str) -> Result<PublishRequest, String> {
+pub fn take_approved(id: &str) -> AppResult<PublishRequest> {
     let mut guard = lock();
     let request = guard
         .get_mut(id)
-        .ok_or_else(|| format!("No publish request {id}"))?;
+        .ok_or_else(|| AppError::NoPublishRequest(id.to_string()))?;
     match request.state {
         PublishState::AwaitingApproval => {
             // Left as-is until `settle` records the outcome; removing it from
             // the map here would lose the request if the publish then failed.
             Ok(request.clone())
         }
-        other => Err(format!("Publish request {id} is already {other:?}")),
+        state => Err(AppError::PublishRequestSettled { id: id.to_string(), state }),
     }
 }
 
 /// Reject a pending request. Returns the updated record.
-pub fn reject(id: &str) -> Result<PublishRequest, String> {
+pub fn reject(id: &str) -> AppResult<PublishRequest> {
     let mut guard = lock();
     let request = guard
         .get_mut(id)
-        .ok_or_else(|| format!("No publish request {id}"))?;
+        .ok_or_else(|| AppError::NoPublishRequest(id.to_string()))?;
     if request.state != PublishState::AwaitingApproval {
-        return Err(format!("Publish request {id} is already {:?}", request.state));
+        return Err(AppError::PublishRequestSettled {
+            id: id.to_string(),
+            state: request.state,
+        });
     }
     request.state = PublishState::Rejected;
     Ok(request.clone())

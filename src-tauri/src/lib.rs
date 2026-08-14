@@ -4,6 +4,7 @@ mod cloudflare;
 mod commands;
 mod db;
 mod entities;
+mod error;
 mod imaging;
 // Public so `tests/mcp_tools.rs` can assert the tool surface from outside the
 // library; every other module stays crate-private.
