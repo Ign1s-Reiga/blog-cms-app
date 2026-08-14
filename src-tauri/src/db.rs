@@ -37,6 +37,25 @@ pub async fn connect(app: &tauri::AppHandle) -> AppResult<DatabaseConnection> {
     Ok(db)
 }
 
+/// An empty database with the schema applied, held in memory for the length of
+/// the connection. For tests that need real SQL — a unique-constraint violation
+/// is not something a fake can be trusted to reproduce.
+///
+/// The pool is pinned to one connection because each connection to
+/// `sqlite::memory:` opens its *own* database: a second one would find no
+/// tables, and which one a query landed on would be down to pool scheduling.
+#[cfg(test)]
+pub async fn connect_in_memory() -> AppResult<DatabaseConnection> {
+    let mut options = sea_orm::ConnectOptions::new("sqlite::memory:");
+    options.max_connections(1).min_connections(1);
+
+    let db = Database::connect(options)
+        .await
+        .map_err(|e| AppError::db_init("Failed to open in-memory database", e))?;
+    ensure_schema(&db).await?;
+    Ok(db)
+}
+
 /// Create the tables from the entity definitions if they aren't there yet.
 /// `series` is created first because `blog-db` references it.
 async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
@@ -109,6 +128,15 @@ pub async fn delete<M: Record>(db: &DatabaseConnection, id: Id<M>) -> AppResult<
     Ok(())
 }
 
+/// The post with this slug, if there is one. The column is unique, so at most
+/// one row can match.
+pub async fn post_by_slug(db: &DatabaseConnection, slug: &str) -> AppResult<Option<post::Model>> {
+    Ok(post::Entity::find()
+        .filter(post::Column::Slug.eq(slug))
+        .one(db)
+        .await?)
+}
+
 /// Mirror the local posts table onto the cloud's set of posts, keyed by `slug`.
 ///
 /// The cloud is authoritative: every remote post is upserted into the local
@@ -148,10 +176,7 @@ pub async fn mirror_posts(
 /// published/draft state so a stale `sync_failed` doesn't linger. Series linkage
 /// is dropped — series aren't synced and remote ids don't map to local rows.
 async fn upsert_post_from_remote(db: &DatabaseConnection, remote: post::Model) -> AppResult<()> {
-    let existing = post::Entity::find()
-        .filter(post::Column::Slug.eq(remote.slug.clone()))
-        .one(db)
-        .await?;
+    let existing = post_by_slug(db, &remote.slug).await?;
 
     let mut model = remote;
     model.series_id = None;

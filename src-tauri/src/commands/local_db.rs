@@ -87,6 +87,101 @@ mod tests {
     }
 }
 
+// ─── Slugs ────────────────────────────────────────────────────────────────────
+
+/// A slug no post is using yet: `base`, else `base-2`, `base-3`, and so on.
+///
+/// Two files can perfectly well share a name — `notes.md` from two folders, or
+/// the same document imported twice after an edit — and a slug is derived from
+/// that name. Without this the second import writes `posts/<slug>.md` over the
+/// first post's body and only *then* fails on the unique index, having already
+/// destroyed the thing it collided with.
+///
+/// The search terminates: every taken candidate is a distinct existing row, so
+/// it runs out after at most one step per post in the library.
+async fn unique_slug(db: &DatabaseConnection, base: &str) -> AppResult<String> {
+    if db::post_by_slug(db, base).await?.is_none() {
+        return Ok(base.to_string());
+    }
+    // From 2, so the first duplicate reads as the second copy of the post.
+    for n in 2.. {
+        let candidate = format!("{base}-{n}");
+        if db::post_by_slug(db, &candidate).await?.is_none() {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("the loop returns once a candidate is free")
+}
+
+#[cfg(test)]
+mod slug_tests {
+    use super::*;
+
+    fn draft(slug: &str) -> PostModel {
+        PostModel {
+            id: 0,
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            excerpt: None,
+            tags: None,
+            published: false,
+            published_at: None,
+            series_id: None,
+            series_order: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_free_slug_is_left_alone() {
+        let db = db::connect_in_memory().await.unwrap();
+        assert_eq!(unique_slug(&db, "my-post").await.unwrap(), "my-post");
+    }
+
+    /// The collision the import path used to resolve by overwriting the post it
+    /// collided with.
+    #[tokio::test]
+    async fn a_taken_slug_moves_to_the_next_free_number() {
+        let db = db::connect_in_memory().await.unwrap();
+
+        db::create::<PostModel>(&db, draft("my-post")).await.unwrap();
+        assert_eq!(unique_slug(&db, "my-post").await.unwrap(), "my-post-2");
+
+        // Suffixed slugs are themselves posts, so the search steps past them.
+        db::create::<PostModel>(&db, draft("my-post-2")).await.unwrap();
+        assert_eq!(unique_slug(&db, "my-post").await.unwrap(), "my-post-3");
+
+        // Nothing here touches an unrelated name.
+        assert_eq!(unique_slug(&db, "other-post").await.unwrap(), "other-post");
+    }
+
+    /// Why the insert now runs before the file write: this is what actually
+    /// refuses a duplicate, and it has to get its answer while the post it would
+    /// collide with still has its body on disk.
+    #[tokio::test]
+    async fn the_database_refuses_a_duplicate_slug() {
+        let db = db::connect_in_memory().await.unwrap();
+        db::create::<PostModel>(&db, draft("taken")).await.unwrap();
+        assert!(db::create::<PostModel>(&db, draft("taken")).await.is_err());
+    }
+}
+
+/// Write a post's Markdown into the local cache, creating the directory.
+async fn write_body(app: &tauri::AppHandle, slug: &str, body: &str) -> AppResult<()> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(AppError::AppDataDir)?
+        .join("posts");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| AppError::io("Failed to create posts dir", e))?;
+    tokio::fs::write(dir.join(format!("{slug}.md")), body)
+        .await
+        .map_err(|e| AppError::io("Failed to write local markdown", e))
+}
+
 // ─── Command ──────────────────────────────────────────────────────────────────
 
 /// Open a native file picker and import the selected Markdown file as a draft.
@@ -146,30 +241,20 @@ pub async fn import_article(
     // ── 4. Derive slug + R2 key ───────────────────────────────────────────────
     // The id is auto-assigned by the DB, so the R2 object key is keyed by slug.
     let now = now_ts();
-    let slug = {
+    let base = {
         let s = slugify(&title);
         let s = if s.is_empty() { slugify(stem) } else { s };
         // Fall back to a unique, non-empty slug (e.g. non-ASCII titles).
         if s.is_empty() { format!("post-{now}") } else { s }
     };
-    // ── 5. Cache the body locally ────────────────────────────────────────────
-    // An import lands as a draft, and a draft is local-only — the same rule
-    // `save_post` follows. Nothing reaches R2 or D1 until the post is published
-    // from the editor or pushed with "Push to cloud", so importing needs no
-    // credentials and never puts an unpublished body in the bucket.
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(AppError::AppDataDir)?
-        .join("posts");
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| AppError::io("Failed to create posts dir", e))?;
-    tokio::fs::write(dir.join(format!("{slug}.md")), body)
-        .await
-        .map_err(|e| AppError::io("Failed to write local markdown", e))?;
+    let slug = unique_slug(conn.inner(), &base).await?;
 
-    // ── 6. Record the metadata locally ───────────────────────────────────────
+    // ── 5. Record the metadata locally ───────────────────────────────────────
+    // Metadata first, body second. `slug` is unique, so the insert is what
+    // ultimately decides whether this import may exist — and running it before
+    // the file write means a slug that slipped past `unique_slug` (two imports
+    // racing for the same free name) is refused while the post it collided with
+    // still has its body.
     let post = PostModel {
         id: 0, // ignored on insert (auto-increment)
         slug,
@@ -184,6 +269,20 @@ pub async fn import_article(
         updated_at: now,
     };
     let created = db::create::<PostModel>(conn.inner(), post).await?;
+
+    // ── 6. Cache the body locally ────────────────────────────────────────────
+    // An import lands as a draft, and a draft is local-only — the same rule
+    // `save_post` follows. Nothing reaches R2 or D1 until the post is published
+    // from the editor or pushed with "Push to cloud", so importing needs no
+    // credentials and never puts an unpublished body in the bucket.
+    if let Err(e) = write_body(&app, &created.slug, body).await {
+        // Take the row back out rather than leave a post whose body never
+        // landed: it would open as an empty document indistinguishable from one
+        // genuinely written that way.
+        let _ = db::delete::<PostModel>(conn.inner(), created.id).await;
+        return Err(e);
+    }
+
     // Imported posts start staged as Draft.
     db::stage_set(
         conn.inner(),
