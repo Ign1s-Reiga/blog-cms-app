@@ -3,6 +3,9 @@
 //! `save_post` touches all three stores; by the same rule as `d1` it lives
 //! here, with the body and image handling that is its distinctive work.
 
+use std::ffi::OsStr;
+use std::path::{Component, Path};
+
 use serde::Serialize;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -16,9 +19,25 @@ use crate::imaging::{self, StagedImage};
 use crate::media_keys;
 use super::*;
 
-/// A safe single path segment for the local media cache: no separators or `..`.
+/// A safe single path segment for the local media cache: one ordinary file
+/// name, and nothing else.
+///
+/// Spelling the rejections out by hand (`/`, `\`, `..`) misses what a platform
+/// does with the rest. On Windows a drive-relative name like `C:x` carries a
+/// path prefix, so joining it onto a directory *replaces* that directory rather
+/// than descending into it. Asking the path parser instead makes the answer
+/// whatever the platform itself would do: exactly one `Normal` component,
+/// spelled the way it came in.
 fn is_safe_file_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..")
+    // A backslash is an ordinary character in a Unix file name, so the parser
+    // there would accept `a\b` as one component. Refuse it everywhere: these
+    // names travel between machines through R2 keys and Markdown bodies.
+    if name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(Component::Normal(c)) if c == OsStr::new(name))
+        && components.next().is_none()
 }
 
 /// MIME type to send when uploading a file with this (lowercase) extension.
@@ -56,6 +75,49 @@ fn extract_asset_refs(body: &str) -> Vec<String> {
         rest = &after[end..];
     }
     refs
+}
+
+/// The file name and bytes an `assets/<file>` reference points at, or `None`
+/// when there is no such file — or when the reference is not one this post may
+/// publish.
+///
+/// A body is no longer necessarily something a human typed: MCP clients write
+/// them too, and publishing uploads whatever these references resolve to into a
+/// public bucket. `assets_dir.join(name)` on an unchecked name is therefore a
+/// file-read primitive pointed at the whole disk — `assets/../../.env` would
+/// upload credentials to the blog. Two checks stand in the way:
+///
+/// 1. the reference must be a plain file name, which is all the editor and
+///    `stage_media_from_library` ever produce; and
+/// 2. the resolved path must still sit inside the assets directory, which is
+///    what a name check alone cannot tell you about a symlink.
+///
+/// An unusable reference is skipped rather than failed, the same way a missing
+/// asset already was: it publishes as a dead link, which is a great deal better
+/// than a post that cannot be published at all because of one stale image.
+async fn read_staged_asset<'a>(
+    assets_dir: &Path,
+    reference: &'a str,
+) -> Option<(&'a str, Vec<u8>)> {
+    let Some(file_name) = reference
+        .strip_prefix("assets/")
+        .filter(|name| is_safe_file_name(name))
+    else {
+        log::warn!("Ignoring asset reference that is not a plain file name: {reference}");
+        return None;
+    };
+
+    // Both sides are canonicalized so the comparison is between two real,
+    // fully-resolved paths — on Windows that also puts both in the same
+    // verbatim (`\\?\`) form.
+    let resolved = tokio::fs::canonicalize(assets_dir.join(file_name)).await.ok()?;
+    let root = tokio::fs::canonicalize(assets_dir).await.ok()?;
+    if !resolved.starts_with(&root) {
+        log::warn!("Ignoring asset reference resolving outside the assets dir: {reference}");
+        return None;
+    }
+
+    Some((file_name, tokio::fs::read(&resolved).await.ok()?))
 }
 
 // ─── Post content ───────────────────────────────────────────────────────────
@@ -208,15 +270,14 @@ pub async fn save_post(
 
         let mut published = body.clone();
         for r in extract_asset_refs(&body) {
-            let file_name = r.strip_prefix("assets/").unwrap_or(&r);
-            if let Ok(bytes) = tokio::fs::read(assets_dir.join(file_name)).await {
-                let ext = file_name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-                let key =
-                    media_keys::media_key(&config.media_key_pattern, &saved.slug, &bytes, &ext);
-                cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, content_type_for(&ext))
-                    .await?;
-                published = published.replace(&r, &media_keys::public_url(public_base, &key));
-            }
+            let Some((file_name, bytes)) = read_staged_asset(&assets_dir, &r).await else {
+                continue;
+            };
+            let ext = file_name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            let key = media_keys::media_key(&config.media_key_pattern, &saved.slug, &bytes, &ext);
+            cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, content_type_for(&ext))
+                .await?;
+            published = published.replace(&r, &media_keys::public_url(public_base, &key));
         }
 
         // Body → R2.
@@ -430,4 +491,90 @@ pub async fn delete_media(app: tauri::AppHandle, key: String) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_plain_file_names_are_safe() {
+        assert!(is_safe_file_name("3f2b8c.avif"));
+        assert!(is_safe_file_name("a picture.png"));
+        assert!(is_safe_file_name(".hidden.png"));
+
+        assert!(!is_safe_file_name(""));
+        assert!(!is_safe_file_name("."));
+        assert!(!is_safe_file_name(".."));
+        assert!(!is_safe_file_name("../secret.env"));
+        assert!(!is_safe_file_name("nested/name.png"));
+        assert!(!is_safe_file_name("nested\\name.png"));
+        assert!(!is_safe_file_name("/etc/passwd"));
+    }
+
+    /// A drive-relative name carries no separator at all, and yet joining it
+    /// onto a directory discards that directory outright — which is why this
+    /// check asks the path parser rather than scanning for `/`, `\` and `..`.
+    #[cfg(windows)]
+    #[test]
+    fn drive_relative_names_are_rejected() {
+        assert!(!is_safe_file_name("C:secret.env"));
+        assert_eq!(
+            Path::new(r"D:\data\assets").join("C:secret.env"),
+            Path::new("C:secret.env")
+        );
+    }
+
+    /// Extraction stays deliberately loose — it is the *read* that is guarded,
+    /// not the scan — so a traversal attempt really does reach
+    /// [`read_staged_asset`] and has to be stopped there.
+    #[test]
+    fn traversal_attempts_survive_extraction() {
+        let body = "![ok](assets/ok.png) ![bad](assets/../../secret.env)";
+        assert_eq!(
+            extract_asset_refs(body),
+            vec!["assets/ok.png", "assets/../../secret.env"]
+        );
+    }
+
+    /// Publishing uploads whatever these references resolve to, so a body that
+    /// points outside the assets directory must read nothing at all — however
+    /// it spells the escape.
+    #[tokio::test]
+    async fn references_that_escape_the_assets_dir_read_nothing() {
+        let root = std::env::temp_dir()
+            .join(format!("blog-cms-assets-{}", uuid::Uuid::new_v4().simple()));
+        let assets = root.join("assets");
+        tokio::fs::create_dir_all(&assets).await.unwrap();
+        tokio::fs::write(root.join("secret.env"), b"CF_API_TOKEN=hunter2")
+            .await
+            .unwrap();
+        tokio::fs::write(assets.join("staged.avif"), b"image bytes")
+            .await
+            .unwrap();
+
+        // A genuinely staged image still publishes.
+        assert_eq!(
+            read_staged_asset(&assets, "assets/staged.avif").await,
+            Some(("staged.avif", b"image bytes".to_vec()))
+        );
+        // A reference to nothing is skipped, as it always was.
+        assert_eq!(read_staged_asset(&assets, "assets/gone.avif").await, None);
+
+        for escape in [
+            "assets/../secret.env",
+            "assets/../../secret.env",
+            "assets/..\\secret.env",
+            "assets/./../secret.env",
+            "assets//../secret.env",
+        ] {
+            assert_eq!(
+                read_staged_asset(&assets, escape).await,
+                None,
+                "`{escape}` read a file outside the assets dir"
+            );
+        }
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
 }
