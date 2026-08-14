@@ -16,7 +16,10 @@ type McpStatus = {
   token: string | null;
 };
 
-type PublishState = 'awaiting_approval' | 'rejected' | 'published' | 'failed';
+/// Mirrors `PublishState` in `src-tauri/src/mcp/publish.rs`. `publishing` is the
+/// in-flight state an approved request holds while it uploads — it is neither
+/// waiting on this screen nor finished.
+type PublishState = 'awaiting_approval' | 'publishing' | 'rejected' | 'published' | 'failed';
 
 type PublishRequest = {
   id: string;
@@ -135,8 +138,10 @@ export function McpCard() {
   const portValid = Number.isInteger(parsedPort) && parsedPort >= 1024 && parsedPort <= 65535;
   const portDirty = status !== null && portValid && parsedPort !== status.port;
 
+  // Only an unapproved request gets buttons. Everything else has been decided —
+  // including one still publishing, which is past the point of being stoppable.
   const pending = requests.filter((r) => r.state === 'awaiting_approval');
-  const settled = requests.filter((r) => r.state !== 'awaiting_approval');
+  const decided = requests.filter((r) => r.state !== 'awaiting_approval');
 
   return (
     <section className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]'>
@@ -302,7 +307,7 @@ export function McpCard() {
                     </li>
                   ))}
 
-                  {settled.map((r) => (
+                  {decided.map((r) => (
                     <li
                       key={r.id}
                       className='flex items-start justify-between gap-3 rounded-[6px] border border-zinc-100 px-3 py-2 dark:border-white/[0.05]'
@@ -329,6 +334,7 @@ export function McpCard() {
 // ─── Pieces ───────────────────────────────────────────────────────────────────
 
 const OUTCOMES = {
+  publishing: { label: 'Publishing…', className: 'text-amber-600 dark:text-amber-500' },
   published: { label: 'Published', className: 'text-emerald-600 dark:text-emerald-500' },
   rejected: { label: 'Rejected', className: 'text-zinc-400 dark:text-zinc-600' },
   failed: { label: 'Failed', className: 'text-red-600 dark:text-red-400' },

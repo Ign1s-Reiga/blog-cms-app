@@ -193,8 +193,10 @@ pub enum AppError {
     #[error("No publish request {0}")]
     NoPublishRequest(String),
 
+    /// A claim or a rejection arrived for a request that is no longer waiting on
+    /// a human — already publishing, or already finished.
     #[error("Publish request {id} is already {state:?}")]
-    PublishRequestSettled { id: String, state: PublishState },
+    PublishRequestNotPending { id: String, state: PublishState },
 
     #[error("Publish request {0} vanished")]
     PublishRequestVanished(String),
