@@ -385,7 +385,11 @@ pub async fn mcp_approve_publish(
     app: tauri::AppHandle,
     request_id: String,
 ) -> AppResult<publish::PublishRequest> {
-    let request = publish::take_approved(&request_id)?;
+    // Claiming marks the request `Publishing` under the queue's lock, so a
+    // second approval arriving while the awaits below are running is refused
+    // rather than publishing the same post twice.
+    let request = publish::claim_for_publish(&request_id)?;
+    notify_publish_change(&app);
 
     // Read the post fresh rather than trusting what was captured at request
     // time: the human is approving the post as it stands now.

@@ -396,7 +396,7 @@ impl BlogMcp {
 
         // One open request per post: an agent that polls impatiently should not
         // be able to bury the approval list under duplicates of the same ask.
-        if let Some(existing) = publish::awaiting_for_post(post.id) {
+        if let Some(existing) = publish::open_for_post(post.id) {
             return Ok(Json(existing));
         }
 
@@ -406,7 +406,7 @@ impl BlogMcp {
     }
 
     #[tool(
-        description = "Check a publish request: awaiting_approval, rejected, published, or failed."
+        description = "Check a publish request: awaiting_approval, publishing, rejected, published, or failed."
     )]
     pub async fn publish_status(
         &self,

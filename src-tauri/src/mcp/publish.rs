@@ -18,19 +18,43 @@ use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 
-/// Where a publish request stands. Every state but
-/// [`PublishState::AwaitingApproval`] is terminal.
+/// Where a publish request stands.
+///
+/// The lifecycle is one way through:
+///
+/// ```text
+/// AwaitingApproval ─┬─> Publishing ─┬─> Published
+///                   │               └─> Failed
+///                   └─> Rejected
+/// ```
+///
+/// [`PublishState::Publishing`] exists so that claiming a request and running
+/// it are not two separately-observable steps — see [`claim_for_publish`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PublishState {
     /// Waiting for someone to approve or reject it in the app.
     AwaitingApproval,
+    /// Approved, and the publish is running right now. Nobody else may claim or
+    /// reject it from here; the only ways out are `Published` and `Failed`.
+    Publishing,
     /// A human declined it. The post stays as it was.
     Rejected,
     /// Approved, and the publish succeeded.
     Published,
     /// Approved, but the publish itself failed — see `error`.
     Failed,
+}
+
+impl PublishState {
+    /// Whether this request is finished with — nothing more will happen to it.
+    ///
+    /// `Publishing` is deliberately *not* terminal: the request is still in
+    /// flight, so it must keep blocking duplicates for the same post the way an
+    /// unapproved one does.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Rejected | Self::Published | Self::Failed)
+    }
 }
 
 /// One request to publish a post, from the moment an MCP client asks until a
@@ -56,7 +80,8 @@ pub struct PublishRequest {
 ///
 /// A `std::sync::Mutex` is right here because every access is a brief map
 /// operation; the guard is never held across an `.await` (the publish itself
-/// runs after [`take_approved`] has returned and released it).
+/// runs after [`claim_for_publish`] has returned and released it, which is why
+/// the claim has to leave a mark behind).
 static QUEUE: OnceLock<Mutex<HashMap<String, PublishRequest>>> = OnceLock::new();
 
 fn queue() -> &'static Mutex<HashMap<String, PublishRequest>> {
@@ -99,45 +124,57 @@ pub fn list() -> Vec<PublishRequest> {
     all
 }
 
-/// Whether a post already has a request waiting on a human.
+/// Whether a post already has a request that hasn't finished — either waiting on
+/// a human or mid-publish.
 ///
 /// Without this, an agent that polls impatiently could queue the same post a
 /// dozen times and bury the approval list.
-pub fn awaiting_for_post(post_id: i32) -> Option<PublishRequest> {
+pub fn open_for_post(post_id: i32) -> Option<PublishRequest> {
     lock()
         .values()
-        .find(|r| r.post_id == post_id && r.state == PublishState::AwaitingApproval)
+        .find(|r| r.post_id == post_id && !r.state.is_terminal())
         .cloned()
 }
 
-/// Claim a pending request for execution, marking nothing yet.
-///
-/// Returns the request only if it was still awaiting approval, so two clicks on
-/// Approve cannot publish twice. The caller then runs the publish and reports
+/// Claim an approved request for execution, moving it to
+/// [`PublishState::Publishing`]. The caller then runs the publish and reports
 /// back through [`settle`].
-pub fn take_approved(id: &str) -> AppResult<PublishRequest> {
+///
+/// The check and the mark happen under one lock, which is the whole point: a
+/// claim that only *read* the state would let two approvals arriving together
+/// both see `AwaitingApproval` and both publish, because the request stays
+/// unclaimed across every `.await` in `mcp_approve_publish` until `settle` runs.
+/// Claiming it here closes that window to nothing, so the second caller is
+/// turned away.
+///
+/// The request stays in the map — removing it would lose the record if the
+/// publish then failed.
+pub fn claim_for_publish(id: &str) -> AppResult<PublishRequest> {
     let mut guard = lock();
     let request = guard
         .get_mut(id)
         .ok_or_else(|| AppError::NoPublishRequest(id.to_string()))?;
     match request.state {
         PublishState::AwaitingApproval => {
-            // Left as-is until `settle` records the outcome; removing it from
-            // the map here would lose the request if the publish then failed.
+            request.state = PublishState::Publishing;
             Ok(request.clone())
         }
-        state => Err(AppError::PublishRequestSettled { id: id.to_string(), state }),
+        state => Err(AppError::PublishRequestNotPending { id: id.to_string(), state }),
     }
 }
 
 /// Reject a pending request. Returns the updated record.
+///
+/// Only from `AwaitingApproval`: a request already being published is past the
+/// point where declining it would stop anything, and pretending otherwise would
+/// leave a `Rejected` request that had in fact gone live.
 pub fn reject(id: &str) -> AppResult<PublishRequest> {
     let mut guard = lock();
     let request = guard
         .get_mut(id)
         .ok_or_else(|| AppError::NoPublishRequest(id.to_string()))?;
     if request.state != PublishState::AwaitingApproval {
-        return Err(AppError::PublishRequestSettled {
+        return Err(AppError::PublishRequestNotPending {
             id: id.to_string(),
             state: request.state,
         });
@@ -146,7 +183,8 @@ pub fn reject(id: &str) -> AppResult<PublishRequest> {
     Ok(request.clone())
 }
 
-/// Record how an approved publish turned out.
+/// Record how an approved publish turned out, ending the `Publishing` state
+/// that [`claim_for_publish`] began. Only ever reached with a claim in hand.
 pub fn settle(id: &str, outcome: Result<(), String>) -> Option<PublishRequest> {
     let mut guard = lock();
     let request = guard.get_mut(id)?;
@@ -183,13 +221,53 @@ mod tests {
         // A blank reason is not a reason.
         assert_eq!(req.reason, None);
 
-        assert!(take_approved(&req.id).is_ok());
+        assert!(claim_for_publish(&req.id).is_ok());
         settle(&req.id, Ok(()));
         assert_eq!(get(&req.id).unwrap().state, PublishState::Published);
 
         // Already terminal, so neither path may re-enter it.
-        assert!(take_approved(&req.id).is_err());
+        assert!(claim_for_publish(&req.id).is_err());
         assert!(reject(&req.id).is_err());
+    }
+
+    /// The race this state exists for. `mcp_approve_publish` awaits the database,
+    /// R2 and D1 between claiming a request and settling it, so a claim that only
+    /// read the state would let a second approval arriving in that window publish
+    /// the same post again.
+    #[test]
+    fn a_claim_cannot_be_made_twice_before_settlement() {
+        let req = enqueue(6, "f".into(), "F".into(), None);
+
+        assert!(claim_for_publish(&req.id).is_ok());
+        assert_eq!(get(&req.id).unwrap().state, PublishState::Publishing);
+        // *Before* settling — the whole window the old code left open.
+        assert!(claim_for_publish(&req.id).is_err());
+
+        settle(&req.id, Ok(()));
+        assert_eq!(get(&req.id).unwrap().state, PublishState::Published);
+    }
+
+    /// Declining a publish that is already running would not stop it, and would
+    /// leave a `Rejected` record for a post that had gone live.
+    #[test]
+    fn a_request_being_published_cannot_be_rejected() {
+        let req = enqueue(7, "g".into(), "G".into(), None);
+        claim_for_publish(&req.id).unwrap();
+
+        assert!(reject(&req.id).is_err());
+        assert_eq!(get(&req.id).unwrap().state, PublishState::Publishing);
+    }
+
+    /// A publish in flight is not finished, so it still has to keep an agent
+    /// from queueing the same post again.
+    #[test]
+    fn a_publish_in_flight_still_blocks_a_duplicate_request() {
+        let req = enqueue(8, "h".into(), "H".into(), None);
+        claim_for_publish(&req.id).unwrap();
+        assert_eq!(open_for_post(8).map(|r| r.state), Some(PublishState::Publishing));
+
+        settle(&req.id, Ok(()));
+        assert!(open_for_post(8).is_none());
     }
 
     #[test]
@@ -204,7 +282,7 @@ mod tests {
     #[test]
     fn a_failed_publish_keeps_the_reason() {
         let req = enqueue(4, "d".into(), "D".into(), None);
-        take_approved(&req.id).unwrap();
+        claim_for_publish(&req.id).unwrap();
         settle(&req.id, Err("R2 unreachable".into()));
         let settled = get(&req.id).unwrap();
         assert_eq!(settled.state, PublishState::Failed);
@@ -213,17 +291,17 @@ mod tests {
 
     /// Only unresolved requests block a new one for the same post.
     #[test]
-    fn only_pending_requests_count_as_awaiting() {
+    fn only_pending_requests_count_as_open() {
         let req = enqueue(5, "e".into(), "E".into(), None);
-        assert!(awaiting_for_post(5).is_some());
+        assert!(open_for_post(5).is_some());
         reject(&req.id).unwrap();
-        assert!(awaiting_for_post(5).is_none());
+        assert!(open_for_post(5).is_none());
     }
 
     #[test]
     fn unknown_ids_are_reported_rather_than_panicking() {
         assert!(get("nope").is_none());
-        assert!(take_approved("nope").is_err());
+        assert!(claim_for_publish("nope").is_err());
         assert!(reject("nope").is_err());
         assert!(settle("nope", Ok(())).is_none());
     }
