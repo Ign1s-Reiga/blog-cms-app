@@ -11,7 +11,7 @@ use sea_orm::{
 use tauri::Manager;
 
 use crate::entities::record::{Id, Record};
-use crate::entities::{post, post_stage, series};
+use crate::entities::{post, post_stage, post_sync, series};
 use crate::error::{AppError, AppResult};
 
 /// Open (creating if needed) the local SQLite database and ensure its schema
@@ -79,6 +79,15 @@ async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
     db.execute(&stage_tbl)
         .await
         .map_err(|e| AppError::db_init("Failed to create `post_stage` table", e))?;
+
+    // Also local-only: how each post's content compares with the cloud's.
+    // Existing libraries simply have no rows here, which reads as "nothing has
+    // been touched since it arrived" — see `sync_state::derive`.
+    let mut sync_tbl = schema.create_table_from_entity(post_sync::Entity);
+    sync_tbl.if_not_exists();
+    db.execute(&sync_tbl)
+        .await
+        .map_err(|e| AppError::db_init("Failed to create `post_sync` table", e))?;
 
     Ok(())
 }
@@ -244,12 +253,14 @@ pub async fn mirror_posts(
         upsert_post_from_remote(db, post, &series).await?;
     }
 
-    // Drop anything local that no longer exists remotely (+ its staging row).
+    // Drop anything local that no longer exists remotely (+ its staging and
+    // sync rows, which describe a post that is about to stop existing).
     let locals = post::Entity::find().all(db).await?;
     let mut deleted = 0usize;
     for local in locals {
         if !remote_slugs.contains(&local.slug) {
             let _ = post_stage::Entity::delete_by_id(local.id).exec(db).await;
+            let _ = sync_clear(db, local.id).await;
             post::Entity::delete_by_id(local.id).exec(db).await?;
             deleted += 1;
         }
@@ -328,6 +339,34 @@ async fn upsert_post_from_remote(
 ) -> AppResult<()> {
     let existing = post_by_slug(db, &remote.slug).await?;
 
+    // A post with unpushed local edits is left exactly as it is — decided here,
+    // before anything is written, because once the row is overwritten the
+    // evidence of what was local is gone.
+    //
+    // Applying the cloud's metadata over it and keeping the fingerprint is not a
+    // middle course, it is the worst of both: `mirror_posts` never replaces the
+    // cached `<slug>.md`, so the post would end up carrying the cloud's title
+    // over the local body, described by a fingerprint that matches neither. A
+    // metadata-only edit would then report unpublished edits forever, having had
+    // the very edit it was reporting silently discarded.
+    //
+    // Leaving it whole keeps the fingerprint true. What a refresh *should* do
+    // about a post edited on both sides is a real question and not this one's to
+    // answer: it is conflict resolution, and it needs somewhere for the person
+    // to say which copy wins.
+    if let Some(local) = existing.as_ref() {
+        if sync_get(db, local.id)
+            .await?
+            .is_some_and(|sync| crate::sync_state::local_changed(&sync))
+        {
+            log::info!(
+                "Post `{}` has unpushed local edits; leaving it out of the refresh",
+                remote.slug
+            );
+            return Ok(());
+        }
+    }
+
     let mut model = remote;
     let (series_id, series_order) = resolve_series(&model, existing.as_ref(), series);
     model.series_id = series_id;
@@ -347,10 +386,20 @@ async fn upsert_post_from_remote(
         post_stage::Model { post_id: saved.id, stage: stage.to_string(), staged_at: saved.updated_at },
     )
     .await?;
+
+    // Only posts with nothing pending reach this point, so the record here
+    // describes nothing and goes — which is what keeps "no record" meaning
+    // "nothing has been touched here".
+    sync_clear(db, saved.id).await?;
     Ok(())
 }
 
 // ─── Publish staging (local only) ───────────────────────────────────────────────
+
+/// Every post's staging row, for building a whole-library view in one query.
+pub async fn stages_all(db: &impl ConnectionTrait) -> AppResult<Vec<post_stage::Model>> {
+    Ok(post_stage::Entity::find().all(db).await?)
+}
 
 pub async fn stage_get(
     db: &impl ConnectionTrait,
@@ -390,6 +439,76 @@ pub async fn stage_set(
         };
         Ok(active.insert(db).await?)
     }
+}
+
+// ─── Sync state (local only) ────────────────────────────────────────────────────
+
+pub async fn sync_get(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+) -> AppResult<Option<post_sync::Model>> {
+    Ok(post_sync::Entity::find_by_id(post_id).one(db).await?)
+}
+
+/// Every post's sync row, for building a whole-library view in one query.
+pub async fn sync_all(db: &impl ConnectionTrait) -> AppResult<Vec<post_sync::Model>> {
+    Ok(post_sync::Entity::find().all(db).await?)
+}
+
+/// Record what the post's content hashes to right now, leaving the synced
+/// fingerprint alone — the cloud has not been told anything by a local edit.
+pub async fn sync_set_local(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+    local_hash: String,
+) -> AppResult<post_sync::Model> {
+    let existing = post_sync::Entity::find_by_id(post_id).one(db).await?;
+    Ok(match existing {
+        Some(row) => post_sync::ActiveModel {
+            post_id: sea_orm::ActiveValue::Unchanged(post_id),
+            local_hash: Set(local_hash),
+            synced_hash: Set(row.synced_hash),
+            synced_at: Set(row.synced_at),
+        }
+        .update(db)
+        .await?,
+        None => post_sync::ActiveModel {
+            post_id: Set(post_id),
+            local_hash: Set(local_hash),
+            synced_hash: Set(None),
+            synced_at: Set(None),
+        }
+        .insert(db)
+        .await?,
+    })
+}
+
+/// Record that the cloud has accepted exactly this content: the two
+/// fingerprints agree from here until the next local edit.
+pub async fn sync_mark_synced(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+    hash: String,
+    at: i64,
+) -> AppResult<post_sync::Model> {
+    let exists = post_sync::Entity::find_by_id(post_id).one(db).await?.is_some();
+    let model = post_sync::ActiveModel {
+        post_id: if exists {
+            sea_orm::ActiveValue::Unchanged(post_id)
+        } else {
+            Set(post_id)
+        },
+        local_hash: Set(hash.clone()),
+        synced_hash: Set(Some(hash)),
+        synced_at: Set(Some(at)),
+    };
+    Ok(if exists { model.update(db).await? } else { model.insert(db).await? })
+}
+
+/// Forget a post's sync record. Clearing an absent row is not an error.
+pub async fn sync_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
+    post_sync::Entity::delete_by_id(post_id).exec(db).await?;
+    Ok(())
 }
 
 /// Posts whose staging row is in `stage` (`"draft"` | `"published"`).
@@ -585,6 +704,87 @@ mod tests {
         let post = post_by_slug(&db, "fresh").await.unwrap().unwrap();
         assert_eq!(post.series_id, Some(series.id));
         assert_eq!(post.series_order, Some(2));
+    }
+
+    /// A local edit records a fingerprint the cloud has never accepted, which
+    /// is what `Modified` is derived from.
+    #[tokio::test]
+    async fn a_local_edit_leaves_the_synced_fingerprint_behind() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+
+        sync_set_local(&db, post.id, "v1".into()).await.unwrap();
+        let row = sync_get(&db, post.id).await.unwrap().unwrap();
+        assert_eq!(row.local_hash, "v1");
+        assert_eq!(row.synced_hash, None, "nothing has been pushed yet");
+
+        // A successful push brings the two into line…
+        sync_mark_synced(&db, post.id, "v1".into(), 1_700_000_000).await.unwrap();
+        let row = sync_get(&db, post.id).await.unwrap().unwrap();
+        assert_eq!(row.synced_hash.as_deref(), Some("v1"));
+        assert_eq!(row.synced_at, Some(1_700_000_000));
+
+        // …and the next local edit parts them again, without disturbing the
+        // record of what the cloud actually holds.
+        sync_set_local(&db, post.id, "v2".into()).await.unwrap();
+        let row = sync_get(&db, post.id).await.unwrap().unwrap();
+        assert_eq!(row.local_hash, "v2");
+        assert_eq!(row.synced_hash.as_deref(), Some("v1"), "the cloud still holds v1");
+    }
+
+    /// A refresh rewrites SQLite and leaves the cached `<slug>.md` alone, and
+    /// `read_post_markdown` prefers that file — so a post with unpushed body
+    /// edits is still serving them to the editor afterwards. Discarding its
+    /// fingerprint would make the editor open those edits and call them clean,
+    /// hiding the very thing the badge exists to show.
+    #[tokio::test]
+    async fn a_refresh_keeps_the_fingerprint_of_a_post_with_unpushed_edits() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+        sync_set_local(&db, post.id, "local-only-edit".into()).await.unwrap();
+
+        mirror_posts(&db, vec![post_row("a-post", None, None)], &[]).await.unwrap();
+
+        let row = sync_get(&db, post.id).await.unwrap();
+        assert!(row.is_some(), "the refresh discarded a pending local edit");
+        assert_eq!(
+            crate::sync_state::derive(None, row.as_ref()),
+            crate::sync_state::SyncState::Modified,
+            "the post stopped reporting its unpublished edits"
+        );
+    }
+
+    /// And the post itself is left whole. Applying the cloud's metadata while
+    /// keeping the fingerprint would leave the row describing neither copy —
+    /// the cloud's title over the local body — and a metadata-only edit
+    /// reporting changes it no longer has.
+    #[tokio::test]
+    async fn a_refresh_does_not_half_apply_itself_to_a_locally_edited_post() {
+        let db = connect_in_memory().await.unwrap();
+        let mut local = post_row("a-post", None, None);
+        local.title = "Local title".into();
+        let post = create::<post::Model>(&db, local).await.unwrap();
+        sync_set_local(&db, post.id, "local-only-edit".into()).await.unwrap();
+
+        let mut remote = post_row("a-post", None, None);
+        remote.title = "Cloud title".into();
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
+
+        let after = post_by_slug(&db, "a-post").await.unwrap().unwrap();
+        assert_eq!(after.title, "Local title", "the refresh overwrote a local edit");
+    }
+
+    /// Where there is nothing pending, the record describes nothing and goes —
+    /// which is what keeps "no record" meaning "nothing has been touched here".
+    #[tokio::test]
+    async fn a_refresh_forgets_the_record_of_a_post_with_nothing_pending() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+        sync_mark_synced(&db, post.id, "v1".into(), 1_700_000_000).await.unwrap();
+
+        mirror_posts(&db, vec![post_row("a-post", None, None)], &[]).await.unwrap();
+
+        assert!(sync_get(&db, post.id).await.unwrap().is_none());
     }
 
     /// What goes up carries the cloud's id for the series, never this machine's

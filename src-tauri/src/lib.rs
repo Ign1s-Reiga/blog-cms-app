@@ -10,6 +10,7 @@ mod imaging;
 // library; every other module stays crate-private.
 pub mod mcp;
 mod media_keys;
+mod sync_state;
 mod update;
 mod webview;
 
@@ -109,6 +110,7 @@ pub fn run() {
             commands::set_post_stage,
             commands::get_post_stage,
             commands::list_posts_by_stage,
+            commands::list_sync_states,
             commands::publish_post,
             commands::unpublish_post,
             // Sync

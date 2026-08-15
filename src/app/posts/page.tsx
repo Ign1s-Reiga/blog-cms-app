@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { CheckCircle2, Import, Plus, Search } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { StatusDot } from '@/components/StatusDot';
+import { StatusDot, type PostStatus } from '@/components/StatusDot';
 import { StatusPill } from '@/components/StatusPill';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
@@ -15,7 +15,7 @@ import { onPostsRefreshed } from '@/lib/sync';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type FilterId = 'all' | 'published' | 'draft' | 'failed';
+type FilterId = 'all' | 'published' | 'edited' | 'draft' | 'failed';
 
 type ImportStatus =
   | { kind: 'idle' }
@@ -29,10 +29,18 @@ type Post = {
   title: string;
   tags: string[];
   status: 'published' | 'draft';
-  syncFailed: boolean; // latest local edit failed to sync to R2/D1
+  /// How the local copy compares with what readers are served. Kept separate
+  /// from `status` on purpose: publication and synchronisation are two facts,
+  /// and a published post can be carrying edits nobody has seen.
+  sync: SyncState;
   date: string;
   views?: number;
 };
+
+/// Mirrors `SyncState` in `src-tauri/src/sync_state.rs`.
+type SyncState = 'clean' | 'modified' | 'sync_failed';
+
+type BackendSyncState = { post_id: number; state: SyncState };
 
 // Subset of the `list_posts` command payload we actually use.
 type BackendPost = {
@@ -58,9 +66,19 @@ function toPost(p: BackendPost): Post {
     title: p.title,
     tags,
     status: p.published ? 'published' : 'draft',
-    syncFailed: false,
+    sync: 'clean',
     date: new Date(p.created_at * 1000).toISOString().slice(0, 10),
   };
+}
+
+/// The one badge a row shows, from the two facts behind it. A failed push wins:
+/// it is the state that needs action. Otherwise a published post carrying local
+/// edits reads as `edited` rather than plainly `published`, which is the whole
+/// point — the post is live, and this version of it is not.
+function displayStatus(post: Post): PostStatus {
+  if (post.sync === 'sync_failed') return 'failed';
+  if (post.status === 'published' && post.sync === 'modified') return 'edited';
+  return post.status;
 }
 
 export default function PostsPage() {
@@ -84,17 +102,17 @@ export default function PostsPage() {
     try {
       // Local cache — refreshed from the cloud on launch and via the refresh button.
       const rows = await invoke<BackendPost[]>('list_posts');
-      // Which posts are staged sync_failed (best-effort — doesn't block the list).
-      let failed = new Set<number>();
+      // How each post compares with the cloud (best-effort — doesn't block the
+      // list; without it every post simply reads as clean, which is what the
+      // list showed before this existed).
+      let sync = new Map<number, SyncState>();
       try {
-        const failedRows = await invoke<BackendPost[]>('list_posts_by_stage', {
-          stage: 'sync_failed',
-        });
-        failed = new Set(failedRows.map((p) => p.id));
+        const states = await invoke<BackendSyncState[]>('list_sync_states');
+        sync = new Map(states.map((s) => [s.post_id, s.state]));
       } catch {
-        // ignore staging query errors
+        // ignore sync-state query errors
       }
-      setPosts(rows.map((p) => ({ ...toPost(p), syncFailed: failed.has(p.id) })));
+      setPosts(rows.map((p) => ({ ...toPost(p), sync: sync.get(p.id) ?? 'clean' })));
       setLoadError(null);
     } catch (err) {
       setLoadError(String(err));
@@ -129,19 +147,35 @@ export default function PostsPage() {
     }
   };
 
+  const matches = (p: Post, f: FilterId) => {
+    switch (f) {
+      case 'all':
+        return true;
+      case 'failed':
+        return p.sync === 'sync_failed';
+      // A published post whose local version has not been published yet. Drafts
+      // are excluded: everything about a draft is unpublished, so listing them
+      // here would bury the posts where the distinction actually matters.
+      case 'edited':
+        return p.status === 'published' && p.sync === 'modified';
+      default:
+        return p.status === f;
+    }
+  };
+
   const visible = posts.filter((p) => {
     const q = search.toLowerCase();
     const matchSearch = q === '' || p.title.toLowerCase().includes(q) || p.tags.some((t) => t.includes(q));
-    const matchFilter = filter === 'all' ? true : filter === 'failed' ? p.syncFailed : p.status === filter;
-    return matchSearch && matchFilter;
+    return matchSearch && matches(p, filter);
   });
 
-  const tabs: { id: FilterId; label: string; count: number }[] = [
-    { id: 'all', label: 'All', count: posts.length },
-    { id: 'published', label: 'Published', count: posts.filter((p) => p.status === 'published').length },
-    { id: 'draft', label: 'Drafts', count: posts.filter((p) => p.status === 'draft').length },
-    { id: 'failed', label: 'Failed', count: posts.filter((p) => p.syncFailed).length },
-  ];
+  const tabs: { id: FilterId; label: string; count: number }[] = (
+    ['all', 'published', 'edited', 'draft', 'failed'] as const
+  ).map((id) => ({
+    id,
+    label: { all: 'All', published: 'Published', edited: 'Edited', draft: 'Drafts', failed: 'Failed' }[id],
+    count: posts.filter((p) => matches(p, id)).length,
+  }));
 
   return (
     <main className='flex-1 overflow-y-auto p-6'>
@@ -266,7 +300,7 @@ export default function PostsPage() {
                 className='group grid grid-cols-[1fr_auto_auto_auto] sm:grid-cols-[1fr_120px_90px_100px_80px] items-center gap-0 px-4 py-[10px] cursor-pointer hover:bg-zinc-50 dark:hover:bg-white/[0.02] transition-colors duration-100'
               >
                 <div className='flex items-center gap-2.5 min-w-0 pr-4'>
-                  <StatusDot status={post.syncFailed ? 'failed' : post.status} />
+                  <StatusDot status={displayStatus(post)} />
                   <span className='text-[13px] font-medium text-zinc-800 dark:text-zinc-200 truncate group-hover:text-zinc-900 dark:group-hover:text-white transition-colors duration-100'>
                     {post.title}
                   </span>
@@ -285,7 +319,7 @@ export default function PostsPage() {
                 </div>
 
                 <div>
-                  <StatusPill status={post.syncFailed ? 'failed' : post.status} />
+                  <StatusPill status={displayStatus(post)} />
                 </div>
 
                 <span className='hidden sm:block text-[11px] font-mono tracking-tight text-zinc-400 dark:text-zinc-600'>

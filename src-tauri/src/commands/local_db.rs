@@ -293,6 +293,14 @@ pub async fn import_article(
         },
     )
     .await?;
+    // Local content the cloud has never seen — which is what an unsynced
+    // fingerprint records.
+    db::sync_set_local(
+        conn.inner(),
+        created.id,
+        crate::sync_state::content_hash(&created, body),
+    )
+    .await?;
 
     Ok(title)
 }
@@ -347,7 +355,50 @@ pub async fn update_post(
 
 #[tauri::command]
 pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<()> {
+    // The staging and sync rows describe a post that is about to stop existing;
+    // leaving them behind would attach them to whichever post is assigned this
+    // id next.
+    let _ = db::stage_clear(conn.inner(), id).await;
+    let _ = db::sync_clear(conn.inner(), id).await;
     db::delete::<PostModel>(conn.inner(), id).await
+}
+
+/// Every post's sync state, keyed by post id — what the list needs to show
+/// which published posts are carrying edits readers have not seen.
+///
+/// Returned for the whole library in one call rather than per post: the list
+/// renders all of them at once, and two queries beat one per row.
+#[tauri::command]
+pub async fn list_sync_states(
+    conn: State<'_, DatabaseConnection>,
+) -> AppResult<Vec<PostSyncState>> {
+    let stages: std::collections::HashMap<i32, post_stage::Model> = db::stages_all(conn.inner())
+        .await?
+        .into_iter()
+        .map(|s| (s.post_id, s))
+        .collect();
+    let syncs: std::collections::HashMap<i32, crate::entities::post_sync::Model> =
+        db::sync_all(conn.inner())
+            .await?
+            .into_iter()
+            .map(|s| (s.post_id, s))
+            .collect();
+
+    Ok(db::list::<PostModel>(conn.inner())
+        .await?
+        .into_iter()
+        .map(|post| PostSyncState {
+            post_id: post.id,
+            state: crate::sync_state::derive(stages.get(&post.id), syncs.get(&post.id)),
+        })
+        .collect())
+}
+
+/// One post's sync state, as the frontend reads it.
+#[derive(serde::Serialize)]
+pub struct PostSyncState {
+    pub post_id: i32,
+    pub state: crate::sync_state::SyncState,
 }
 
 // ── Series: local SQLite ────────────────────────────────────────────────────────
