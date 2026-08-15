@@ -531,6 +531,140 @@ pub async fn save_post(
     }
 }
 
+// ─── Conflict resolution ──────────────────────────────────────────────────────
+
+/// Which copy of a conflicted post to keep.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Resolution {
+    /// Keep what is on this machine. The cloud's version stamp is accepted as
+    /// the new baseline, so the post stops being a conflict and becomes an
+    /// ordinary pending edit, ready to publish.
+    KeepLocal,
+    /// Take the cloud's copy, metadata and body, over the local one.
+    KeepRemote,
+}
+
+/// Settle a post whose local and cloud copies both changed.
+///
+/// This is the only place either copy is overwritten. A refresh deliberately
+/// refuses to choose — see `db::mirror_posts` — because both answers destroy
+/// work and only a person knows which loss is acceptable.
+///
+/// Keeping **local** writes nothing to the cloud. It records that the cloud's
+/// current version has been seen and accounted for, which drops the post from
+/// `conflict` to `modified`: the edits are still pending, and publishing them is
+/// a separate, deliberate act. Doing it here would push over the remote change
+/// the person just chose to discard — a decision they have made, but not one
+/// this command was asked to carry out, and for MCP-originated posts it would
+/// walk straight through the approval gate.
+///
+/// Keeping **remote** replaces the local metadata and body with the cloud's, and
+/// the two agree from there.
+#[tauri::command]
+pub async fn resolve_conflict(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+    keep: Resolution,
+) -> AppResult<PostModel> {
+    let now = now_ts();
+    let post = db::get::<PostModel>(conn.inner(), post_id)
+        .await?
+        .ok_or(AppError::PostNotFound(post_id))?;
+
+    // Refuse anything that is not actually a conflict. Resolving a post that is
+    // merely modified would silently discard the pending edit under a button
+    // labelled for a situation it is not in.
+    let sync = db::sync_get(conn.inner(), post_id).await?;
+    let stage = db::stage_get(conn.inner(), post_id).await?;
+    if sync_state::derive(stage.as_ref(), sync.as_ref()) != sync_state::SyncState::Conflict {
+        return Err(AppError::NotConflicted(post_id));
+    }
+    // Guaranteed by the state above; a conflict cannot be derived without it.
+    let observed = sync.and_then(|s| s.remote_seen_at);
+
+    match keep {
+        Resolution::KeepLocal => {
+            // The cloud's version is now accounted for. Nothing local moves, so
+            // the fingerprint still describes exactly what is on disk.
+            db::sync_accept_remote_baseline(conn.inner(), post_id, observed).await?;
+            Ok(post)
+        }
+        Resolution::KeepRemote => {
+            let (client, config) = cf()?;
+
+            let remote = cloudflare::d1_list::<PostModel>(&client, &config)
+                .await?
+                .into_iter()
+                .find(|p| p.slug == post.slug)
+                .ok_or_else(|| AppError::RemotePostGone(post.slug.clone()))?;
+
+            let body = cloudflare::download_from_r2(
+                &client,
+                &config,
+                &media_keys::body_key(&post.slug),
+            )
+            .await?
+            .unwrap_or_default();
+
+            // Body first, by the same reasoning as `save_post`: the write is
+            // what fails, and until the rename nothing has been replaced.
+            let dir = app
+                .path()
+                .app_data_dir()
+                .map_err(AppError::AppDataDir)?
+                .join("posts");
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|e| AppError::io("Failed to create posts dir", e))?;
+            let staged = StagedBody::write(&dir, &body).await?;
+
+            // The remote's series reference is a remote primary key; translate
+            // it rather than storing a number that means something else here.
+            let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
+            let series = db::SeriesMap::build(conn.inner(), &remote_series).await?;
+
+            let mut model = remote;
+            model.id = post.id;
+            model.series_id = model.series_id.and_then(|id| series.to_local(id));
+            if model.series_id.is_none() {
+                model.series_order = None;
+            }
+            let remote_updated_at = model.updated_at;
+
+            let saved = db::update::<PostModel>(conn.inner(), model).await?;
+            staged
+                .commit(&dir.join(format!("{}.md", saved.slug)))
+                .await?;
+
+            db::stage_set(
+                conn.inner(),
+                post_stage::Model {
+                    post_id: saved.id,
+                    stage: if saved.published {
+                        post_stage::PUBLISHED.to_string()
+                    } else {
+                        post_stage::DRAFT.to_string()
+                    },
+                    staged_at: now,
+                },
+            )
+            .await?;
+            db::sync_agree(
+                conn.inner(),
+                saved.id,
+                sync_state::content_hash(&saved, &body),
+                Some(remote_updated_at),
+                now,
+            )
+            .await?;
+
+            Ok(saved)
+        }
+    }
+}
+
 // ─── Media library (R2 + local cache) ─────────────────────────────────────────
 
 /// A media object stored in R2, cached locally for display.

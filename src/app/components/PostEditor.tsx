@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import {
   ArrowLeft,
@@ -137,7 +137,7 @@ function parseTags(tags: string | null): string {
 }
 
 /// Mirrors `SyncState` in `src-tauri/src/sync_state.rs`.
-type SyncState = 'clean' | 'modified' | 'sync_failed';
+type SyncState = 'clean' | 'modified' | 'remote_ahead' | 'conflict' | 'sync_failed';
 
 /// This post's sync state, read from the whole-library query the posts list
 /// already uses. A blog's worth of rows is small enough that a second command
@@ -175,6 +175,52 @@ export function PostEditor() {
   const [live, setLive] = useState(false);
   const [sync, setSync] = useState<SyncState>('clean');
 
+  /// Pull one post's metadata, body and sync state out of the backend into the
+  /// editor. Used on mount and again after resolving a conflict, where keeping
+  /// the cloud's copy replaces everything on screen.
+  const loadFromBackend = useCallback(
+    async (
+      invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
+      id: number,
+      keepGoing: () => boolean = () => true,
+    ) => {
+      const post = await invoke<{
+        title: string;
+        tags: string | null;
+        slug: string;
+        published: boolean;
+      } | null>('get_post', { id });
+      if (!post || !keepGoing()) return;
+      setTitle(post.title);
+      setTags(parseTags(post.tags));
+      setLive(post.published);
+      const md = await invoke<string>('read_post_markdown', { slug: post.slug });
+      if (!keepGoing()) return;
+      setBody(md);
+      const state = await readSyncState(invoke, id);
+      if (keepGoing()) setSync(state);
+    },
+    [],
+  );
+
+  /// Settle a conflict by picking a side. Keeping the cloud's copy overwrites
+  /// what is on screen, so the editor reloads rather than leaving the replaced
+  /// text sitting in the textarea where the next save would push it back up.
+  const resolve = async (keep: 'keep_local' | 'keep_remote') => {
+    if (postId === null || saveState.kind === 'saving') return;
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
+    if (!isTauri()) return;
+    setSaveState({ kind: 'saving', publish: false });
+    try {
+      await invoke('resolve_conflict', { postId, keep });
+      await loadFromBackend(invoke, postId);
+      setSaveState({ kind: 'idle' });
+    } catch (err) {
+      setSaveState({ kind: 'error', message: String(err) });
+      setTimeout(() => setSaveState({ kind: 'idle' }), 6000);
+    }
+  };
+
   // When the editor is opened with an `?id=` in the URL, load that post's
   // metadata and Markdown body. read_post_markdown downloads the file from R2
   // into the local cache when it isn't already cached locally.
@@ -187,22 +233,7 @@ export function PostEditor() {
       const { invoke, isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
       try {
-        // Load the post from the local cache, then its Markdown by slug.
-        const post = await invoke<{
-          title: string;
-          tags: string | null;
-          slug: string;
-          published: boolean;
-        } | null>('get_post', { id });
-        if (post && !cancelled) {
-          setTitle(post.title);
-          setTags(parseTags(post.tags));
-          setLive(post.published);
-          const md = await invoke<string>('read_post_markdown', { slug: post.slug });
-          if (!cancelled) setBody(md);
-          const state = await readSyncState(invoke, id);
-          if (!cancelled) setSync(state);
-        }
+        await loadFromBackend(invoke, id, () => !cancelled);
       } catch (err) {
         console.error('Failed to load post:', err);
       }
@@ -210,7 +241,7 @@ export function PostEditor() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadFromBackend]);
 
   // Save the post: `publish=false` keeps it a local draft; `publish=true` also
   // pushes the body to R2 and metadata to D1 (see the `save_post` command).
@@ -778,6 +809,32 @@ export function PostEditor() {
           {/* What readers are being served, when that differs from what is on
               screen. Silent when the two agree — a badge that is always there
               stops being read. */}
+          {saveState.kind === 'idle' && sync === 'conflict' && (
+            <>
+              <StatusPill status='conflict' />
+              {/* Both answers throw something away, so neither is a default and
+                  neither is styled as the safe one. */}
+              <Button
+                variant='outline'
+                size='sm'
+                onClick={() => void resolve('keep_local')}
+                title='Keep what is on this machine. The cloud change is discarded; your edits stay unpublished until you publish them.'
+                className='h-[28px] px-2 rounded-[5px] text-[12px] font-semibold'
+              >
+                Keep mine
+              </Button>
+              <Button
+                variant='outline'
+                size='sm'
+                onClick={() => void resolve('keep_remote')}
+                title='Take the cloud version. Everything on screen is replaced by it.'
+                className='h-[28px] px-2 rounded-[5px] text-[12px] font-semibold'
+              >
+                Keep cloud
+              </Button>
+            </>
+          )}
+          {saveState.kind === 'idle' && sync === 'remote_ahead' && <StatusPill status='behind' />}
           {saveState.kind === 'idle' && sync === 'sync_failed' && <StatusPill status='failed' />}
           {saveState.kind === 'idle' && sync === 'modified' && live && <StatusPill status='edited' />}
           {saveState.kind === 'saved' && (

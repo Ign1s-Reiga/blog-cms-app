@@ -32,6 +32,20 @@ pub struct Model {
     pub synced_hash: Option<String>,
     /// When that push completed (Unix seconds).
     pub synced_at: Option<i64>,
+    /// The remote row's `updated_at` at the last moment the two sides agreed —
+    /// a successful push, or a pull that was taken wholesale.
+    ///
+    /// This is the *baseline*: the version of the cloud's copy this machine has
+    /// accounted for.
+    pub remote_updated_at: Option<i64>,
+    /// The remote row's `updated_at` as of the most recent refresh.
+    ///
+    /// Differing from `remote_updated_at` is what "the cloud has moved since we
+    /// last agreed" means. Timestamps rather than a hash because a refresh reads
+    /// D1's metadata only — the body lives in R2 and is fetched per post, so
+    /// fingerprinting every remote post would mean downloading the whole blog to
+    /// answer a question its `updated_at` already answers.
+    pub remote_seen_at: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

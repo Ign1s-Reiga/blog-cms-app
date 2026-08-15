@@ -204,6 +204,12 @@ pub enum AppError {
     #[error("Post {0} no longer exists")]
     PostVanished(i32),
 
+    #[error("Post `{0}` no longer exists in the cloud, so there is no cloud version to keep")]
+    RemotePostGone(String),
+
+    #[error("Post {0} is not in conflict")]
+    NotConflicted(i32),
+
     // ─── Updater ──────────────────────────────────────────────────────────────
     #[error("Updater unavailable: {0}")]
     UpdaterUnavailable(#[source] tauri_plugin_updater::Error),

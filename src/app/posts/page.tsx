@@ -15,7 +15,7 @@ import { onPostsRefreshed } from '@/lib/sync';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type FilterId = 'all' | 'published' | 'edited' | 'draft' | 'failed';
+type FilterId = 'all' | 'published' | 'edited' | 'conflict' | 'draft' | 'failed';
 
 type ImportStatus =
   | { kind: 'idle' }
@@ -38,7 +38,7 @@ type Post = {
 };
 
 /// Mirrors `SyncState` in `src-tauri/src/sync_state.rs`.
-type SyncState = 'clean' | 'modified' | 'sync_failed';
+type SyncState = 'clean' | 'modified' | 'remote_ahead' | 'conflict' | 'sync_failed';
 
 type BackendSyncState = { post_id: number; state: SyncState };
 
@@ -77,6 +77,10 @@ function toPost(p: BackendPost): Post {
 /// point — the post is live, and this version of it is not.
 function displayStatus(post: Post): PostStatus {
   if (post.sync === 'sync_failed') return 'failed';
+  // A conflict outranks the rest: it is the only state that cannot be resolved
+  // by pressing the button the post would otherwise be offering.
+  if (post.sync === 'conflict') return 'conflict';
+  if (post.sync === 'remote_ahead') return 'behind';
   if (post.status === 'published' && post.sync === 'modified') return 'edited';
   return post.status;
 }
@@ -158,6 +162,8 @@ export default function PostsPage() {
       // here would bury the posts where the distinction actually matters.
       case 'edited':
         return p.status === 'published' && p.sync === 'modified';
+      case 'conflict':
+        return p.sync === 'conflict';
       default:
         return p.status === f;
     }
@@ -170,10 +176,17 @@ export default function PostsPage() {
   });
 
   const tabs: { id: FilterId; label: string; count: number }[] = (
-    ['all', 'published', 'edited', 'draft', 'failed'] as const
+    ['all', 'published', 'edited', 'conflict', 'draft', 'failed'] as const
   ).map((id) => ({
     id,
-    label: { all: 'All', published: 'Published', edited: 'Edited', draft: 'Drafts', failed: 'Failed' }[id],
+    label: {
+      all: 'All',
+      published: 'Published',
+      edited: 'Edited',
+      conflict: 'Conflicts',
+      draft: 'Drafts',
+      failed: 'Failed',
+    }[id],
     count: posts.filter((p) => matches(p, id)).length,
   }));
 
