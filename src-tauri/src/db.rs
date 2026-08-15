@@ -359,11 +359,29 @@ async fn upsert_post_from_remote(
     )
     .await?;
 
-    // The cloud has just won, so whatever this post's local fingerprint recorded
-    // is about a version that no longer exists here. Forgetting it is what makes
-    // "no record" mean what it says — nothing has been touched since this
-    // arrived — instead of leaving a refreshed post permanently claiming edits.
-    sync_clear(db, saved.id).await?;
+    // The cloud has just won *for the metadata* — and only that. A refresh
+    // rewrites SQLite and never touches the cached `<slug>.md`, which
+    // `read_post_markdown` still prefers, so a post with unpushed body edits
+    // keeps serving them to the editor after this returns.
+    //
+    // Forgetting its fingerprint would therefore be a lie in the one direction
+    // that matters: the editor would open the unpublished body and call it
+    // clean. The record is cleared only where it describes nothing — a post
+    // with no local changes — so that "no record" keeps meaning "nothing has
+    // been touched here".
+    //
+    // What a refresh should do about a post edited on both sides is a real
+    // question, and not this one's to answer: it is conflict resolution, and it
+    // needs somewhere for the person to say which copy wins.
+    match sync_get(db, saved.id).await? {
+        Some(sync) if crate::sync_state::local_changed(&sync) => {
+            log::info!(
+                "Post `{}` was refreshed from the cloud but keeps unpushed local edits",
+                saved.slug
+            );
+        }
+        _ => sync_clear(db, saved.id).await?,
+    }
     Ok(())
 }
 
@@ -705,20 +723,39 @@ mod tests {
         assert_eq!(row.synced_hash.as_deref(), Some("v1"), "the cloud still holds v1");
     }
 
-    /// A refresh is "cloud wins", so a fingerprint describing a local version
-    /// that no longer exists must not survive it and keep claiming edits.
+    /// A refresh rewrites SQLite and leaves the cached `<slug>.md` alone, and
+    /// `read_post_markdown` prefers that file — so a post with unpushed body
+    /// edits is still serving them to the editor afterwards. Discarding its
+    /// fingerprint would make the editor open those edits and call them clean,
+    /// hiding the very thing the badge exists to show.
     #[tokio::test]
-    async fn a_cloud_refresh_forgets_stale_local_fingerprints() {
+    async fn a_refresh_keeps_the_fingerprint_of_a_post_with_unpushed_edits() {
         let db = connect_in_memory().await.unwrap();
         let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
         sync_set_local(&db, post.id, "local-only-edit".into()).await.unwrap();
 
         mirror_posts(&db, vec![post_row("a-post", None, None)], &[]).await.unwrap();
 
-        assert!(
-            sync_get(&db, post.id).await.unwrap().is_none(),
-            "the refreshed post still claims local edits"
+        let row = sync_get(&db, post.id).await.unwrap();
+        assert!(row.is_some(), "the refresh discarded a pending local edit");
+        assert_eq!(
+            crate::sync_state::derive(None, row.as_ref()),
+            crate::sync_state::SyncState::Modified,
+            "the post stopped reporting its unpublished edits"
         );
+    }
+
+    /// Where there is nothing pending, the record describes nothing and goes —
+    /// which is what keeps "no record" meaning "nothing has been touched here".
+    #[tokio::test]
+    async fn a_refresh_forgets_the_record_of_a_post_with_nothing_pending() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+        sync_mark_synced(&db, post.id, "v1".into(), 1_700_000_000).await.unwrap();
+
+        mirror_posts(&db, vec![post_row("a-post", None, None)], &[]).await.unwrap();
+
+        assert!(sync_get(&db, post.id).await.unwrap().is_none());
     }
 
     /// What goes up carries the cloud's id for the series, never this machine's

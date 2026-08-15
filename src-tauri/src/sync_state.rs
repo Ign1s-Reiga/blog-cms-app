@@ -76,6 +76,15 @@ pub fn content_hash(post: &PostModel, body: &str) -> String {
     out
 }
 
+/// Has this machine's copy changed since the two sides last agreed?
+///
+/// Separate from [`derive`] because a refresh needs the answer before it has
+/// decided anything: a post with unpushed edits must not have its record
+/// discarded, since the cached body those edits live in survives the refresh.
+pub fn local_changed(sync: &post_sync::Model) -> bool {
+    sync.synced_hash.as_deref() != Some(sync.local_hash.as_str())
+}
+
 /// Read a post's sync state off its staging and sync rows.
 ///
 /// A failed push outranks everything: it is the one state that needs action,
@@ -92,9 +101,7 @@ pub fn derive(stage: Option<&post_stage::Model>, sync: Option<&post_sync::Model>
         return SyncState::SyncFailed;
     }
     match sync {
-        Some(sync) if sync.synced_hash.as_deref() != Some(sync.local_hash.as_str()) => {
-            SyncState::Modified
-        }
+        Some(sync) if local_changed(sync) => SyncState::Modified,
         _ => SyncState::Clean,
     }
 }

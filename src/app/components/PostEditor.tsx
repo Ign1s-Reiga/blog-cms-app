@@ -240,6 +240,13 @@ export function PostEditor() {
     } catch (err) {
       setSaveState({ kind: 'error', message: String(err) });
       setTimeout(() => setSaveState({ kind: 'idle' }), 6000);
+      // A failed publish is exactly when the badge matters most: the post was
+      // saved locally and staged `sync_failed`, and the error message here is
+      // on a timer. Without this the pill would not appear until the page was
+      // reloaded, and the post would look fine the moment the message cleared.
+      // A brand-new post whose first save failed has no id yet, so there is
+      // nothing to read.
+      if (postId !== null) setSync(await readSyncState(invoke, postId));
     }
   };
 

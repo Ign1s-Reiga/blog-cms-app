@@ -334,28 +334,35 @@ impl BlogMcp {
         // published post's flag intact while its edits wait for approval.
         let was_published = post.published;
         let slug = post.slug.clone();
-        let saved = db::update::<PostModel>(self.conn().inner(), post)
-            .await
-            .map_err(internal)?;
 
-        // The body on disk after this edit — the replacement when one was sent,
-        // otherwise whatever is already cached. Either way it is what the
-        // fingerprint below has to cover.
-        let body = match params.body {
-            Some(body) => {
-                let dir = self.posts_dir()?;
-                tokio::fs::create_dir_all(&dir)
-                    .await
-                    .map_err(|e| internal(format!("Failed to create posts dir: {e}")))?;
-                tokio::fs::write(dir.join(format!("{slug}.md")), &body)
-                    .await
-                    .map_err(|e| internal(format!("Failed to write local markdown: {e}")))?;
-                body
-            }
+        // The body this post will have once the edit lands: the replacement when
+        // one was sent, otherwise whatever is already there.
+        //
+        // Resolved *before* the metadata is committed, because the second case
+        // can reach the network — an uncached body is fetched from R2 — and
+        // failing after the commit would leave the row edited, the fingerprint
+        // unwritten, and the post reporting itself clean while carrying changes.
+        // Nothing here has been written yet, so failing is simply a no-op.
+        let body = match &params.body {
+            Some(body) => body.clone(),
             None => commands::read_post_markdown(self.app.clone(), slug.clone())
                 .await
                 .map_err(internal)?,
         };
+
+        let saved = db::update::<PostModel>(self.conn().inner(), post)
+            .await
+            .map_err(internal)?;
+
+        if params.body.is_some() {
+            let dir = self.posts_dir()?;
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|e| internal(format!("Failed to create posts dir: {e}")))?;
+            tokio::fs::write(dir.join(format!("{slug}.md")), &body)
+                .await
+                .map_err(|e| internal(format!("Failed to write local markdown: {e}")))?;
+        }
 
         // This is the edit the issue is about: a published post stays published
         // while its text changes here and nowhere else. Recording the local
