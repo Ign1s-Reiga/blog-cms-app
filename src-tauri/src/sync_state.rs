@@ -96,6 +96,21 @@ pub fn local_changed(sync: &post_sync::Model) -> bool {
 /// so its absence means nothing here has been touched since the post arrived —
 /// which is the case for everything pulled from the cloud, and for the whole
 /// library the first time this runs.
+///
+/// ## The one case that answer gets wrong
+///
+/// A post whose body was edited through MCP `update_draft` *before this table
+/// existed* has a modified cached body and no row, so it reads `Clean` until
+/// something saves it again.
+///
+/// That is knowingly left alone, because every way of catching it is worse.
+/// Deciding at upgrade time whether a cached body differs from the live one
+/// means downloading the whole blog from R2; doing it without downloading means
+/// assuming, and the only safe assumption — every post with a cached body is
+/// `Modified` — lights up an entire library with edits almost none of them
+/// have. That is a louder lie than the quiet one it replaces. Reporting `Clean`
+/// for what has not been checked at least says what the app said yesterday, and
+/// one save of the affected post corrects it permanently.
 pub fn derive(stage: Option<&post_stage::Model>, sync: Option<&post_sync::Model>) -> SyncState {
     if stage.is_some_and(|s| s.stage == post_stage::SYNC_FAILED) {
         return SyncState::SyncFailed;

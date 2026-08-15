@@ -339,6 +339,34 @@ async fn upsert_post_from_remote(
 ) -> AppResult<()> {
     let existing = post_by_slug(db, &remote.slug).await?;
 
+    // A post with unpushed local edits is left exactly as it is — decided here,
+    // before anything is written, because once the row is overwritten the
+    // evidence of what was local is gone.
+    //
+    // Applying the cloud's metadata over it and keeping the fingerprint is not a
+    // middle course, it is the worst of both: `mirror_posts` never replaces the
+    // cached `<slug>.md`, so the post would end up carrying the cloud's title
+    // over the local body, described by a fingerprint that matches neither. A
+    // metadata-only edit would then report unpublished edits forever, having had
+    // the very edit it was reporting silently discarded.
+    //
+    // Leaving it whole keeps the fingerprint true. What a refresh *should* do
+    // about a post edited on both sides is a real question and not this one's to
+    // answer: it is conflict resolution, and it needs somewhere for the person
+    // to say which copy wins.
+    if let Some(local) = existing.as_ref() {
+        if sync_get(db, local.id)
+            .await?
+            .is_some_and(|sync| crate::sync_state::local_changed(&sync))
+        {
+            log::info!(
+                "Post `{}` has unpushed local edits; leaving it out of the refresh",
+                remote.slug
+            );
+            return Ok(());
+        }
+    }
+
     let mut model = remote;
     let (series_id, series_order) = resolve_series(&model, existing.as_ref(), series);
     model.series_id = series_id;
@@ -359,29 +387,10 @@ async fn upsert_post_from_remote(
     )
     .await?;
 
-    // The cloud has just won *for the metadata* — and only that. A refresh
-    // rewrites SQLite and never touches the cached `<slug>.md`, which
-    // `read_post_markdown` still prefers, so a post with unpushed body edits
-    // keeps serving them to the editor after this returns.
-    //
-    // Forgetting its fingerprint would therefore be a lie in the one direction
-    // that matters: the editor would open the unpublished body and call it
-    // clean. The record is cleared only where it describes nothing — a post
-    // with no local changes — so that "no record" keeps meaning "nothing has
-    // been touched here".
-    //
-    // What a refresh should do about a post edited on both sides is a real
-    // question, and not this one's to answer: it is conflict resolution, and it
-    // needs somewhere for the person to say which copy wins.
-    match sync_get(db, saved.id).await? {
-        Some(sync) if crate::sync_state::local_changed(&sync) => {
-            log::info!(
-                "Post `{}` was refreshed from the cloud but keeps unpushed local edits",
-                saved.slug
-            );
-        }
-        _ => sync_clear(db, saved.id).await?,
-    }
+    // Only posts with nothing pending reach this point, so the record here
+    // describes nothing and goes — which is what keeps "no record" meaning
+    // "nothing has been touched here".
+    sync_clear(db, saved.id).await?;
     Ok(())
 }
 
@@ -743,6 +752,26 @@ mod tests {
             crate::sync_state::SyncState::Modified,
             "the post stopped reporting its unpublished edits"
         );
+    }
+
+    /// And the post itself is left whole. Applying the cloud's metadata while
+    /// keeping the fingerprint would leave the row describing neither copy —
+    /// the cloud's title over the local body — and a metadata-only edit
+    /// reporting changes it no longer has.
+    #[tokio::test]
+    async fn a_refresh_does_not_half_apply_itself_to_a_locally_edited_post() {
+        let db = connect_in_memory().await.unwrap();
+        let mut local = post_row("a-post", None, None);
+        local.title = "Local title".into();
+        let post = create::<post::Model>(&db, local).await.unwrap();
+        sync_set_local(&db, post.id, "local-only-edit".into()).await.unwrap();
+
+        let mut remote = post_row("a-post", None, None);
+        remote.title = "Cloud title".into();
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
+
+        let after = post_by_slug(&db, "a-post").await.unwrap().unwrap();
+        assert_eq!(after.title, "Local title", "the refresh overwrote a local edit");
     }
 
     /// Where there is nothing pending, the record describes nothing and goes —
