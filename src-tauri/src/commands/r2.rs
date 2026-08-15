@@ -350,6 +350,11 @@ pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> AppResul
 /// and series membership. `tags` is a comma-separated string. A publish that
 /// can't reach the cloud leaves the post saved locally and staged `sync_failed`,
 /// returning an error.
+///
+/// `published` asks for this save to *publish*; it is not a statement about
+/// whether the post is live. A live post saved with `published: false` stays
+/// live — readers keep the version already on the blog — and its local edits are
+/// recorded as unpublished. Taking a post off the blog is `unpublish_post`.
 #[tauri::command]
 pub async fn save_post(
     app: tauri::AppHandle,
@@ -394,9 +399,24 @@ pub async fn save_post(
     // Apply the editor's fields.
     model.title = title;
     model.tags = Some(tags_to_json(&tags));
-    model.published = published;
-    model.published_at = if published { model.published_at.or(Some(now)) } else { None };
+    // Saving locally never takes a live post off the blog. `published` describes
+    // the *cloud's* copy, which a local save does not touch — the old version
+    // goes on being served either way — so clearing the flag here would report a
+    // post as unpublished while readers were still reading it, and would take
+    // the editor's Save Draft button, whose job is "keep this for later", and
+    // quietly make it an unpublish button.
+    //
+    // That is also what makes the difference this state model exists for
+    // reachable from the editor at all: a live post saved locally stays live and
+    // becomes `modified`, exactly as it does when an MCP client edits it.
+    // Unpublishing is `unpublish_post`, deliberately and on its own.
+    model.published = published || model.published;
+    model.published_at = if model.published { model.published_at.or(Some(now)) } else { None };
     model.updated_at = now;
+
+    // Whether the post is live once saved — which is not the same question as
+    // whether *this* save publishes it.
+    let live = model.published;
 
     let dir = app
         .path()
@@ -411,9 +431,11 @@ pub async fn save_post(
     //    take the write leaves the post exactly as it was.
     let staged = StagedBody::write(&dir, &body).await?;
 
-    // 2. Commit the metadata, with the staging row when a draft's stage is
-    //    already known.
-    let saved = match commit_metadata(conn.inner(), model, id.is_some(), (!published).then_some(now))
+    // 2. Commit the metadata, with the staging row when the stage is already
+    //    known. A post that stays live keeps the stage it has: saving edits
+    //    locally does not demote it to a draft, and its publish stage moves only
+    //    when a push succeeds or fails.
+    let saved = match commit_metadata(conn.inner(), model, id.is_some(), (!live).then_some(now))
         .await
     {
         Ok(saved) => saved,
@@ -934,6 +956,35 @@ mod tests {
         let stage = db::stage_get(&db, saved.id).await.unwrap().unwrap();
         assert_eq!(stage.stage, post_stage::DRAFT);
         assert_eq!(stage.staged_at, 1_700_000_000);
+    }
+
+    /// A live post saved locally keeps the stage it has. Demoting it to `draft`
+    /// would say the post is not on the blog, when the previous version still
+    /// is — and it is that pairing, live plus unpublished edits, that the whole
+    /// state model exists to express.
+    #[tokio::test]
+    async fn saving_a_live_post_locally_does_not_demote_its_stage() {
+        let db = db::connect_in_memory().await.unwrap();
+        let mut live = post("live-post", "Live");
+        live.published = true;
+        let saved = db::create::<PostModel>(&db, live).await.unwrap();
+        db::stage_set(
+            &db,
+            post_stage::Model {
+                post_id: saved.id,
+                stage: post_stage::PUBLISHED.to_string(),
+                staged_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        // The shape `save_post` uses for a local save of a post that stays live:
+        // no draft stage is written, so the published one survives.
+        commit_metadata(&db, saved.clone(), true, None).await.unwrap();
+
+        let stage = db::stage_get(&db, saved.id).await.unwrap().unwrap();
+        assert_eq!(stage.stage, post_stage::PUBLISHED);
     }
 
     /// A publish's stage is not known until the upload has been tried, so the
