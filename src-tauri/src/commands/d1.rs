@@ -18,12 +18,16 @@ use super::*;
 // ── Posts: Cloudflare D1 ────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn d1_create_post(post: PostModel) -> AppResult<i64> {
+pub async fn d1_create_post(
+    conn: State<'_, DatabaseConnection>,
+    post: PostModel,
+) -> AppResult<i64> {
     let (client, config) = cf()?;
     let mut post = post;
     let now = now_ts();
     post.created_at = now;
     post.updated_at = now;
+    let post = post_for_cloud(conn.inner(), &client, &config, post).await?;
     cloudflare::d1_insert::<PostModel>(&client, &config, post).await
 }
 
@@ -40,10 +44,14 @@ pub async fn d1_get_post(id: i32) -> AppResult<Option<PostModel>> {
 }
 
 #[tauri::command]
-pub async fn d1_update_post(post: PostModel) -> AppResult<()> {
+pub async fn d1_update_post(
+    conn: State<'_, DatabaseConnection>,
+    post: PostModel,
+) -> AppResult<()> {
     let (client, config) = cf()?;
     let mut post = post;
     post.updated_at = now_ts();
+    let post = post_for_cloud(conn.inner(), &client, &config, post).await?;
     cloudflare::d1_post_update(&client, &config, post).await
 }
 
@@ -118,9 +126,15 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> AppResult
     post.updated_at = now;
     let post = db::update::<PostModel>(conn, post).await?;
 
-    // 2. Push the change to Cloudflare D1.
+    // 2. Push the change to Cloudflare D1, with the post's series reference
+    //    translated into the cloud's ids.
     let synced = match cf() {
-        Ok((client, config)) => cloudflare::d1_post_update(&client, &config, post.clone()).await,
+        Ok((client, config)) => {
+            match post_for_cloud(conn, &client, &config, post.clone()).await {
+                Ok(outbound) => cloudflare::d1_post_update(&client, &config, outbound).await,
+                Err(e) => Err(e),
+            }
+        }
         Err(e) => Err(e),
     };
 
@@ -155,11 +169,19 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize>
     let (client, config) = cf()?;
     let now = now_ts();
 
+    // A local `series_id` is a local primary key and means nothing in D1, so it
+    // is translated through the slug both databases agree on. Sending it raw
+    // would file the post under whichever unrelated remote series happened to
+    // land on that number.
+    let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
+    let series = db::SeriesMap::build(conn.inner(), &remote_series).await?;
+
     let mut synced = 0usize;
     let mut failed = 0usize;
-    for post in posts {
+    for mut post in posts {
         let post_id = post.id;
         let published = post.published;
+        series.apply_outbound(&mut post);
         let stage = match cloudflare::d1_post_upsert(&client, &config, post).await {
             Ok(()) => {
                 synced += 1;
@@ -189,10 +211,14 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize>
 /// posts table an exact copy of D1. This is the "refresh" path — the UI reads
 /// local data, and this brings it in sync on app launch and when the refresh
 /// button is pressed. Returns the number of remote posts mirrored.
+///
+/// The cloud's series table comes down alongside the posts, because a post's
+/// remote `series_id` cannot be read without it.
 #[tauri::command]
 pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> AppResult<usize> {
     let (client, config) = cf()?;
     let remote = cloudflare::d1_list::<PostModel>(&client, &config).await?;
-    let (upserted, _deleted) = db::mirror_posts(conn.inner(), remote).await?;
+    let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
+    let (upserted, _deleted) = db::mirror_posts(conn.inner(), remote, &remote_series).await?;
     Ok(upserted)
 }

@@ -9,7 +9,13 @@
 //! `generate_handler!` needs both, so naming the functions individually
 //! leaves the macros behind.
 
+use sea_orm::DatabaseConnection;
+
+use crate::cloudflare::{self, CloudflareConfig};
+use crate::db;
+use crate::entities::post::Model as PostModel;
 use crate::entities::post_stage;
+use crate::entities::series::Model as SeriesModel;
 use crate::error::{AppError, AppResult};
 
 mod d1;
@@ -19,6 +25,32 @@ mod r2;
 pub use d1::*;
 pub use local_db::*;
 pub use r2::*;
+
+/// A post ready to send to D1, with its series reference translated out of
+/// local ids.
+///
+/// **Every path that writes a post to the cloud goes through here** — the
+/// editor's publish, the stage toggles, and the raw D1 commands. A local
+/// `series_id` is a local primary key and means nothing in D1, so a path that
+/// forgets this files the post under whichever unrelated remote series happens
+/// to hold that number. Routing them all through one function is what keeps
+/// that from depending on nobody forgetting.
+///
+/// It costs one extra D1 query per post pushed. `sync_posts` is the exception
+/// and builds the map once for its whole batch; everywhere else pushes a single
+/// post, where one query alongside the write is not worth optimising away.
+async fn post_for_cloud(
+    conn: &DatabaseConnection,
+    client: &reqwest::Client,
+    config: &CloudflareConfig,
+    mut post: PostModel,
+) -> AppResult<PostModel> {
+    let remote_series = cloudflare::d1_list::<SeriesModel>(client, config).await?;
+    db::SeriesMap::build(conn, &remote_series)
+        .await?
+        .apply_outbound(&mut post);
+    Ok(post)
+}
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 //
