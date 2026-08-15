@@ -57,12 +57,16 @@ pub struct PostOut {
     /// Local editorial stage: `draft`, `published`, or `sync_failed`.
     pub stage: Option<String>,
     /// Whether the local copy matches what readers are served: `clean`,
-    /// `modified`, or `sync_failed`.
+    /// `modified`, `remote_ahead`, `conflict`, or `sync_failed`.
     ///
     /// An agent editing a published post through `update_draft` moves this to
     /// `modified` — its changes are saved here and are not live until a human
     /// approves a publish. Reported so the agent can say so rather than assume
     /// the edit reached the blog.
+    ///
+    /// `conflict` means the cloud changed too, and nothing will be applied
+    /// either way until a person picks a side in the app. An agent that finds
+    /// one should say so and stop, not keep editing on top of it.
     pub sync_state: SyncState,
     /// The Markdown body. Only filled in by `get_post`; listing posts leaves it
     /// out so a large blog does not return megabytes of prose per call.

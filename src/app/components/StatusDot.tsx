@@ -2,12 +2,14 @@
 /// served yet — live, but not *this* version. It is deliberately its own status
 /// rather than a shade of `published`, because the two call for different
 /// actions: one is finished, the other is waiting to be published.
-export type PostStatus = 'published' | 'draft' | 'failed' | 'edited';
+export type PostStatus = 'published' | 'draft' | 'failed' | 'edited' | 'behind' | 'conflict';
 
 const DOT_COLORS: Record<PostStatus, string> = {
   published: 'bg-emerald-500',
   failed: 'bg-red-500',
+  conflict: 'bg-orange-500',
   edited: 'bg-sky-500',
+  behind: 'bg-violet-500',
   draft: 'bg-amber-400',
 };
 

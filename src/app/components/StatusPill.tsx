@@ -17,6 +17,18 @@ const PILLS: Record<PostStatus, { label: string; title: string; className: strin
     className:
       'bg-sky-50 text-sky-700 dark:bg-sky-500/[0.12] dark:text-sky-400 border-sky-200/80 dark:border-sky-500/20',
   },
+  conflict: {
+    label: 'Conflict',
+    title: 'This post changed here and in the cloud — neither can be applied without losing the other',
+    className:
+      'bg-orange-50 text-orange-700 dark:bg-orange-500/[0.12] dark:text-orange-400 border-orange-200/80 dark:border-orange-500/20',
+  },
+  behind: {
+    label: 'Cloud is newer',
+    title: 'The cloud has a newer version and this machine has no pending changes',
+    className:
+      'bg-violet-50 text-violet-700 dark:bg-violet-500/[0.12] dark:text-violet-400 border-violet-200/80 dark:border-violet-500/20',
+  },
   failed: {
     label: 'Sync failed',
     title: 'The last publish did not reach the cloud, so these edits are not live',

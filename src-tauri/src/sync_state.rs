@@ -40,6 +40,13 @@ pub enum SyncState {
     /// Edited since the last successful push. Readers are still being served the
     /// previous version.
     Modified,
+    /// The cloud has moved on and this machine has not — another machine, or
+    /// another person, published something newer. Safe to take.
+    RemoteAhead,
+    /// Both sides changed since they last agreed. Neither can be applied over
+    /// the other without losing work, so nothing is applied until someone says
+    /// which one wins.
+    Conflict,
     /// The last push was attempted and failed, so the local edits are not live
     /// and the cloud copy may be stale in a way nobody chose.
     SyncFailed,
@@ -85,11 +92,30 @@ pub fn local_changed(sync: &post_sync::Model) -> bool {
     sync.synced_hash.as_deref() != Some(sync.local_hash.as_str())
 }
 
+/// Has the cloud's copy changed since the two sides last agreed?
+///
+/// Only answerable once a refresh has actually looked: without `remote_seen_at`
+/// there is no observation to compare the baseline against, and "we have not
+/// checked" is not the same as "nothing changed".
+pub fn remote_changed(sync: &post_sync::Model) -> bool {
+    sync.remote_seen_at.is_some() && sync.remote_seen_at != sync.remote_updated_at
+}
+
 /// Read a post's sync state off its staging and sync rows.
 ///
-/// A failed push outranks everything: it is the one state that needs action,
-/// and it already implies the local copy is not live. Otherwise the answer is
-/// whether the fingerprints agree.
+/// The two sides are compared independently and the four combinations are the
+/// four states, which is the point: `Modified` and `RemoteAhead` are both safe
+/// to act on automatically and in opposite directions, while their overlap is
+/// the one case where acting at all destroys something.
+///
+/// ```text
+///                 remote unchanged     remote changed
+/// local unchanged      Clean            RemoteAhead
+/// local changed       Modified           Conflict
+/// ```
+///
+/// A failed push outranks all four: it is the state that needs a person, and it
+/// already implies the local copy is not live.
 ///
 /// A post with **no sync row** reads `Clean`. That is the honest answer rather
 /// than a cautious one: the row is written by every path that changes content,
@@ -115,9 +141,14 @@ pub fn derive(stage: Option<&post_stage::Model>, sync: Option<&post_sync::Model>
     if stage.is_some_and(|s| s.stage == post_stage::SYNC_FAILED) {
         return SyncState::SyncFailed;
     }
-    match sync {
-        Some(sync) if local_changed(sync) => SyncState::Modified,
-        _ => SyncState::Clean,
+    let Some(sync) = sync else {
+        return SyncState::Clean;
+    };
+    match (local_changed(sync), remote_changed(sync)) {
+        (true, true) => SyncState::Conflict,
+        (true, false) => SyncState::Modified,
+        (false, true) => SyncState::RemoteAhead,
+        (false, false) => SyncState::Clean,
     }
 }
 
@@ -147,6 +178,17 @@ mod tests {
             local_hash: local.into(),
             synced_hash: synced.map(str::to_string),
             synced_at: None,
+            remote_updated_at: None,
+            remote_seen_at: None,
+        }
+    }
+
+    /// The same row, plus what the last refresh saw on the other side.
+    fn seen(local: &str, synced: Option<&str>, baseline: i64, seen: i64) -> post_sync::Model {
+        post_sync::Model {
+            remote_updated_at: Some(baseline),
+            remote_seen_at: Some(seen),
+            ..sync(local, synced)
         }
     }
 
@@ -212,6 +254,32 @@ mod tests {
         assert_eq!(derive(Some(&stage(post_stage::PUBLISHED)), None), SyncState::Clean);
     }
 
+    /// The four combinations are the four states. `Modified` and `RemoteAhead`
+    /// are each safe to act on automatically, in opposite directions; their
+    /// overlap is the one case where acting at all destroys something.
+    #[test]
+    fn each_side_changing_gives_its_own_state() {
+        // Nothing moved on either side.
+        assert_eq!(derive(None, Some(&seen("v1", Some("v1"), 100, 100))), SyncState::Clean);
+        // Only here.
+        assert_eq!(derive(None, Some(&seen("v2", Some("v1"), 100, 100))), SyncState::Modified);
+        // Only there.
+        assert_eq!(derive(None, Some(&seen("v1", Some("v1"), 100, 200))), SyncState::RemoteAhead);
+        // Both — the case that must not be resolved by guessing.
+        assert_eq!(derive(None, Some(&seen("v2", Some("v1"), 100, 200))), SyncState::Conflict);
+    }
+
+    /// "We have not looked" is not "nothing changed". Until a refresh records
+    /// what the cloud says, the remote side cannot be claimed to have moved.
+    #[test]
+    fn an_unobserved_remote_is_not_treated_as_changed() {
+        let mut row = sync("v2", Some("v1"));
+        row.remote_updated_at = Some(100);
+        row.remote_seen_at = None;
+        assert_eq!(derive(None, Some(&row)), SyncState::Modified);
+        assert!(!remote_changed(&row));
+    }
+
     /// A failed push outranks the comparison: it is the state that needs
     /// action, and it already implies the local copy is not live.
     #[test]
@@ -219,5 +287,7 @@ mod tests {
         let failed = stage(post_stage::SYNC_FAILED);
         assert_eq!(derive(Some(&failed), Some(&sync("abc", Some("abc")))), SyncState::SyncFailed);
         assert_eq!(derive(Some(&failed), None), SyncState::SyncFailed);
+        // Even over a conflict: a push that did not land needs a person first.
+        assert_eq!(derive(Some(&failed), Some(&seen("v2", Some("v1"), 100, 200))), SyncState::SyncFailed);
     }
 }

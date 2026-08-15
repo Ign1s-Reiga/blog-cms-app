@@ -111,6 +111,7 @@ pub fn run() {
             commands::get_post_stage,
             commands::list_posts_by_stage,
             commands::list_sync_states,
+            commands::resolve_conflict,
             commands::publish_post,
             commands::unpublish_post,
             // Sync

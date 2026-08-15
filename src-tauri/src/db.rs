@@ -89,6 +89,60 @@ async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
         .await
         .map_err(|e| AppError::db_init("Failed to create `post_sync` table", e))?;
 
+    // `post_sync` grew two columns after it first shipped. See `ensure_columns`
+    // for why creating the table is not enough.
+    ensure_columns(
+        db,
+        "post_sync",
+        &[("remote_updated_at", "integer"), ("remote_seen_at", "integer")],
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Add any columns an existing table is missing.
+///
+/// `create_table_from_entity` is `IF NOT EXISTS`, so a database that already has
+/// the table keeps whatever shape it had. That is silent and harmless until an
+/// entity grows a field — and then every query naming the new column fails, on
+/// exactly the machines that have been running the app longest, while a fresh
+/// install works perfectly. It is the kind of break that never shows up in
+/// development, because development databases get deleted.
+///
+/// Kept deliberately small: this is a column-adding backstop, not a migration
+/// framework. Anything beyond adding nullable columns — renames, type changes,
+/// backfills — needs a real migration with a version number, and should not be
+/// smuggled in here.
+async fn ensure_columns(
+    db: &DatabaseConnection,
+    table: &str,
+    columns: &[(&str, &str)],
+) -> AppResult<()> {
+    let backend = db.get_database_backend();
+    let existing: std::collections::HashSet<String> = db
+        .query_all_raw(sea_orm::Statement::from_string(
+            backend,
+            format!("PRAGMA table_info(`{table}`)"),
+        ))
+        .await
+        .map_err(|e| AppError::db_init("Failed to inspect an existing table", e))?
+        .into_iter()
+        .filter_map(|row| row.try_get::<String>("", "name").ok())
+        .collect();
+
+    for (name, ty) in columns {
+        if existing.contains(*name) {
+            continue;
+        }
+        log::info!("Adding missing column `{name}` to `{table}`");
+        db.execute_raw(sea_orm::Statement::from_string(
+            backend,
+            format!("ALTER TABLE `{table}` ADD COLUMN `{name}` {ty}"),
+        ))
+        .await
+        .map_err(|e| AppError::db_init("Failed to add a missing column", e))?;
+    }
     Ok(())
 }
 
@@ -255,15 +309,35 @@ pub async fn mirror_posts(
 
     // Drop anything local that no longer exists remotely (+ its staging and
     // sync rows, which describe a post that is about to stop existing).
+    //
+    // Except a post the cloud has never accepted. "Absent from D1" means two
+    // entirely different things — *deleted there*, or *never sent* — and the
+    // sync row tells them apart: a post with a fingerprint and no synced
+    // counterpart has never been pushed, so its absence upstream is not news
+    // about a deletion, it is the ordinary state of local work. Deleting on
+    // that basis destroyed drafts for the crime of not having been published
+    // yet, on a path reached by pressing Refresh.
     let locals = post::Entity::find().all(db).await?;
     let mut deleted = 0usize;
     for local in locals {
-        if !remote_slugs.contains(&local.slug) {
-            let _ = post_stage::Entity::delete_by_id(local.id).exec(db).await;
-            let _ = sync_clear(db, local.id).await;
-            post::Entity::delete_by_id(local.id).exec(db).await?;
-            deleted += 1;
+        if remote_slugs.contains(&local.slug) {
+            continue;
         }
+        let never_pushed = sync_get(db, local.id)
+            .await?
+            .is_some_and(|sync| sync.synced_hash.is_none());
+        if never_pushed {
+            log::info!(
+                "Post `{}` is absent from the cloud because it has never been pushed; keeping it",
+                local.slug
+            );
+            continue;
+        }
+
+        let _ = post_stage::Entity::delete_by_id(local.id).exec(db).await;
+        let _ = sync_clear(db, local.id).await;
+        post::Entity::delete_by_id(local.id).exec(db).await?;
+        deleted += 1;
     }
 
     Ok((upserted, deleted))
@@ -294,7 +368,7 @@ pub async fn mirror_posts(
 /// a stale grouping is visible and fixable in the app, whereas a deleted one is
 /// gone. It is worth revisiting once series themselves sync, since only then is
 /// there a remote signal that genuinely means "removed".
-fn resolve_series(
+pub fn resolve_series(
     remote: &post::Model,
     existing: Option<&post::Model>,
     series: &SeriesMap,
@@ -324,14 +398,21 @@ fn unpack(local: Option<(i32, Option<i32>)>) -> (Option<i32>, Option<i32>) {
     }
 }
 
-/// Upsert one remote post into the local cache, keyed by `slug` (cloud wins).
+/// Upsert one remote post into the local cache, keyed by `slug`.
+///
+/// The cloud wins *unless this machine has unpushed changes of its own*. A post
+/// edited here and not there is left alone — overwriting it would silently
+/// delete the edit — and a post edited on **both** sides is left alone and
+/// marked, because there is no answer that does not throw away someone's work.
+/// Only the person can pick; [`crate::commands::resolve_conflict`] is where they
+/// do.
 ///
 /// An existing local row (matched by slug) is overwritten in place, keeping its
 /// local primary key; a new slug is inserted. Staging is reset to the post's
 /// published/draft state so a stale `sync_failed` doesn't linger.
 ///
-/// Series membership is the one field the cloud does *not* win outright — see
-/// [`resolve_series`].
+/// Series membership is the one field the cloud does not win outright even when
+/// it does otherwise — see [`resolve_series`].
 async fn upsert_post_from_remote(
     db: &DatabaseConnection,
     remote: post::Model,
@@ -339,28 +420,28 @@ async fn upsert_post_from_remote(
 ) -> AppResult<()> {
     let existing = post_by_slug(db, &remote.slug).await?;
 
-    // A post with unpushed local edits is left exactly as it is — decided here,
-    // before anything is written, because once the row is overwritten the
-    // evidence of what was local is gone.
+    // A post with unpushed local edits is not overwritten — decided here, before
+    // anything is written, because once the row is overwritten the evidence of
+    // what was local is gone.
     //
     // Applying the cloud's metadata over it and keeping the fingerprint is not a
     // middle course, it is the worst of both: `mirror_posts` never replaces the
     // cached `<slug>.md`, so the post would end up carrying the cloud's title
-    // over the local body, described by a fingerprint that matches neither. A
-    // metadata-only edit would then report unpublished edits forever, having had
-    // the very edit it was reporting silently discarded.
+    // over the local body, described by a fingerprint matching neither.
     //
-    // Leaving it whole keeps the fingerprint true. What a refresh *should* do
-    // about a post edited on both sides is a real question and not this one's to
-    // answer: it is conflict resolution, and it needs somewhere for the person
-    // to say which copy wins.
+    // What *is* taken from the refresh is the cloud's version stamp. It costs
+    // nothing, changes no content, and is the whole basis for telling the two
+    // cases apart afterwards: if the remote has moved too this is a conflict,
+    // and if it has not, the local edit is simply ahead and waiting to be
+    // published.
     if let Some(local) = existing.as_ref() {
         if sync_get(db, local.id)
             .await?
             .is_some_and(|sync| crate::sync_state::local_changed(&sync))
         {
+            sync_observe_remote(db, local.id, remote.updated_at).await?;
             log::info!(
-                "Post `{}` has unpushed local edits; leaving it out of the refresh",
+                "Post `{}` has unpushed local edits; leaving the refresh to the person",
                 remote.slug
             );
             return Ok(());
@@ -368,6 +449,9 @@ async fn upsert_post_from_remote(
     }
 
     let mut model = remote;
+    // Captured before the model is consumed: this is the version of the cloud's
+    // copy that the agreement below is about.
+    let remote_updated_at = model.updated_at;
     let (series_id, series_order) = resolve_series(&model, existing.as_ref(), series);
     model.series_id = series_id;
     model.series_order = series_order;
@@ -387,10 +471,27 @@ async fn upsert_post_from_remote(
     )
     .await?;
 
-    // Only posts with nothing pending reach this point, so the record here
-    // describes nothing and goes — which is what keeps "no record" meaning
-    // "nothing has been touched here".
-    sync_clear(db, saved.id).await?;
+    // Only posts with nothing pending reach this point, so both sides now hold
+    // the same thing — and *which* version of the cloud's copy that is, is the
+    // one fact worth keeping.
+    //
+    // Discarding it instead would quietly break the case this exists for: pull a
+    // clean post, edit it here, let another machine publish, refresh. With no
+    // baseline, that refresh's observation becomes the baseline, the other
+    // machine's change reads as nothing at all, and the next publish overwrites
+    // it without ever offering a choice.
+    //
+    // The fingerprint covers the metadata alone — a refresh never sees the
+    // remote body — which is sound because both hashes are set to the same value
+    // here, so the post reads clean until something local genuinely changes it.
+    sync_agree(
+        db,
+        saved.id,
+        crate::sync_state::content_hash(&saved, ""),
+        Some(remote_updated_at),
+        chrono::Utc::now().timestamp(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -469,6 +570,10 @@ pub async fn sync_set_local(
             local_hash: Set(local_hash),
             synced_hash: Set(row.synced_hash),
             synced_at: Set(row.synced_at),
+            // A local edit says nothing about the cloud; what was observed there
+            // stays observed.
+            remote_updated_at: Set(row.remote_updated_at),
+            remote_seen_at: Set(row.remote_seen_at),
         }
         .update(db)
         .await?,
@@ -477,18 +582,94 @@ pub async fn sync_set_local(
             local_hash: Set(local_hash),
             synced_hash: Set(None),
             synced_at: Set(None),
+            remote_updated_at: Set(None),
+            remote_seen_at: Set(None),
         }
         .insert(db)
         .await?,
     })
 }
 
-/// Record that the cloud has accepted exactly this content: the two
-/// fingerprints agree from here until the next local edit.
-pub async fn sync_mark_synced(
+/// Record what the last refresh saw of the cloud's copy, without touching the
+/// local side. This is the observation `sync_state::remote_changed` compares
+/// against the baseline.
+///
+/// **The first observation becomes the baseline.** A post edited here has a sync
+/// row created by that edit, which knows nothing about the cloud — so without
+/// this, the first refresh would find an observation and no baseline to compare
+/// it against, and reporting "different from nothing" as a change would call
+/// every locally-edited post a conflict the moment anyone pressed Refresh.
+///
+/// The cost is that a remote change made *before* this machine first looked goes
+/// unnoticed. There is no way around that: a version stamp cannot be compared
+/// with one that was never recorded, and inventing a conflict is worse than
+/// admitting the window exists. Every later change is caught, because from here
+/// there is something to compare against.
+pub async fn sync_observe_remote(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+    remote_updated_at: i64,
+) -> AppResult<Option<post_sync::Model>> {
+    let Some(row) = post_sync::Entity::find_by_id(post_id).one(db).await? else {
+        // Nothing local has been touched since this post arrived, so there is no
+        // baseline to be ahead of and nothing to record.
+        return Ok(None);
+    };
+    let baseline = row.remote_updated_at.or(Some(remote_updated_at));
+    Ok(Some(
+        post_sync::ActiveModel {
+            post_id: sea_orm::ActiveValue::Unchanged(post_id),
+            local_hash: Set(row.local_hash),
+            synced_hash: Set(row.synced_hash),
+            synced_at: Set(row.synced_at),
+            remote_updated_at: Set(baseline),
+            remote_seen_at: Set(Some(remote_updated_at)),
+        }
+        .update(db)
+        .await?,
+    ))
+}
+
+/// Accept the cloud's currently-observed version as the baseline, leaving the
+/// local content untouched.
+///
+/// This is "keep local": the remote change has been seen and accounted for, so
+/// the post stops being a conflict, while its own edits stay pending. Nothing
+/// about the local fingerprint moves, because nothing local did.
+pub async fn sync_accept_remote_baseline(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+    baseline: Option<i64>,
+) -> AppResult<Option<post_sync::Model>> {
+    let Some(row) = post_sync::Entity::find_by_id(post_id).one(db).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        post_sync::ActiveModel {
+            post_id: sea_orm::ActiveValue::Unchanged(post_id),
+            local_hash: Set(row.local_hash),
+            synced_hash: Set(row.synced_hash),
+            synced_at: Set(row.synced_at),
+            remote_updated_at: Set(baseline),
+            remote_seen_at: Set(baseline),
+        }
+        .update(db)
+        .await?,
+    ))
+}
+
+/// Declare the two sides in agreement: this content, and this version of the
+/// cloud's copy, are the baseline from here.
+///
+/// Used when a pull is taken wholesale and when a conflict is resolved. The
+/// fingerprint is over the metadata alone — a refresh never sees the remote body
+/// — which is sound because both hashes are set to the same value here, so the
+/// post reads clean until something local genuinely changes it.
+pub async fn sync_agree(
     db: &impl ConnectionTrait,
     post_id: i32,
     hash: String,
+    remote_updated_at: Option<i64>,
     at: i64,
 ) -> AppResult<post_sync::Model> {
     let exists = post_sync::Entity::find_by_id(post_id).one(db).await?.is_some();
@@ -501,8 +682,40 @@ pub async fn sync_mark_synced(
         local_hash: Set(hash.clone()),
         synced_hash: Set(Some(hash)),
         synced_at: Set(Some(at)),
+        remote_updated_at: Set(remote_updated_at),
+        remote_seen_at: Set(remote_updated_at),
     };
     Ok(if exists { model.update(db).await? } else { model.insert(db).await? })
+}
+
+/// Record that the cloud has accepted exactly this content: the two
+/// fingerprints agree from here until the next local edit.
+pub async fn sync_mark_synced(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+    hash: String,
+    remote_updated_at: Option<i64>,
+    at: i64,
+) -> AppResult<post_sync::Model> {
+    let existing = post_sync::Entity::find_by_id(post_id).one(db).await?;
+    // The baseline becomes the version *we just wrote*, not the one last seen
+    // before writing it. A push sets the remote row's `updated_at` to this
+    // post's, so recording anything older leaves the next refresh finding a
+    // remote change — our own — and reporting a conflict against ourselves.
+    let baseline = remote_updated_at.or_else(|| existing.as_ref().and_then(|row| row.remote_seen_at));
+    let model = post_sync::ActiveModel {
+        post_id: if existing.is_some() {
+            sea_orm::ActiveValue::Unchanged(post_id)
+        } else {
+            Set(post_id)
+        },
+        local_hash: Set(hash.clone()),
+        synced_hash: Set(Some(hash)),
+        synced_at: Set(Some(at)),
+        remote_updated_at: Set(baseline),
+        remote_seen_at: Set(baseline),
+    };
+    Ok(if existing.is_some() { model.update(db).await? } else { model.insert(db).await? })
 }
 
 /// Forget a post's sync record. Clearing an absent row is not an error.
@@ -719,7 +932,7 @@ mod tests {
         assert_eq!(row.synced_hash, None, "nothing has been pushed yet");
 
         // A successful push brings the two into line…
-        sync_mark_synced(&db, post.id, "v1".into(), 1_700_000_000).await.unwrap();
+        sync_mark_synced(&db, post.id, "v1".into(), None, 1_700_000_000).await.unwrap();
         let row = sync_get(&db, post.id).await.unwrap().unwrap();
         assert_eq!(row.synced_hash.as_deref(), Some("v1"));
         assert_eq!(row.synced_at, Some(1_700_000_000));
@@ -754,6 +967,125 @@ mod tests {
         );
     }
 
+    /// "Absent from D1" means two different things, and only one of them is a
+    /// deletion. A draft that has never been pushed is simply local work, and
+    /// deleting it for not having been published yet — on a path reached by
+    /// pressing Refresh — destroys it for good.
+    #[tokio::test]
+    async fn an_unpushed_draft_survives_a_refresh_that_does_not_mention_it() {
+        let db = connect_in_memory().await.unwrap();
+        let draft = create::<post::Model>(&db, post_row("local-draft", None, None)).await.unwrap();
+        sync_set_local(&db, draft.id, "never-pushed".into()).await.unwrap();
+
+        // A refresh that knows nothing about it.
+        let (_, deleted) = mirror_posts(&db, vec![post_row("other", None, None)], &[])
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 0);
+        assert!(
+            post_by_slug(&db, "local-draft").await.unwrap().is_some(),
+            "the refresh deleted an unpublished draft"
+        );
+    }
+
+    /// The other half: a post the cloud *did* have and no longer does really was
+    /// deleted there, and the local copy follows.
+    #[tokio::test]
+    async fn a_post_deleted_in_the_cloud_is_removed_locally() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("was-live", None, None)).await.unwrap();
+        sync_mark_synced(&db, post.id, "v1".into(), None, 1_700_000_000).await.unwrap();
+
+        let (_, deleted) = mirror_posts(&db, vec![], &[]).await.unwrap();
+
+        assert_eq!(deleted, 1);
+        assert!(post_by_slug(&db, "was-live").await.unwrap().is_none());
+        assert!(sync_get(&db, post.id).await.unwrap().is_none());
+    }
+
+    /// Keeping the local copy settles the conflict without touching the edit:
+    /// the cloud's version is accounted for, and the post drops to an ordinary
+    /// pending change that still has to be published deliberately.
+    #[tokio::test]
+    async fn keeping_local_settles_a_conflict_without_publishing_it() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+        sync_set_local(&db, post.id, "my-edit".into()).await.unwrap();
+
+        let mut remote = post_row("a-post", None, None);
+        remote.updated_at = 500;
+        mirror_posts(&db, vec![remote.clone()], &[]).await.unwrap();
+        remote.updated_at = 900;
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
+
+        let row = sync_get(&db, post.id).await.unwrap().unwrap();
+        assert_eq!(
+            crate::sync_state::derive(None, Some(&row)),
+            crate::sync_state::SyncState::Conflict
+        );
+
+        sync_accept_remote_baseline(&db, post.id, row.remote_seen_at).await.unwrap();
+
+        let row = sync_get(&db, post.id).await.unwrap().unwrap();
+        assert_eq!(
+            crate::sync_state::derive(None, Some(&row)),
+            crate::sync_state::SyncState::Modified,
+            "the conflict did not settle"
+        );
+        assert_eq!(row.local_hash, "my-edit", "the local edit was disturbed");
+        assert_eq!(row.synced_hash, None, "the edit was marked as published");
+    }
+
+    /// A locally-edited post has a sync row that knows nothing about the cloud,
+    /// so the first refresh has an observation and no baseline. Treating that as
+    /// a change would call every such post a conflict the moment anyone pressed
+    /// Refresh; the first look is the baseline instead.
+    #[tokio::test]
+    async fn the_first_look_at_the_cloud_is_a_baseline_not_a_change() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+        sync_set_local(&db, post.id, "local-edit".into()).await.unwrap();
+
+        let mut remote = post_row("a-post", None, None);
+        remote.updated_at = 500;
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
+
+        let row = sync_get(&db, post.id).await.unwrap().unwrap();
+        assert_eq!(row.remote_updated_at, Some(500), "the first look set no baseline");
+        assert_eq!(
+            crate::sync_state::derive(None, Some(&row)),
+            crate::sync_state::SyncState::Modified,
+            "a first refresh invented a conflict"
+        );
+    }
+
+    /// Once there is a baseline, the cloud moving under a local edit is the
+    /// genuine article — and neither copy may be applied over the other.
+    #[tokio::test]
+    async fn the_cloud_moving_under_a_local_edit_is_a_conflict() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+        sync_set_local(&db, post.id, "local-edit".into()).await.unwrap();
+
+        // First refresh establishes where the cloud stood…
+        let mut remote = post_row("a-post", None, None);
+        remote.updated_at = 500;
+        mirror_posts(&db, vec![remote.clone()], &[]).await.unwrap();
+
+        // …and a later one finds it somewhere else.
+        remote.updated_at = 900;
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
+
+        let row = sync_get(&db, post.id).await.unwrap().unwrap();
+        assert_eq!(
+            crate::sync_state::derive(None, Some(&row)),
+            crate::sync_state::SyncState::Conflict
+        );
+        // And still nothing was applied over the local copy.
+        assert_eq!(row.local_hash, "local-edit");
+    }
+
     /// And the post itself is left whole. Applying the cloud's metadata while
     /// keeping the fingerprint would leave the row describing neither copy —
     /// the cloud's title over the local body — and a metadata-only edit
@@ -774,17 +1106,59 @@ mod tests {
         assert_eq!(after.title, "Local title", "the refresh overwrote a local edit");
     }
 
-    /// Where there is nothing pending, the record describes nothing and goes —
-    /// which is what keeps "no record" meaning "nothing has been touched here".
+    /// Where there is nothing pending, the refresh takes the cloud's copy and
+    /// records *which* version it took.
+    ///
+    /// Keeping that stamp is the whole basis for noticing a later remote change:
+    /// throwing it away would leave the next local edit with no baseline, and
+    /// the change after that — made on another machine — would read as nothing
+    /// at all.
     #[tokio::test]
-    async fn a_refresh_forgets_the_record_of_a_post_with_nothing_pending() {
+    async fn a_refresh_records_the_version_of_the_cloud_it_accepted() {
         let db = connect_in_memory().await.unwrap();
         let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
-        sync_mark_synced(&db, post.id, "v1".into(), 1_700_000_000).await.unwrap();
+        sync_mark_synced(&db, post.id, "v1".into(), None, 1_700_000_000).await.unwrap();
 
-        mirror_posts(&db, vec![post_row("a-post", None, None)], &[]).await.unwrap();
+        let mut remote = post_row("a-post", None, None);
+        remote.updated_at = 4_242;
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
 
-        assert!(sync_get(&db, post.id).await.unwrap().is_none());
+        let row = sync_get(&db, post.id).await.unwrap().unwrap();
+        assert_eq!(row.remote_updated_at, Some(4_242));
+        assert_eq!(row.remote_seen_at, Some(4_242));
+        assert_eq!(
+            crate::sync_state::derive(None, Some(&row)),
+            crate::sync_state::SyncState::Clean,
+            "a post taken wholesale from the cloud is not pending anything"
+        );
+    }
+
+    /// The sequence the baseline exists for: pull a clean post, edit it here,
+    /// let another machine publish, refresh. Without the baseline that first
+    /// pull recorded, the other machine's change reads as nothing and the next
+    /// publish overwrites it silently.
+    #[tokio::test]
+    async fn another_machines_change_after_a_local_edit_is_a_conflict() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+
+        // A clean pull, which records where the cloud stood.
+        let mut remote = post_row("a-post", None, None);
+        remote.updated_at = 100;
+        mirror_posts(&db, vec![remote.clone()], &[]).await.unwrap();
+
+        // Edited here…
+        sync_set_local(&db, post.id, "my-edit".into()).await.unwrap();
+        // …while another machine publishes, and we refresh.
+        remote.updated_at = 700;
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
+
+        let row = sync_get(&db, post.id).await.unwrap().unwrap();
+        assert_eq!(
+            crate::sync_state::derive(None, Some(&row)),
+            crate::sync_state::SyncState::Conflict,
+            "the other machine's change was about to be overwritten silently"
+        );
     }
 
     /// What goes up carries the cloud's id for the series, never this machine's
