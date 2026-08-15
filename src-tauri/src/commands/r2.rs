@@ -241,15 +241,35 @@ impl PreviousState {
 /// back exactly as it was read, row and stage together, which is why
 /// [`PreviousState`] is kept alive across the save.
 ///
+/// Only *this* save is undone. The editor and an MCP client can both be saving
+/// the same post — `mcp_approve_publish` calls this command with a post id the
+/// editor may be writing at that moment — so between our metadata commit and
+/// this compensation another save can commit its own metadata *and* land its
+/// body. Restoring our snapshot then would revert metadata that is not ours to
+/// revert, and leave it describing someone else's body. Their save is newer and
+/// complete; ours is the one that failed, so it yields.
+///
 /// Best effort by necessity: if the compensating write also fails there is
 /// nothing further to try, and the original error is the one the user needs.
 async fn restore_metadata(
     conn: &DatabaseConnection,
     previous: Option<PreviousState>,
-    saved_id: i32,
+    saved: &PostModel,
 ) {
+    let saved_id = saved.id;
     let undone = async {
         let txn = conn.begin().await?;
+
+        // Re-read inside the transaction: if the row is no longer the one we
+        // wrote, someone has saved since and this rollback is not ours to make.
+        // A concurrent commit landing between this read and the writes below is
+        // still possible in principle — narrowing the window is what is on offer
+        // here, not closing it.
+        if db::get::<PostModel>(&txn, saved_id).await?.as_ref() != Some(saved) {
+            log::warn!("Not rolling back post {saved_id}: it has been saved again since");
+            return Ok(());
+        }
+
         match previous {
             Some(before) => {
                 db::update::<PostModel>(&txn, before.post).await?;
@@ -406,7 +426,7 @@ pub async fn save_post(
     //    database and the file disagree is as small as it can be — and if even
     //    that fails, the metadata goes back rather than outliving its body.
     if let Err(e) = staged.commit(&dir.join(format!("{}.md", saved.slug))).await {
-        restore_metadata(conn.inner(), previous, saved.id).await;
+        restore_metadata(conn.inner(), previous, &saved).await;
         return Err(e);
     }
 
@@ -818,9 +838,9 @@ mod tests {
         let mut edited = before.clone();
         edited.title = "Edited".into();
         edited.published = false;
-        commit_metadata(&db, edited, true, Some(99)).await.unwrap();
+        let saved = commit_metadata(&db, edited, true, Some(99)).await.unwrap();
 
-        restore_metadata(&db, Some(previous), before.id).await;
+        restore_metadata(&db, Some(previous), &saved).await;
 
         let now = db::get::<PostModel>(&db, before.id).await.unwrap().unwrap();
         assert_eq!(now.title, "Original");
@@ -847,10 +867,39 @@ mod tests {
         .await
         .unwrap();
 
-        restore_metadata(&db, None, created.id).await;
+        restore_metadata(&db, None, &created).await;
 
         assert!(db::get::<PostModel>(&db, created.id).await.unwrap().is_none());
         assert!(db::stage_get(&db, created.id).await.unwrap().is_none());
+    }
+
+    /// A save that failed must not undo a *different* save that succeeded.
+    ///
+    /// The editor and an MCP client can both be saving one post, so another
+    /// save can commit its metadata and land its body in the window between
+    /// this one's commit and its rollback. Rolling back regardless would revert
+    /// their metadata and leave it describing their body — the exact mismatch
+    /// this whole change exists to prevent.
+    #[tokio::test]
+    async fn a_failed_save_leaves_a_newer_save_alone() {
+        let db = db::connect_in_memory().await.unwrap();
+        let before = db::create::<PostModel>(&db, post("shared", "Original")).await.unwrap();
+        let previous = PreviousState::read(&db, before.id).await.unwrap();
+
+        // Our save commits its metadata…
+        let mut ours = before.clone();
+        ours.title = "Ours".into();
+        let ours = commit_metadata(&db, ours, true, Some(1)).await.unwrap();
+
+        // …then another save commits and completes before our rename fails.
+        let mut theirs = ours.clone();
+        theirs.title = "Theirs".into();
+        commit_metadata(&db, theirs, true, Some(2)).await.unwrap();
+
+        restore_metadata(&db, Some(previous), &ours).await;
+
+        let now = db::get::<PostModel>(&db, before.id).await.unwrap().unwrap();
+        assert_eq!(now.title, "Theirs", "a failed save reverted a newer one");
     }
 
     /// The row and the stage land together, so a saved draft is never a post
