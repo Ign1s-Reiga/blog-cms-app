@@ -4,12 +4,12 @@
 //! here, with the body and image handling that is its distinctive work.
 
 use std::ffi::OsStr;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, TransactionTrait};
 use crate::cloudflare::{self, cf};
 use crate::db;
 use crate::entities::post::Model as PostModel;
@@ -120,6 +120,179 @@ async fn read_staged_asset<'a>(
     Some((file_name, tokio::fs::read(&resolved).await.ok()?))
 }
 
+// ─── Local save ───────────────────────────────────────────────────────────────
+
+/// A post body written beside its destination, waiting to be moved into place.
+///
+/// SQLite and the filesystem cannot share a transaction, so a save is a commit
+/// *sequence*, and the order is chosen to make the gap between the two stores as
+/// small as the platform allows. Writing the bytes is the step that actually
+/// fails — a full disk, a read-only volume, an antivirus holding the file — so
+/// it happens first, before anything is committed. What remains is a rename
+/// within one directory, which is atomic: a reader never observes a half-written
+/// body, and the post's old body stays live right up until the new one is whole.
+struct StagedBody {
+    temp: PathBuf,
+}
+
+impl StagedBody {
+    /// Write `body` to a temporary file in `dir`, which must be the directory it
+    /// will eventually be renamed into — a rename is only atomic within one
+    /// filesystem.
+    ///
+    /// The name is dotted and uuid-suffixed so a crash between here and the
+    /// rename leaves something recognisable as debris rather than something the
+    /// editor might list as a post.
+    async fn write(dir: &Path, body: &str) -> AppResult<Self> {
+        let temp = dir.join(format!(".save-{}.md.tmp", uuid::Uuid::new_v4().simple()));
+        tokio::fs::write(&temp, body)
+            .await
+            .map_err(|e| AppError::io("Failed to write local markdown", e))?;
+        Ok(Self { temp })
+    }
+
+    /// Move the staged body onto `dest`, replacing whatever is there. The
+    /// temporary file is cleaned up either way.
+    async fn commit(self, dest: &Path) -> AppResult<()> {
+        match tokio::fs::rename(&self.temp, dest).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.discard().await;
+                Err(AppError::io("Failed to move the saved markdown into place", e))
+            }
+        }
+    }
+
+    /// Throw the staged body away. Best effort: a leftover temporary file is
+    /// untidy, and the failure that led here is the one worth reporting.
+    async fn discard(self) {
+        if let Err(e) = tokio::fs::remove_file(&self.temp).await {
+            log::warn!("Could not remove staged body {}: {e}", self.temp.display());
+        }
+    }
+}
+
+/// Write the post's row — and, for a draft, its staging row — in one
+/// transaction, so a save cannot record the post without recording what stage
+/// it is in.
+///
+/// A publish's stage is deliberately left out: it is not known yet. It depends
+/// on whether the upload that follows succeeds, and is written once that is
+/// settled.
+async fn commit_metadata(
+    conn: &DatabaseConnection,
+    model: PostModel,
+    existing: bool,
+    draft_staged_at: Option<i64>,
+) -> AppResult<PostModel> {
+    let txn = conn.begin().await?;
+
+    let saved = if existing {
+        db::update::<PostModel>(&txn, model).await?
+    } else {
+        db::create::<PostModel>(&txn, model).await?
+    };
+
+    if let Some(staged_at) = draft_staged_at {
+        db::stage_set(
+            &txn,
+            post_stage::Model {
+                post_id: saved.id,
+                stage: post_stage::DRAFT.to_string(),
+                staged_at,
+            },
+        )
+        .await?;
+    }
+
+    txn.commit().await?;
+    Ok(saved)
+}
+
+/// A post as it stood before the save — everything needed to put it back.
+///
+/// The stage travels with the row because the two can move together: saving a
+/// published post as a draft rewrites both, so restoring only the row would
+/// leave a `published` post staged `draft`.
+#[derive(Clone)]
+struct PreviousState {
+    post: PostModel,
+    stage: Option<post_stage::Model>,
+}
+
+impl PreviousState {
+    /// Read a post and its stage as they currently stand.
+    async fn read(conn: &DatabaseConnection, id: i32) -> AppResult<Self> {
+        Ok(Self {
+            post: db::get::<PostModel>(conn, id)
+                .await?
+                .ok_or(AppError::PostNotFound(id))?,
+            stage: db::stage_get(conn, id).await?,
+        })
+    }
+}
+
+/// Undo a committed metadata write whose body then could not be moved into
+/// place, so the editor is not left showing a saved title over a stale body.
+///
+/// The two cases differ, and neither is optional. A **new** post has no earlier
+/// version to fall back to, so its row and stage go entirely — otherwise the
+/// list gains a post whose body was never written. An **existing** post is put
+/// back exactly as it was read, row and stage together, which is why
+/// [`PreviousState`] is kept alive across the save.
+///
+/// Only *this* save is undone. The editor and an MCP client can both be saving
+/// the same post — `mcp_approve_publish` calls this command with a post id the
+/// editor may be writing at that moment — so between our metadata commit and
+/// this compensation another save can commit its own metadata *and* land its
+/// body. Restoring our snapshot then would revert metadata that is not ours to
+/// revert, and leave it describing someone else's body. Their save is newer and
+/// complete; ours is the one that failed, so it yields.
+///
+/// Best effort by necessity: if the compensating write also fails there is
+/// nothing further to try, and the original error is the one the user needs.
+async fn restore_metadata(
+    conn: &DatabaseConnection,
+    previous: Option<PreviousState>,
+    saved: &PostModel,
+) {
+    let saved_id = saved.id;
+    let undone = async {
+        let txn = conn.begin().await?;
+
+        // Re-read inside the transaction: if the row is no longer the one we
+        // wrote, someone has saved since and this rollback is not ours to make.
+        // A concurrent commit landing between this read and the writes below is
+        // still possible in principle — narrowing the window is what is on offer
+        // here, not closing it.
+        if db::get::<PostModel>(&txn, saved_id).await?.as_ref() != Some(saved) {
+            log::warn!("Not rolling back post {saved_id}: it has been saved again since");
+            return Ok(());
+        }
+
+        match previous {
+            Some(before) => {
+                db::update::<PostModel>(&txn, before.post).await?;
+                match before.stage {
+                    Some(stage) => db::stage_set(&txn, stage).await.map(|_| ())?,
+                    None => db::stage_clear(&txn, saved_id).await?,
+                }
+            }
+            None => {
+                db::stage_clear(&txn, saved_id).await?;
+                db::delete::<PostModel>(&txn, saved_id).await?;
+            }
+        }
+        txn.commit().await?;
+        Ok::<(), AppError>(())
+    }
+    .await;
+
+    if let Err(e) = undone {
+        log::error!("Could not roll back post {saved_id} after a failed body write: {e}");
+    }
+}
+
 // ─── Post content ───────────────────────────────────────────────────────────
 
 /// Read a post's Markdown body (by slug) for the editor.
@@ -189,11 +362,15 @@ pub async fn save_post(
     let now = now_ts();
 
     // Start from the existing row (preserving slug/created_at/series/excerpt) or
-    // build a fresh one for a new post.
-    let mut model = match id {
-        Some(id) => db::get::<PostModel>(conn.inner(), id)
-            .await?
-            .ok_or(AppError::PostNotFound(id))?,
+    // build a fresh one for a new post. The untouched row is kept: it is what
+    // `restore_metadata` writes back if the body cannot be moved into place.
+    let previous = match id {
+        Some(id) => Some(PreviousState::read(conn.inner(), id).await?),
+        None => None,
+    };
+
+    let mut model = match previous.clone() {
+        Some(existing) => existing.post,
         None => {
             let slug = slugify(&title);
             let slug = if slug.is_empty() { format!("post-{now}") } else { slug };
@@ -220,30 +397,41 @@ pub async fn save_post(
     model.published_at = if published { model.published_at.or(Some(now)) } else { None };
     model.updated_at = now;
 
-    // 1. Persist metadata locally.
-    let saved = match id {
-        Some(_) => db::update::<PostModel>(conn.inner(), model).await?,
-        None => db::create::<PostModel>(conn.inner(), model).await?,
-    };
-
-    // 2. Write the Markdown body to the local cache.
     let dir = app
         .path()
         .app_data_dir()
         .map_err(AppError::AppDataDir)?
         .join("posts");
-    let _ = tokio::fs::create_dir_all(&dir).await;
-    tokio::fs::write(dir.join(format!("{}.md", saved.slug)), &body)
+    tokio::fs::create_dir_all(&dir)
         .await
-        .map_err(|e| AppError::io("Failed to write local markdown", e))?;
+        .map_err(|e| AppError::io("Failed to create posts dir", e))?;
 
-    // 3. Draft → local only. Publish → push the body to R2 and metadata to D1.
+    // 1. Stage the body. Nothing else has changed yet, so a disk that cannot
+    //    take the write leaves the post exactly as it was.
+    let staged = StagedBody::write(&dir, &body).await?;
+
+    // 2. Commit the metadata, with the staging row when a draft's stage is
+    //    already known.
+    let saved = match commit_metadata(conn.inner(), model, id.is_some(), (!published).then_some(now))
+        .await
+    {
+        Ok(saved) => saved,
+        Err(e) => {
+            staged.discard().await;
+            return Err(e);
+        }
+    };
+
+    // 3. Swap the new body in. Only a rename is left, so the window in which the
+    //    database and the file disagree is as small as it can be — and if even
+    //    that fails, the metadata goes back rather than outliving its body.
+    if let Err(e) = staged.commit(&dir.join(format!("{}.md", saved.slug))).await {
+        restore_metadata(conn.inner(), previous, &saved).await;
+        return Err(e);
+    }
+
+    // 4. Draft → local only. Publish → push the body to R2 and metadata to D1.
     if !published {
-        db::stage_set(
-            conn.inner(),
-            post_stage::Model { post_id: saved.id, stage: post_stage::DRAFT.to_string(), staged_at: now },
-        )
-        .await?;
         return Ok(saved);
     }
 
@@ -535,6 +723,211 @@ mod tests {
             extract_asset_refs(body),
             vec!["assets/ok.png", "assets/../../secret.env"]
         );
+    }
+
+    /// A scratch directory of this test's own, removed on the way out.
+    async fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("blog-cms-{label}-{}", uuid::Uuid::new_v4().simple()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        dir
+    }
+
+    /// The ordinary path: the body lands whole and the temporary file is gone.
+    #[tokio::test]
+    async fn a_staged_body_replaces_the_destination_and_leaves_no_debris() {
+        let dir = temp_dir("staged").await;
+        let dest = dir.join("post.md");
+        tokio::fs::write(&dest, "old body").await.unwrap();
+
+        StagedBody::write(&dir, "new body")
+            .await
+            .unwrap()
+            .commit(&dest)
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read_to_string(&dest).await.unwrap(), "new body");
+        assert_eq!(remaining(&dir).await, vec!["post.md"]);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// The failure this whole sequence exists for. The rename cannot happen, so
+    /// the post's old body must still be the one on disk — and the staged copy
+    /// must not be left lying around.
+    #[tokio::test]
+    async fn a_body_that_cannot_be_moved_into_place_leaves_the_old_one_live() {
+        let dir = temp_dir("blocked").await;
+        // A directory cannot be replaced by a rename on either platform, which
+        // is the most portable way to make the move fail.
+        let dest = dir.join("post.md");
+        tokio::fs::create_dir(&dest).await.unwrap();
+        tokio::fs::write(dest.join("marker"), "still here").await.unwrap();
+
+        let staged = StagedBody::write(&dir, "new body").await.unwrap();
+        assert!(staged.commit(&dest).await.is_err());
+
+        // The destination is untouched, and only it remains.
+        assert_eq!(
+            tokio::fs::read_to_string(dest.join("marker")).await.unwrap(),
+            "still here"
+        );
+        assert_eq!(remaining(&dir).await, vec!["post.md"]);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn a_discarded_body_is_removed() {
+        let dir = temp_dir("discard").await;
+        StagedBody::write(&dir, "unwanted").await.unwrap().discard().await;
+        assert!(remaining(&dir).await.is_empty());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Everything left in `dir`, sorted — the staged body is named so that a
+    /// leak shows up here.
+    async fn remaining(dir: &Path) -> Vec<String> {
+        let mut entries = tokio::fs::read_dir(dir).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        names
+    }
+
+    fn post(slug: &str, title: &str) -> PostModel {
+        PostModel {
+            id: 0,
+            slug: slug.to_string(),
+            title: title.to_string(),
+            excerpt: None,
+            tags: None,
+            published: false,
+            published_at: None,
+            series_id: None,
+            series_order: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// An existing post is put back the way it was read, so the editor is never
+    /// left showing a saved title over the body it failed to replace.
+    #[tokio::test]
+    async fn rolling_back_an_existing_post_restores_the_previous_row() {
+        let db = db::connect_in_memory().await.unwrap();
+        let mut original = post("a-post", "Original");
+        original.published = true;
+        let before = db::create::<PostModel>(&db, original).await.unwrap();
+        db::stage_set(
+            &db,
+            post_stage::Model {
+                post_id: before.id,
+                stage: post_stage::PUBLISHED.to_string(),
+                staged_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let previous = PreviousState::read(&db, before.id).await.unwrap();
+
+        // Save it as a retitled draft — which rewrites the row *and* the stage.
+        let mut edited = before.clone();
+        edited.title = "Edited".into();
+        edited.published = false;
+        let saved = commit_metadata(&db, edited, true, Some(99)).await.unwrap();
+
+        restore_metadata(&db, Some(previous), &saved).await;
+
+        let now = db::get::<PostModel>(&db, before.id).await.unwrap().unwrap();
+        assert_eq!(now.title, "Original");
+        assert!(now.published);
+        // Restoring only the row would leave a published post staged `draft`.
+        let stage = db::stage_get(&db, before.id).await.unwrap().unwrap();
+        assert_eq!(stage.stage, post_stage::PUBLISHED);
+    }
+
+    /// A new post has no earlier version to fall back to, so the row and its
+    /// stage go — otherwise the list gains a post whose body was never written.
+    #[tokio::test]
+    async fn rolling_back_a_new_post_removes_the_row_and_its_stage() {
+        let db = db::connect_in_memory().await.unwrap();
+        let created = db::create::<PostModel>(&db, post("new-post", "New")).await.unwrap();
+        db::stage_set(
+            &db,
+            post_stage::Model {
+                post_id: created.id,
+                stage: post_stage::DRAFT.to_string(),
+                staged_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        restore_metadata(&db, None, &created).await;
+
+        assert!(db::get::<PostModel>(&db, created.id).await.unwrap().is_none());
+        assert!(db::stage_get(&db, created.id).await.unwrap().is_none());
+    }
+
+    /// A save that failed must not undo a *different* save that succeeded.
+    ///
+    /// The editor and an MCP client can both be saving one post, so another
+    /// save can commit its metadata and land its body in the window between
+    /// this one's commit and its rollback. Rolling back regardless would revert
+    /// their metadata and leave it describing their body — the exact mismatch
+    /// this whole change exists to prevent.
+    #[tokio::test]
+    async fn a_failed_save_leaves_a_newer_save_alone() {
+        let db = db::connect_in_memory().await.unwrap();
+        let before = db::create::<PostModel>(&db, post("shared", "Original")).await.unwrap();
+        let previous = PreviousState::read(&db, before.id).await.unwrap();
+
+        // Our save commits its metadata…
+        let mut ours = before.clone();
+        ours.title = "Ours".into();
+        let ours = commit_metadata(&db, ours, true, Some(1)).await.unwrap();
+
+        // …then another save commits and completes before our rename fails.
+        let mut theirs = ours.clone();
+        theirs.title = "Theirs".into();
+        commit_metadata(&db, theirs, true, Some(2)).await.unwrap();
+
+        restore_metadata(&db, Some(previous), &ours).await;
+
+        let now = db::get::<PostModel>(&db, before.id).await.unwrap().unwrap();
+        assert_eq!(now.title, "Theirs", "a failed save reverted a newer one");
+    }
+
+    /// The row and the stage land together, so a saved draft is never a post
+    /// with no stage at all.
+    #[tokio::test]
+    async fn a_draft_commits_its_stage_with_its_row() {
+        let db = db::connect_in_memory().await.unwrap();
+
+        let saved = commit_metadata(&db, post("drafted", "Drafted"), false, Some(1_700_000_000))
+            .await
+            .unwrap();
+
+        let stage = db::stage_get(&db, saved.id).await.unwrap().unwrap();
+        assert_eq!(stage.stage, post_stage::DRAFT);
+        assert_eq!(stage.staged_at, 1_700_000_000);
+    }
+
+    /// A publish's stage is not known until the upload has been tried, so the
+    /// transaction must not invent one.
+    #[tokio::test]
+    async fn a_publish_leaves_its_stage_for_the_upload_to_decide() {
+        let db = db::connect_in_memory().await.unwrap();
+
+        let saved = commit_metadata(&db, post("publishing", "Publishing"), false, None)
+            .await
+            .unwrap();
+
+        assert!(db::stage_get(&db, saved.id).await.unwrap().is_none());
     }
 
     /// Publishing uploads whatever these references resolve to, so a body that
