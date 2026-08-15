@@ -520,7 +520,10 @@ pub async fn save_post(
     // that did not means it holds the previous version, and the post has to keep
     // saying so rather than reading as freshly published.
     if synced.is_ok() {
-        db::sync_mark_synced(conn.inner(), saved.id, hash, now).await?;
+        // `d1_post_upsert` writes this post's own `updated_at` into D1, so that
+        // is the cloud's version now — record it as the baseline, or the next
+        // refresh reads our own push as somebody else's change.
+        db::sync_mark_synced(conn.inner(), saved.id, hash, Some(saved.updated_at), now).await?;
     } else {
         db::sync_set_local(conn.inner(), saved.id, hash).await?;
     }
@@ -627,10 +630,14 @@ pub async fn resolve_conflict(
 
             let mut model = remote;
             model.id = post.id;
-            model.series_id = model.series_id.and_then(|id| series.to_local(id));
-            if model.series_id.is_none() {
-                model.series_order = None;
-            }
+            // The same rule a refresh uses, and for the same reason: the cloud
+            // cannot distinguish "not in a series" from "in a series that only
+            // exists here", so taking its answer literally would drop the
+            // grouping of every post filed under a local-only series. Settling a
+            // conflict about *content* has no business deleting that.
+            let (series_id, series_order) = db::resolve_series(&model, Some(&post), &series);
+            model.series_id = series_id;
+            model.series_order = series_order;
             let remote_updated_at = model.updated_at;
 
             let saved = db::update::<PostModel>(conn.inner(), model).await?;
