@@ -146,22 +146,81 @@ pub async fn post_by_slug(db: &impl ConnectionTrait, slug: &str) -> AppResult<Op
         .await?)
 }
 
+// ─── Series identity across the two databases ─────────────────────────────────
+
+/// Translates series references between the local database and D1.
+///
+/// The two number their rows independently — a local `series.id` and a remote
+/// one are unrelated integers that happen to share a type — so a post's
+/// `series_id` means nothing until it is read in the right database. `slug` is
+/// the identity both sides agree on (it is unique in each), so every crossing
+/// goes id → slug → id.
+///
+/// Built once per sync rather than queried per post: a refresh walks every post,
+/// and there are only ever a handful of series.
+#[derive(Default)]
+pub struct SeriesMap {
+    /// Remote id → the local id wearing the same slug.
+    inbound: std::collections::HashMap<i32, i32>,
+    /// Local id → the remote id wearing the same slug.
+    outbound: std::collections::HashMap<i32, i32>,
+}
+
+impl SeriesMap {
+    /// Pair up the local series table with the cloud's by slug.
+    pub async fn build(
+        db: &impl ConnectionTrait,
+        remote: &[series::Model],
+    ) -> AppResult<Self> {
+        let locals = series::Entity::find().all(db).await?;
+        let by_slug: std::collections::HashMap<&str, i32> =
+            locals.iter().map(|s| (s.slug.as_str(), s.id)).collect();
+
+        let mut map = Self::default();
+        for remote in remote {
+            if let Some(&local_id) = by_slug.get(remote.slug.as_str()) {
+                map.inbound.insert(remote.id, local_id);
+                map.outbound.insert(local_id, remote.id);
+            }
+        }
+        Ok(map)
+    }
+
+    /// The local series id for a remote one, or `None` when no local series
+    /// carries that slug.
+    pub fn to_local(&self, remote_id: i32) -> Option<i32> {
+        self.inbound.get(&remote_id).copied()
+    }
+
+    /// The remote series id for a local one, or `None` when the cloud has no
+    /// series with that slug — series themselves are not synced, so a local-only
+    /// series simply has no counterpart yet.
+    pub fn to_remote(&self, local_id: i32) -> Option<i32> {
+        self.outbound.get(&local_id).copied()
+    }
+}
+
 /// Mirror the local posts table onto the cloud's set of posts, keyed by `slug`.
 ///
 /// The cloud is authoritative: every remote post is upserted into the local
 /// cache (overwriting the local copy), and local posts whose slug isn't in the
 /// remote set are deleted — so `local == remote` afterwards. Unsynced local-only
 /// drafts are therefore removed. Returns `(upserted, deleted)`.
+///
+/// `remote_series` is the cloud's series table, needed to translate each post's
+/// `series_id` into the local row it means.
 pub async fn mirror_posts(
     db: &DatabaseConnection,
     remote: Vec<post::Model>,
+    remote_series: &[series::Model],
 ) -> AppResult<(usize, usize)> {
     let remote_slugs: std::collections::HashSet<String> =
         remote.iter().map(|p| p.slug.clone()).collect();
     let upserted = remote.len();
+    let series = SeriesMap::build(db, remote_series).await?;
 
     for post in remote {
-        upsert_post_from_remote(db, post).await?;
+        upsert_post_from_remote(db, post, &series).await?;
     }
 
     // Drop anything local that no longer exists remotely (+ its staging row).
@@ -178,18 +237,80 @@ pub async fn mirror_posts(
     Ok((upserted, deleted))
 }
 
+/// What series a refreshed post should belong to locally, as `(id, order)`.
+///
+/// Every other column on a pull is "cloud wins", and series membership
+/// deliberately is not. The cloud is not authoritative about it: series rows
+/// themselves are never synced, so a post filed under a local-only series has
+/// nothing on the remote row to say so. Taking the cloud's answer there — as
+/// clearing the columns outright did — throws away editorial grouping that
+/// nothing else records.
+///
+/// So:
+///
+/// * **The remote names a series we know** → use the local row wearing that
+///   slug. The remote integer itself is never stored; it means nothing here.
+/// * **The remote names a series we do not know** → keep whatever the post is
+///   already filed under, and say so in the log. The series may be one this
+///   machine has not pulled, and guessing wrong loses the local grouping.
+/// * **The remote names no series** → keep the local membership. "No series"
+///   over there is indistinguishable from "this was never pushed", and only one
+///   of those two readings is recoverable if it turns out to be wrong.
+///
+/// The cost is that removing a post from a series in the cloud does not
+/// propagate down. That is the right way round while series do not sync at all:
+/// a stale grouping is visible and fixable in the app, whereas a deleted one is
+/// gone. It is worth revisiting once series themselves sync, since only then is
+/// there a remote signal that genuinely means "removed".
+fn resolve_series(
+    remote: &post::Model,
+    existing: Option<&post::Model>,
+    series: &SeriesMap,
+) -> (Option<i32>, Option<i32>) {
+    let local = existing.and_then(|p| p.series_id.map(|id| (id, p.series_order)));
+
+    match remote.series_id {
+        Some(remote_id) => match series.to_local(remote_id) {
+            Some(local_id) => (Some(local_id), remote.series_order),
+            None => {
+                log::warn!(
+                    "Post `{}` references remote series {remote_id}, which has no local \
+                     counterpart; keeping its existing series membership",
+                    remote.slug
+                );
+                unpack(local)
+            }
+        },
+        None => unpack(local),
+    }
+}
+
+fn unpack(local: Option<(i32, Option<i32>)>) -> (Option<i32>, Option<i32>) {
+    match local {
+        Some((id, order)) => (Some(id), order),
+        None => (None, None),
+    }
+}
+
 /// Upsert one remote post into the local cache, keyed by `slug` (cloud wins).
 ///
 /// An existing local row (matched by slug) is overwritten in place, keeping its
 /// local primary key; a new slug is inserted. Staging is reset to the post's
-/// published/draft state so a stale `sync_failed` doesn't linger. Series linkage
-/// is dropped — series aren't synced and remote ids don't map to local rows.
-async fn upsert_post_from_remote(db: &DatabaseConnection, remote: post::Model) -> AppResult<()> {
+/// published/draft state so a stale `sync_failed` doesn't linger.
+///
+/// Series membership is the one field the cloud does *not* win outright — see
+/// [`resolve_series`].
+async fn upsert_post_from_remote(
+    db: &DatabaseConnection,
+    remote: post::Model,
+    series: &SeriesMap,
+) -> AppResult<()> {
     let existing = post_by_slug(db, &remote.slug).await?;
 
     let mut model = remote;
-    model.series_id = None;
-    model.series_order = None;
+    let (series_id, series_order) = resolve_series(&model, existing.as_ref(), series);
+    model.series_id = series_id;
+    model.series_order = series_order;
 
     let saved = match existing {
         Some(local) => {
@@ -322,4 +443,144 @@ pub async fn seed_sample_posts(db: &DatabaseConnection) -> AppResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn series_row(id: i32, slug: &str) -> series::Model {
+        series::Model {
+            id,
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            description: None,
+            created_at: 0,
+        }
+    }
+
+    fn post_row(slug: &str, series_id: Option<i32>, series_order: Option<i32>) -> post::Model {
+        post::Model {
+            id: 0,
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            excerpt: None,
+            tags: None,
+            published: true,
+            published_at: None,
+            series_id,
+            series_order,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// Seed a local series and a post filed under it, and hand back both ids.
+    async fn local_post_in_series(
+        db: &DatabaseConnection,
+        series_slug: &str,
+        post_slug: &str,
+    ) -> (i32, i32) {
+        let series = create::<series::Model>(db, series_row(0, series_slug)).await.unwrap();
+        let post = create::<post::Model>(db, post_row(post_slug, Some(series.id), Some(3)))
+            .await
+            .unwrap();
+        (series.id, post.id)
+    }
+
+    /// The mapping must go through the slug, never the integer. Here the same
+    /// series is row 1 locally and row 42 in the cloud — if the remote id were
+    /// stored as-is, the post would point at nothing.
+    #[tokio::test]
+    async fn a_remote_series_resolves_by_slug_not_by_id() {
+        let db = connect_in_memory().await.unwrap();
+        let (local_series, _) = local_post_in_series(&db, "rust", "a-post").await;
+
+        let remote_series = vec![series_row(42, "rust")];
+        mirror_posts(&db, vec![post_row("a-post", Some(42), Some(7))], &remote_series)
+            .await
+            .unwrap();
+
+        let post = post_by_slug(&db, "a-post").await.unwrap().unwrap();
+        assert_eq!(post.series_id, Some(local_series));
+        assert_ne!(post.series_id, Some(42), "the remote id was stored verbatim");
+        assert_eq!(post.series_order, Some(7));
+    }
+
+    /// The data loss this issue is about: series are not synced, so a post filed
+    /// under a local series has nothing on the remote row saying so, and a
+    /// refresh used to clear it.
+    #[tokio::test]
+    async fn a_refresh_keeps_a_local_series_the_cloud_knows_nothing_about() {
+        let db = connect_in_memory().await.unwrap();
+        let (local_series, _) = local_post_in_series(&db, "local-only", "a-post").await;
+
+        // The cloud has the post, but no series at all.
+        mirror_posts(&db, vec![post_row("a-post", None, None)], &[]).await.unwrap();
+
+        let post = post_by_slug(&db, "a-post").await.unwrap().unwrap();
+        assert_eq!(post.series_id, Some(local_series), "the refresh dropped the series");
+        assert_eq!(post.series_order, Some(3));
+    }
+
+    /// An unresolvable reference keeps what is already there rather than
+    /// guessing — the series may simply not have reached this machine.
+    #[tokio::test]
+    async fn an_unknown_remote_series_leaves_the_local_grouping_alone() {
+        let db = connect_in_memory().await.unwrap();
+        let (local_series, _) = local_post_in_series(&db, "rust", "a-post").await;
+
+        // Remote post points at a series that is in no series table we have.
+        mirror_posts(&db, vec![post_row("a-post", Some(99), Some(1))], &[]).await.unwrap();
+
+        let post = post_by_slug(&db, "a-post").await.unwrap().unwrap();
+        assert_eq!(post.series_id, Some(local_series));
+        assert_eq!(post.series_order, Some(3));
+    }
+
+    /// A post that has never been in a series stays out of one.
+    #[tokio::test]
+    async fn a_post_with_no_series_on_either_side_stays_unfiled() {
+        let db = connect_in_memory().await.unwrap();
+        create::<post::Model>(&db, post_row("plain", None, None)).await.unwrap();
+
+        mirror_posts(&db, vec![post_row("plain", None, None)], &[]).await.unwrap();
+
+        let post = post_by_slug(&db, "plain").await.unwrap().unwrap();
+        assert_eq!(post.series_id, None);
+        assert_eq!(post.series_order, None);
+    }
+
+    /// A post arriving for the first time takes the cloud's grouping, translated.
+    #[tokio::test]
+    async fn a_new_remote_post_lands_in_the_matching_local_series() {
+        let db = connect_in_memory().await.unwrap();
+        let series = create::<series::Model>(&db, series_row(0, "rust")).await.unwrap();
+
+        mirror_posts(&db, vec![post_row("fresh", Some(5), Some(2))], &[series_row(5, "rust")])
+            .await
+            .unwrap();
+
+        let post = post_by_slug(&db, "fresh").await.unwrap().unwrap();
+        assert_eq!(post.series_id, Some(series.id));
+        assert_eq!(post.series_order, Some(2));
+    }
+
+    /// The push direction of the same translation: what goes up must be the
+    /// cloud's id for the series, not this machine's.
+    #[tokio::test]
+    async fn the_map_translates_in_both_directions() {
+        let db = connect_in_memory().await.unwrap();
+        let local = create::<series::Model>(&db, series_row(0, "rust")).await.unwrap();
+
+        let map = SeriesMap::build(&db, &[series_row(42, "rust"), series_row(7, "elsewhere")])
+            .await
+            .unwrap();
+
+        assert_eq!(map.to_local(42), Some(local.id));
+        assert_eq!(map.to_remote(local.id), Some(42));
+        // A remote series with no local counterpart maps nowhere.
+        assert_eq!(map.to_local(7), None);
+        assert_eq!(map.to_remote(999), None);
+    }
 }

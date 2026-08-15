@@ -155,11 +155,31 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize>
     let (client, config) = cf()?;
     let now = now_ts();
 
+    // A local `series_id` is a local primary key and means nothing in D1, so it
+    // is translated through the slug both databases agree on. Sending it raw
+    // would file the post under whichever unrelated remote series happened to
+    // land on that number.
+    let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
+    let series = db::SeriesMap::build(conn.inner(), &remote_series).await?;
+
     let mut synced = 0usize;
     let mut failed = 0usize;
-    for post in posts {
+    for mut post in posts {
         let post_id = post.id;
         let published = post.published;
+        // A series that exists only on this machine has no remote counterpart
+        // to point at. The post still pushes; its grouping stays local, and the
+        // refresh path preserves it rather than reading the gap as a removal.
+        if let Some(local_id) = post.series_id {
+            post.series_id = series.to_remote(local_id);
+            if post.series_id.is_none() {
+                post.series_order = None;
+                log::info!(
+                    "Post `{}` is in a series the cloud does not have; pushing it unfiled",
+                    post.slug
+                );
+            }
+        }
         let stage = match cloudflare::d1_post_upsert(&client, &config, post).await {
             Ok(()) => {
                 synced += 1;
@@ -189,10 +209,14 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize>
 /// posts table an exact copy of D1. This is the "refresh" path — the UI reads
 /// local data, and this brings it in sync on app launch and when the refresh
 /// button is pressed. Returns the number of remote posts mirrored.
+///
+/// The cloud's series table comes down alongside the posts, because a post's
+/// remote `series_id` cannot be read without it.
 #[tauri::command]
 pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> AppResult<usize> {
     let (client, config) = cf()?;
     let remote = cloudflare::d1_list::<PostModel>(&client, &config).await?;
-    let (upserted, _deleted) = db::mirror_posts(conn.inner(), remote).await?;
+    let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
+    let (upserted, _deleted) = db::mirror_posts(conn.inner(), remote, &remote_series).await?;
     Ok(upserted)
 }
