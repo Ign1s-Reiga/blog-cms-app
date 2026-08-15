@@ -32,6 +32,7 @@ use crate::db;
 use crate::entities::post::Model as PostModel;
 use crate::entities::post_stage;
 use crate::entities::series::Model as SeriesModel;
+use crate::sync_state::{self, SyncState};
 
 use super::publish;
 
@@ -55,6 +56,14 @@ pub struct PostOut {
     pub updated_at: i64,
     /// Local editorial stage: `draft`, `published`, or `sync_failed`.
     pub stage: Option<String>,
+    /// Whether the local copy matches what readers are served: `clean`,
+    /// `modified`, or `sync_failed`.
+    ///
+    /// An agent editing a published post through `update_draft` moves this to
+    /// `modified` — its changes are saved here and are not live until a human
+    /// approves a publish. Reported so the agent can say so rather than assume
+    /// the edit reached the blog.
+    pub sync_state: SyncState,
     /// The Markdown body. Only filled in by `get_post`; listing posts leaves it
     /// out so a large blog does not return megabytes of prose per call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,7 +164,12 @@ fn tags_to_csv(tags: &[String]) -> String {
         .join(",")
 }
 
-fn to_out(post: PostModel, stage: Option<String>, body: Option<String>) -> PostOut {
+fn to_out(
+    post: PostModel,
+    stage: Option<String>,
+    sync_state: SyncState,
+    body: Option<String>,
+) -> PostOut {
     PostOut {
         id: post.id,
         slug: post.slug,
@@ -169,6 +183,7 @@ fn to_out(post: PostModel, stage: Option<String>, body: Option<String>) -> PostO
         created_at: post.created_at,
         updated_at: post.updated_at,
         stage,
+        sync_state,
         body,
     }
 }
@@ -206,12 +221,14 @@ impl BlogMcp {
             .ok_or_else(|| invalid(format!("No post with id {id}")))
     }
 
-    async fn stage_of(&self, post_id: i32) -> Option<String> {
-        db::stage_get(self.conn().inner(), post_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|s| s.stage)
+    /// A post's editorial stage and how its content compares with the cloud —
+    /// the same two facts the desktop list shows, read the same way.
+    async fn state_of(&self, post_id: i32) -> (Option<String>, SyncState) {
+        let conn = self.conn();
+        let stage = db::stage_get(conn.inner(), post_id).await.ok().flatten();
+        let sync = db::sync_get(conn.inner(), post_id).await.ok().flatten();
+        let state = sync_state::derive(stage.as_ref(), sync.as_ref());
+        (stage.map(|s| s.stage), state)
     }
 }
 
@@ -230,8 +247,8 @@ impl BlogMcp {
 
         let mut out = Vec::with_capacity(posts.len());
         for post in posts {
-            let stage = self.stage_of(post.id).await;
-            out.push(to_out(post, stage, None));
+            let (stage, sync) = self.state_of(post.id).await;
+            out.push(to_out(post, stage, sync, None));
         }
         Ok(Json(out))
     }
@@ -242,13 +259,13 @@ impl BlogMcp {
         Parameters(params): Parameters<GetPostParams>,
     ) -> Result<Json<PostOut>, ErrorData> {
         let post = self.load_post(params.id).await?;
-        let stage = self.stage_of(post.id).await;
+        let (stage, sync) = self.state_of(post.id).await;
         // Goes through the command so a post whose body only exists in R2 is
         // downloaded and cached, exactly as it would be for the editor.
         let body = commands::read_post_markdown(self.app.clone(), post.slug.clone())
             .await
             .map_err(internal)?;
-        Ok(Json(to_out(post, stage, Some(body))))
+        Ok(Json(to_out(post, stage, sync, Some(body))))
     }
 
     #[tool(
@@ -276,8 +293,8 @@ impl BlogMcp {
         .await
         .map_err(internal)?;
 
-        let stage = self.stage_of(saved.id).await;
-        Ok(Json(to_out(saved, stage, None)))
+        let (stage, sync) = self.state_of(saved.id).await;
+        Ok(Json(to_out(saved, stage, sync, None)))
     }
 
     #[tool(
@@ -321,15 +338,36 @@ impl BlogMcp {
             .await
             .map_err(internal)?;
 
-        if let Some(body) = params.body {
-            let dir = self.posts_dir()?;
-            tokio::fs::create_dir_all(&dir)
+        // The body on disk after this edit — the replacement when one was sent,
+        // otherwise whatever is already cached. Either way it is what the
+        // fingerprint below has to cover.
+        let body = match params.body {
+            Some(body) => {
+                let dir = self.posts_dir()?;
+                tokio::fs::create_dir_all(&dir)
+                    .await
+                    .map_err(|e| internal(format!("Failed to create posts dir: {e}")))?;
+                tokio::fs::write(dir.join(format!("{slug}.md")), &body)
+                    .await
+                    .map_err(|e| internal(format!("Failed to write local markdown: {e}")))?;
+                body
+            }
+            None => commands::read_post_markdown(self.app.clone(), slug.clone())
                 .await
-                .map_err(|e| internal(format!("Failed to create posts dir: {e}")))?;
-            tokio::fs::write(dir.join(format!("{slug}.md")), body)
-                .await
-                .map_err(|e| internal(format!("Failed to write local markdown: {e}")))?;
-        }
+                .map_err(internal)?,
+        };
+
+        // This is the edit the issue is about: a published post stays published
+        // while its text changes here and nowhere else. Recording the local
+        // fingerprint is what lets the app say so, and it is deliberately the
+        // same call the desktop editor makes — one state model, not two.
+        db::sync_set_local(
+            self.conn().inner(),
+            saved.id,
+            crate::sync_state::content_hash(&saved, &body),
+        )
+        .await
+        .map_err(internal)?;
 
         // An unpublished post stays a draft. A published one keeps whatever
         // stage it had: it is still live with its old body, and the stage moves
@@ -347,8 +385,8 @@ impl BlogMcp {
             .map_err(internal)?;
         }
 
-        let stage = self.stage_of(saved.id).await;
-        Ok(Json(to_out(saved, stage, None)))
+        let (stage, sync) = self.state_of(saved.id).await;
+        Ok(Json(to_out(saved, stage, sync, None)))
     }
 
     #[tool(description = "List the series posts can be grouped into.")]

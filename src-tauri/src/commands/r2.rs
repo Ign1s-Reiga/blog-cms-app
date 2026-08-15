@@ -17,6 +17,7 @@ use crate::entities::post_stage;
 use crate::error::{AppError, AppResult};
 use crate::imaging::{self, StagedImage};
 use crate::media_keys;
+use crate::sync_state;
 use super::*;
 
 /// A safe single path segment for the local media cache: one ordinary file
@@ -430,8 +431,14 @@ pub async fn save_post(
         return Err(e);
     }
 
-    // 4. Draft → local only. Publish → push the body to R2 and metadata to D1.
+    // 4. Fingerprint what is now on this machine, so the difference between
+    //    "published" and "published, and then edited" is recorded rather than
+    //    inferred.
+    let hash = sync_state::content_hash(&saved, &body);
+
+    // 5. Draft → local only. Publish → push the body to R2 and metadata to D1.
     if !published {
+        db::sync_set_local(conn.inner(), saved.id, hash).await?;
         return Ok(saved);
     }
 
@@ -486,6 +493,15 @@ pub async fn save_post(
         post_stage::Model { post_id: saved.id, stage: stage.to_string(), staged_at: now },
     )
     .await?;
+
+    // A push that landed means the cloud now holds exactly this content. A push
+    // that did not means it holds the previous version, and the post has to keep
+    // saying so rather than reading as freshly published.
+    if synced.is_ok() {
+        db::sync_mark_synced(conn.inner(), saved.id, hash, now).await?;
+    } else {
+        db::sync_set_local(conn.inner(), saved.id, hash).await?;
+    }
 
     match synced {
         Ok(()) => Ok(saved),

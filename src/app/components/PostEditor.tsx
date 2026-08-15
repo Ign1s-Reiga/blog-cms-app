@@ -25,6 +25,7 @@ import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { appDataDir, join } from '@tauri-apps/api/path';
 import { Button } from '@/components/ui/button';
+import { StatusPill } from '@/components/StatusPill';
 import { MediaPicker, type MediaEntry } from '@/components/MediaPicker';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
@@ -135,6 +136,24 @@ function parseTags(tags: string | null): string {
   return '';
 }
 
+/// Mirrors `SyncState` in `src-tauri/src/sync_state.rs`.
+type SyncState = 'clean' | 'modified' | 'sync_failed';
+
+/// This post's sync state, read from the whole-library query the posts list
+/// already uses. A blog's worth of rows is small enough that a second command
+/// for one of them would be surface without benefit.
+async function readSyncState(
+  invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
+  id: number,
+): Promise<SyncState> {
+  try {
+    const states = await invoke<{ post_id: number; state: SyncState }[]>('list_sync_states');
+    return states.find((s) => s.post_id === id)?.state ?? 'clean';
+  } catch {
+    return 'clean';
+  }
+}
+
 // Editor save/publish status, for button feedback.
 type SaveState =
   | { kind: 'idle' }
@@ -151,6 +170,10 @@ export function PostEditor() {
 
   const [postId, setPostId] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' });
+  // Whether this post is live, and whether what is live is what is here. A new
+  // post is neither, so it starts clean and unpublished.
+  const [live, setLive] = useState(false);
+  const [sync, setSync] = useState<SyncState>('clean');
 
   // When the editor is opened with an `?id=` in the URL, load that post's
   // metadata and Markdown body. read_post_markdown downloads the file from R2
@@ -165,12 +188,20 @@ export function PostEditor() {
       if (!isTauri()) return;
       try {
         // Load the post from the local cache, then its Markdown by slug.
-        const post = await invoke<{ title: string; tags: string | null; slug: string } | null>('get_post', { id });
+        const post = await invoke<{
+          title: string;
+          tags: string | null;
+          slug: string;
+          published: boolean;
+        } | null>('get_post', { id });
         if (post && !cancelled) {
           setTitle(post.title);
           setTags(parseTags(post.tags));
+          setLive(post.published);
           const md = await invoke<string>('read_post_markdown', { slug: post.slug });
           if (!cancelled) setBody(md);
+          const state = await readSyncState(invoke, id);
+          if (!cancelled) setSync(state);
         }
       } catch (err) {
         console.error('Failed to load post:', err);
@@ -189,7 +220,7 @@ export function PostEditor() {
     if (!isTauri()) return;
     setSaveState({ kind: 'saving', publish });
     try {
-      const saved = await invoke<{ id: number }>('save_post', {
+      const saved = await invoke<{ id: number; published: boolean }>('save_post', {
         id: postId,
         title,
         tags,
@@ -199,6 +230,11 @@ export function PostEditor() {
       setPostId(saved.id);
       // Point the URL at the saved post so a refresh / next save targets it.
       window.history.replaceState(null, '', `/posts/edit?id=${saved.id}`);
+      // Re-read rather than assume: a publish that reached the cloud clears the
+      // pending edits, one that failed does not, and the backend is the only
+      // thing that knows which happened.
+      setLive(saved.published);
+      setSync(await readSyncState(invoke, saved.id));
       setSaveState({ kind: 'saved', publish });
       setTimeout(() => setSaveState({ kind: 'idle' }), 3000);
     } catch (err) {
@@ -732,6 +768,11 @@ export function PostEditor() {
 
         {/* Actions */}
         <div className='flex items-center gap-2'>
+          {/* What readers are being served, when that differs from what is on
+              screen. Silent when the two agree — a badge that is always there
+              stops being read. */}
+          {saveState.kind === 'idle' && sync === 'sync_failed' && <StatusPill status='failed' />}
+          {saveState.kind === 'idle' && sync === 'modified' && live && <StatusPill status='edited' />}
           {saveState.kind === 'saved' && (
             <span className='text-[12px] font-medium text-emerald-600 dark:text-emerald-400'>
               {saveState.publish ? 'Published' : 'Saved'}
