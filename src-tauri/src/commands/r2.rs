@@ -471,8 +471,11 @@ pub async fn save_post(
         // Body → R2.
         cloudflare::upload_to_r2(&client, &config, &media_keys::body_key(&saved.slug), &published)
             .await?;
-        // Metadata → D1.
-        cloudflare::d1_post_upsert(&client, &config, saved.clone()).await?;
+        // Metadata → D1, with the series reference translated into the cloud's
+        // ids — a local `series_id` would file the post under an unrelated
+        // remote series.
+        let outbound = post_for_cloud(conn.inner(), &client, &config, saved.clone()).await?;
+        cloudflare::d1_post_upsert(&client, &config, outbound).await?;
         Ok::<(), AppError>(())
     }
     .await;

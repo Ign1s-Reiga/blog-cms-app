@@ -198,6 +198,27 @@ impl SeriesMap {
     pub fn to_remote(&self, local_id: i32) -> Option<i32> {
         self.outbound.get(&local_id).copied()
     }
+
+    /// Rewrite a post's series reference from local ids into the cloud's, in
+    /// place, ready to send.
+    ///
+    /// A series that exists only on this machine has no remote counterpart to
+    /// point at, so the post goes up unfiled rather than pointing at a number
+    /// that means something else over there. Nothing is lost by that: the pull
+    /// side keeps the local grouping instead of reading the gap as a removal.
+    pub fn apply_outbound(&self, post: &mut post::Model) {
+        let Some(local_id) = post.series_id else {
+            return;
+        };
+        post.series_id = self.to_remote(local_id);
+        if post.series_id.is_none() {
+            post.series_order = None;
+            log::info!(
+                "Post `{}` is in a series the cloud does not have; pushing it unfiled",
+                post.slug
+            );
+        }
+    }
 }
 
 /// Mirror the local posts table onto the cloud's set of posts, keyed by `slug`.
@@ -564,6 +585,38 @@ mod tests {
         let post = post_by_slug(&db, "fresh").await.unwrap().unwrap();
         assert_eq!(post.series_id, Some(series.id));
         assert_eq!(post.series_order, Some(2));
+    }
+
+    /// What goes up carries the cloud's id for the series, never this machine's
+    /// — the mistake that files a post under an unrelated remote series.
+    #[tokio::test]
+    async fn a_post_pushed_upward_carries_the_remote_series_id() {
+        let db = connect_in_memory().await.unwrap();
+        let local = create::<series::Model>(&db, series_row(0, "rust")).await.unwrap();
+        let map = SeriesMap::build(&db, &[series_row(42, "rust")]).await.unwrap();
+
+        let mut post = post_row("a-post", Some(local.id), Some(3));
+        map.apply_outbound(&mut post);
+
+        assert_eq!(post.series_id, Some(42));
+        assert_eq!(post.series_order, Some(3));
+    }
+
+    /// A series the cloud has never heard of cannot be pointed at, so the post
+    /// goes up unfiled rather than carrying a number that means something else
+    /// there. The pull rule is what keeps the local grouping through the round
+    /// trip.
+    #[tokio::test]
+    async fn a_local_only_series_pushes_unfiled() {
+        let db = connect_in_memory().await.unwrap();
+        let local = create::<series::Model>(&db, series_row(0, "local-only")).await.unwrap();
+        let map = SeriesMap::build(&db, &[]).await.unwrap();
+
+        let mut post = post_row("a-post", Some(local.id), Some(3));
+        map.apply_outbound(&mut post);
+
+        assert_eq!(post.series_id, None);
+        assert_eq!(post.series_order, None, "an order without a series is meaningless");
     }
 
     /// The push direction of the same translation: what goes up must be the

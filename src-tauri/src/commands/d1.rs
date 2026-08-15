@@ -18,12 +18,16 @@ use super::*;
 // ── Posts: Cloudflare D1 ────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn d1_create_post(post: PostModel) -> AppResult<i64> {
+pub async fn d1_create_post(
+    conn: State<'_, DatabaseConnection>,
+    post: PostModel,
+) -> AppResult<i64> {
     let (client, config) = cf()?;
     let mut post = post;
     let now = now_ts();
     post.created_at = now;
     post.updated_at = now;
+    let post = post_for_cloud(conn.inner(), &client, &config, post).await?;
     cloudflare::d1_insert::<PostModel>(&client, &config, post).await
 }
 
@@ -40,10 +44,14 @@ pub async fn d1_get_post(id: i32) -> AppResult<Option<PostModel>> {
 }
 
 #[tauri::command]
-pub async fn d1_update_post(post: PostModel) -> AppResult<()> {
+pub async fn d1_update_post(
+    conn: State<'_, DatabaseConnection>,
+    post: PostModel,
+) -> AppResult<()> {
     let (client, config) = cf()?;
     let mut post = post;
     post.updated_at = now_ts();
+    let post = post_for_cloud(conn.inner(), &client, &config, post).await?;
     cloudflare::d1_post_update(&client, &config, post).await
 }
 
@@ -118,9 +126,15 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> AppResult
     post.updated_at = now;
     let post = db::update::<PostModel>(conn, post).await?;
 
-    // 2. Push the change to Cloudflare D1.
+    // 2. Push the change to Cloudflare D1, with the post's series reference
+    //    translated into the cloud's ids.
     let synced = match cf() {
-        Ok((client, config)) => cloudflare::d1_post_update(&client, &config, post.clone()).await,
+        Ok((client, config)) => {
+            match post_for_cloud(conn, &client, &config, post.clone()).await {
+                Ok(outbound) => cloudflare::d1_post_update(&client, &config, outbound).await,
+                Err(e) => Err(e),
+            }
+        }
         Err(e) => Err(e),
     };
 
@@ -167,19 +181,7 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize>
     for mut post in posts {
         let post_id = post.id;
         let published = post.published;
-        // A series that exists only on this machine has no remote counterpart
-        // to point at. The post still pushes; its grouping stays local, and the
-        // refresh path preserves it rather than reading the gap as a removal.
-        if let Some(local_id) = post.series_id {
-            post.series_id = series.to_remote(local_id);
-            if post.series_id.is_none() {
-                post.series_order = None;
-                log::info!(
-                    "Post `{}` is in a series the cloud does not have; pushing it unfiled",
-                    post.slug
-                );
-            }
-        }
+        series.apply_outbound(&mut post);
         let stage = match cloudflare::d1_post_upsert(&client, &config, post).await {
             Ok(()) => {
                 synced += 1;
