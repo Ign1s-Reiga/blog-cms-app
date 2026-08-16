@@ -9,9 +9,10 @@ use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use crate::db;
 use crate::entities::post::Model as PostModel;
-use crate::entities::post_stage;
+use crate::entities::{post_revision, post_stage};
 use crate::entities::series::Model as SeriesModel;
 use crate::error::{AppError, AppResult};
+use crate::revisions;
 use super::*;
 
 // ─── Front matter ─────────────────────────────────────────────────────────────
@@ -355,11 +356,13 @@ pub async fn update_post(
 
 #[tauri::command]
 pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<()> {
-    // The staging and sync rows describe a post that is about to stop existing;
-    // leaving them behind would attach them to whichever post is assigned this
-    // id next.
+    // The staging, sync and revision rows describe a post that is about to stop
+    // existing; leaving them behind would attach them to whichever post is
+    // assigned this id next — and a stranger's history is a worse thing to
+    // inherit than a stale stage.
     let _ = db::stage_clear(conn.inner(), id).await;
     let _ = db::sync_clear(conn.inner(), id).await;
+    let _ = db::revisions_clear(conn.inner(), id).await;
     db::delete::<PostModel>(conn.inner(), id).await
 }
 
@@ -399,6 +402,152 @@ pub async fn list_sync_states(
 pub struct PostSyncState {
     pub post_id: i32,
     pub state: crate::sync_state::SyncState,
+}
+
+// ── Revisions: local SQLite ─────────────────────────────────────────────────────
+
+/// One entry in a post's history, as the editor's panel lists them.
+///
+/// Bodies are left out: a list of fifty versions of the same post would ship the
+/// whole post fifty times to render a column of timestamps. `get_revision`
+/// fetches the one the person actually opened.
+#[derive(serde::Serialize)]
+pub struct RevisionSummary {
+    pub id: i32,
+    pub post_id: i32,
+    pub title: String,
+    /// Why the snapshot was taken — one of the constants in
+    /// [`crate::entities::post_revision`].
+    pub origin: String,
+    pub created_at: i64,
+    /// Whether the post was live at the time. Shown because a version's text
+    /// alone does not say whether readers were seeing it.
+    pub published: bool,
+    /// Characters of Markdown in the snapshot, or `None` when it carries no body
+    /// at all — which the panel renders as "metadata only", since restoring one
+    /// deliberately leaves the text alone.
+    pub body_chars: Option<usize>,
+}
+
+impl From<crate::entities::post_revision::Model> for RevisionSummary {
+    fn from(r: crate::entities::post_revision::Model) -> Self {
+        Self {
+            id: r.id,
+            post_id: r.post_id,
+            title: r.title,
+            origin: r.origin,
+            created_at: r.created_at,
+            published: r.published,
+            body_chars: r.body.as_deref().map(str::len),
+        }
+    }
+}
+
+/// A post's saved versions, newest first.
+#[tauri::command]
+pub async fn list_revisions(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+) -> AppResult<Vec<RevisionSummary>> {
+    Ok(db::revisions_for_post(conn.inner(), post_id)
+        .await?
+        .into_iter()
+        .map(RevisionSummary::from)
+        .collect())
+}
+
+/// One saved version in full, body included — what the panel previews before
+/// anyone commits to restoring it.
+#[tauri::command]
+pub async fn get_revision(
+    conn: State<'_, DatabaseConnection>,
+    revision_id: i32,
+) -> AppResult<crate::entities::post_revision::Model> {
+    db::revision_get(conn.inner(), revision_id)
+        .await?
+        .ok_or(AppError::RevisionNotFound(revision_id))
+}
+
+/// Put a post back to the version this snapshot holds.
+///
+/// Local only, and deliberately so: a restore writes the row and the cached
+/// Markdown and stops there, leaving the post exactly as `modified` as any other
+/// unpublished edit. Pushing it would publish a rollback nobody asked to
+/// publish, from a button labelled "restore" — and would do it without the
+/// approval gate for a post an MCP client had been editing.
+///
+/// **Restoring is itself an edit, so it takes its own snapshot first.** That is
+/// what makes the operation reversible: restoring the wrong version leaves the
+/// version you were on sitting at the top of the history, one click away. It is
+/// also why nothing here deletes revisions — history only ever grows, until the
+/// cap prunes its oldest end.
+///
+/// Unlike the edit paths, this snapshot is not best effort. A restore that could
+/// not record where it came from would overwrite the current text with no way
+/// back, which is precisely the failure this feature exists to prevent.
+#[tauri::command]
+pub async fn restore_revision(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    revision_id: i32,
+) -> AppResult<PostModel> {
+    let revision = db::revision_get(conn.inner(), revision_id)
+        .await?
+        .ok_or(AppError::RevisionNotFound(revision_id))?;
+    let current = db::get::<PostModel>(conn.inner(), revision.post_id)
+        .await?
+        .ok_or(AppError::PostNotFound(revision.post_id))?;
+
+    // Where we are now, before it is replaced.
+    revisions::snapshot(&app, conn.inner(), &current, post_revision::RESTORE).await?;
+
+    // A snapshot with no body records metadata that was captured while the text
+    // was not — see `post_revision::Model::body`. Restoring it must therefore
+    // leave the text alone rather than blank the post, so the body that ends up
+    // on disk is either the snapshot's or the one already there.
+    let dir = posts_dir(&app).await?;
+    let staged = match revision.body.as_deref() {
+        Some(body) => Some((StagedBody::write(&dir, body).await?, body.to_string())),
+        None => None,
+    };
+
+    let restored = db::update::<PostModel>(
+        conn.inner(),
+        PostModel { updated_at: now_ts(), ..revisions::apply(current.clone(), &revision) },
+    )
+    .await?;
+
+    let body = match staged {
+        Some((staged, body)) => {
+            if let Err(e) = staged.commit(&dir.join(format!("{}.md", restored.slug))).await {
+                // The row is already back at the old version and its body is
+                // not, so the row has to go forward again rather than sit there
+                // describing text that was never written. Best effort: the
+                // failure above is the one worth reporting.
+                if let Err(undo) = db::update::<PostModel>(conn.inner(), current).await {
+                    log::error!("Could not undo a restore whose body did not land: {undo}");
+                }
+                return Err(e);
+            }
+            body
+        }
+        // Nothing replaced the file, so what is on disk is what the fingerprint
+        // below has to be taken over.
+        None => revisions::cached_body(&app, &restored.slug).await.unwrap_or_default(),
+    };
+
+    // A restore changes what this machine holds and nothing else, which is
+    // exactly what an unsynced fingerprint records. The stage is left alone on
+    // purpose: a live post is still live, serving the version it was serving
+    // before, and this rollback is one more edit waiting to be published.
+    db::sync_set_local(
+        conn.inner(),
+        restored.id,
+        crate::sync_state::content_hash(&restored, &body),
+    )
+    .await?;
+
+    Ok(restored)
 }
 
 // ── Series: local SQLite ────────────────────────────────────────────────────────

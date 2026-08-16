@@ -10,6 +10,7 @@
 //! leaves the macros behind.
 
 use sea_orm::DatabaseConnection;
+use tauri::Manager;
 
 use crate::cloudflare::{self, CloudflareConfig};
 use crate::db;
@@ -57,6 +58,74 @@ async fn post_for_cloud(
 // Only helpers with more than one caller across the modules above. Anything
 // used by a single module lives in that module instead.
 
+/// A post body written beside its destination, waiting to be moved into place.
+///
+/// SQLite and the filesystem cannot share a transaction, so a save is a commit
+/// *sequence*, and the order is chosen to make the gap between the two stores as
+/// small as the platform allows. Writing the bytes is the step that actually
+/// fails — a full disk, a read-only volume, an antivirus holding the file — so
+/// it happens first, before anything is committed. What remains is a rename
+/// within one directory, which is atomic: a reader never observes a half-written
+/// body, and the post's old body stays live right up until the new one is whole.
+///
+/// Shared because restoring a revision replaces a body for the same reasons a
+/// save does, and a rollback that could leave a half-written file would defeat
+/// the point of having a history at all.
+struct StagedBody {
+    temp: std::path::PathBuf,
+}
+
+impl StagedBody {
+    /// Write `body` to a temporary file in `dir`, which must be the directory it
+    /// will eventually be renamed into — a rename is only atomic within one
+    /// filesystem.
+    ///
+    /// The name is dotted and uuid-suffixed so a crash between here and the
+    /// rename leaves something recognisable as debris rather than something the
+    /// editor might list as a post.
+    async fn write(dir: &std::path::Path, body: &str) -> AppResult<Self> {
+        let temp = dir.join(format!(".save-{}.md.tmp", uuid::Uuid::new_v4().simple()));
+        tokio::fs::write(&temp, body)
+            .await
+            .map_err(|e| AppError::io("Failed to write local markdown", e))?;
+        Ok(Self { temp })
+    }
+
+    /// Move the staged body onto `dest`, replacing whatever is there. The
+    /// temporary file is cleaned up either way.
+    async fn commit(self, dest: &std::path::Path) -> AppResult<()> {
+        match tokio::fs::rename(&self.temp, dest).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.discard().await;
+                Err(AppError::io("Failed to move the saved markdown into place", e))
+            }
+        }
+    }
+
+    /// Throw the staged body away. Best effort: a leftover temporary file is
+    /// untidy, and the failure that led here is the one worth reporting.
+    async fn discard(self) {
+        if let Err(e) = tokio::fs::remove_file(&self.temp).await {
+            log::warn!("Could not remove staged body {}: {e}", self.temp.display());
+        }
+    }
+}
+
+/// The directory holding every post's cached Markdown, created if it is not
+/// there yet.
+async fn posts_dir(app: &tauri::AppHandle) -> AppResult<std::path::PathBuf> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(AppError::AppDataDir)?
+        .join("posts");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| AppError::io("Failed to create posts dir", e))?;
+    Ok(dir)
+}
+
 /// Current time as a Unix timestamp in seconds (the schema's date encoding).
 fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
@@ -90,5 +159,85 @@ fn validate_stage(stage: &str) -> AppResult<()> {
     match stage {
         post_stage::DRAFT | post_stage::PUBLISHED | post_stage::SYNC_FAILED => Ok(()),
         other => Err(AppError::InvalidStage(other.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::StagedBody;
+
+    /// A scratch directory of this test's own, removed on the way out.
+    async fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("blog-cms-{label}-{}", uuid::Uuid::new_v4().simple()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        dir
+    }
+
+    /// The ordinary path: the body lands whole and the temporary file is gone.
+    #[tokio::test]
+    async fn a_staged_body_replaces_the_destination_and_leaves_no_debris() {
+        let dir = temp_dir("staged").await;
+        let dest = dir.join("post.md");
+        tokio::fs::write(&dest, "old body").await.unwrap();
+
+        StagedBody::write(&dir, "new body")
+            .await
+            .unwrap()
+            .commit(&dest)
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read_to_string(&dest).await.unwrap(), "new body");
+        assert_eq!(remaining(&dir).await, vec!["post.md"]);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// The failure this whole sequence exists for. The rename cannot happen, so
+    /// the post's old body must still be the one on disk — and the staged copy
+    /// must not be left lying around.
+    #[tokio::test]
+    async fn a_body_that_cannot_be_moved_into_place_leaves_the_old_one_live() {
+        let dir = temp_dir("blocked").await;
+        // A directory cannot be replaced by a rename on either platform, which
+        // is the most portable way to make the move fail.
+        let dest = dir.join("post.md");
+        tokio::fs::create_dir(&dest).await.unwrap();
+        tokio::fs::write(dest.join("marker"), "still here").await.unwrap();
+
+        let staged = StagedBody::write(&dir, "new body").await.unwrap();
+        assert!(staged.commit(&dest).await.is_err());
+
+        // The destination is untouched, and only it remains.
+        assert_eq!(
+            tokio::fs::read_to_string(dest.join("marker")).await.unwrap(),
+            "still here"
+        );
+        assert_eq!(remaining(&dir).await, vec!["post.md"]);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn a_discarded_body_is_removed() {
+        let dir = temp_dir("discard").await;
+        StagedBody::write(&dir, "unwanted").await.unwrap().discard().await;
+        assert!(remaining(&dir).await.is_empty());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Everything left in `dir`, sorted — the staged body is named so that a
+    /// leak shows up here.
+    async fn remaining(dir: &Path) -> Vec<String> {
+        let mut entries = tokio::fs::read_dir(dir).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        names
     }
 }

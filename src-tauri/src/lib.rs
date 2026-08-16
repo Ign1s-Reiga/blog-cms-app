@@ -10,6 +10,7 @@ mod imaging;
 // library; every other module stays crate-private.
 pub mod mcp;
 mod media_keys;
+mod revisions;
 mod sync_state;
 mod update;
 mod webview;
@@ -120,6 +121,10 @@ pub fn run() {
             // Post content
             commands::read_post_markdown,
             commands::save_post,
+            // Revision history (local snapshots + rollback)
+            commands::list_revisions,
+            commands::get_revision,
+            commands::restore_revision,
             // Media library
             commands::upload_media,
             commands::list_media,

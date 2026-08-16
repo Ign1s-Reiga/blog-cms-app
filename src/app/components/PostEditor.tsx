@@ -7,6 +7,7 @@ import {
   Bold,
   Columns2,
   Eye,
+  History,
   ImagePlus,
   Italic,
   Link2,
@@ -27,6 +28,7 @@ import { appDataDir, join } from '@tauri-apps/api/path';
 import { Button } from '@/components/ui/button';
 import { StatusPill } from '@/components/StatusPill';
 import { MediaPicker, type MediaEntry } from '@/components/MediaPicker';
+import { RevisionHistory } from '@/components/RevisionHistory';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
 
@@ -283,6 +285,24 @@ export function PostEditor() {
 
   const [mode, setMode] = useState<EditorMode>('write');
   const [preview, setPreview] = useState('');
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  /// Re-read the post after a restore. The backend has replaced the row and the
+  /// cached Markdown, so whatever is in the textarea is a version that no longer
+  /// exists — leaving it there would let the next save push it straight back
+  /// over the thing that was just restored.
+  const reloadAfterRestore = () => {
+    if (postId === null) return;
+    void (async () => {
+      const { invoke, isTauri } = await import('@tauri-apps/api/core');
+      if (!isTauri()) return;
+      try {
+        await loadFromBackend(invoke, postId);
+      } catch (err) {
+        console.error('Failed to reload the restored post:', err);
+      }
+    })();
+  };
 
   // The preview palette is bound to the app theme in markdown-theme.css (the
   // preset's light-dark() colors don't follow next-themes' class — see that
@@ -761,6 +781,12 @@ export function PostEditor() {
   return (
     <div className='flex flex-col flex-1 min-h-0 bg-white dark:bg-[#161616]'>
       <MediaPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={pickFromLibrary} />
+      <RevisionHistory
+        open={historyOpen}
+        postId={postId}
+        onClose={() => setHistoryOpen(false)}
+        onRestored={reloadAfterRestore}
+      />
 
       {/* ── Topbar ──────────────────────────────────────────────────────── */}
       <div className='relative flex items-center justify-between px-5 h-[48px] shrink-0 border-b border-zinc-200 dark:border-white/[0.06]'>
@@ -861,6 +887,22 @@ export function PostEditor() {
             <ImagePlus size={13} strokeWidth={2} />
             Insert media
           </Button>
+
+          {/* Hidden until the post has been saved once: history is kept from
+              the first save onwards, so a post that has never been saved has
+              nothing to offer behind this button. */}
+          {postId !== null && (
+            <Button
+              variant='ghost'
+              size='sm'
+              onClick={() => setHistoryOpen(true)}
+              title='Earlier versions of this post, and a way back to any of them'
+              className='h-[28px] px-2 gap-1.5 rounded-[5px] text-[12px] font-medium text-zinc-500 dark:text-zinc-400'
+            >
+              <History size={13} strokeWidth={2} />
+              History
+            </Button>
+          )}
 
           <Button
             variant='outline'

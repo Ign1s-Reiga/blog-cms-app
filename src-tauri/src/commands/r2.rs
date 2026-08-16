@@ -4,7 +4,7 @@
 //! here, with the body and image handling that is its distinctive work.
 
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -13,10 +13,11 @@ use sea_orm::{DatabaseConnection, TransactionTrait};
 use crate::cloudflare::{self, cf};
 use crate::db;
 use crate::entities::post::Model as PostModel;
-use crate::entities::post_stage;
+use crate::entities::{post_revision, post_stage};
 use crate::error::{AppError, AppResult};
 use crate::imaging::{self, StagedImage};
 use crate::media_keys;
+use crate::revisions;
 use crate::sync_state;
 use super::*;
 
@@ -122,56 +123,6 @@ async fn read_staged_asset<'a>(
 }
 
 // ─── Local save ───────────────────────────────────────────────────────────────
-
-/// A post body written beside its destination, waiting to be moved into place.
-///
-/// SQLite and the filesystem cannot share a transaction, so a save is a commit
-/// *sequence*, and the order is chosen to make the gap between the two stores as
-/// small as the platform allows. Writing the bytes is the step that actually
-/// fails — a full disk, a read-only volume, an antivirus holding the file — so
-/// it happens first, before anything is committed. What remains is a rename
-/// within one directory, which is atomic: a reader never observes a half-written
-/// body, and the post's old body stays live right up until the new one is whole.
-struct StagedBody {
-    temp: PathBuf,
-}
-
-impl StagedBody {
-    /// Write `body` to a temporary file in `dir`, which must be the directory it
-    /// will eventually be renamed into — a rename is only atomic within one
-    /// filesystem.
-    ///
-    /// The name is dotted and uuid-suffixed so a crash between here and the
-    /// rename leaves something recognisable as debris rather than something the
-    /// editor might list as a post.
-    async fn write(dir: &Path, body: &str) -> AppResult<Self> {
-        let temp = dir.join(format!(".save-{}.md.tmp", uuid::Uuid::new_v4().simple()));
-        tokio::fs::write(&temp, body)
-            .await
-            .map_err(|e| AppError::io("Failed to write local markdown", e))?;
-        Ok(Self { temp })
-    }
-
-    /// Move the staged body onto `dest`, replacing whatever is there. The
-    /// temporary file is cleaned up either way.
-    async fn commit(self, dest: &Path) -> AppResult<()> {
-        match tokio::fs::rename(&self.temp, dest).await {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.discard().await;
-                Err(AppError::io("Failed to move the saved markdown into place", e))
-            }
-        }
-    }
-
-    /// Throw the staged body away. Best effort: a leftover temporary file is
-    /// untidy, and the failure that led here is the one worth reporting.
-    async fn discard(self) {
-        if let Err(e) = tokio::fs::remove_file(&self.temp).await {
-            log::warn!("Could not remove staged body {}: {e}", self.temp.display());
-        }
-    }
-}
 
 /// Write the post's row — and, for a draft, its staging row — in one
 /// transaction, so a save cannot record the post without recording what stage
@@ -418,14 +369,7 @@ pub async fn save_post(
     // whether *this* save publishes it.
     let live = model.published;
 
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(AppError::AppDataDir)?
-        .join("posts");
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| AppError::io("Failed to create posts dir", e))?;
+    let dir = posts_dir(&app).await?;
 
     // 1. Stage the body. Nothing else has changed yet, so a disk that cannot
     //    take the write leaves the post exactly as it was.
@@ -445,7 +389,18 @@ pub async fn save_post(
         }
     };
 
-    // 3. Swap the new body in. Only a rename is left, so the window in which the
+    // 3. Keep what is about to be replaced, for a post that has a previous
+    //    version to lose. Deliberately here and not earlier: the body on disk is
+    //    still the old one until the rename below, and a save that failed at
+    //    step 1 or 2 changed nothing and so has nothing to snapshot.
+    //
+    //    Best effort by design — see `revisions::snapshot_or_log`.
+    if let Some(before) = previous.as_ref() {
+        let origin = if published { post_revision::PUBLISH } else { post_revision::SAVE };
+        revisions::snapshot_or_log(&app, conn.inner(), &before.post, origin).await;
+    }
+
+    // 4. Swap the new body in. Only a rename is left, so the window in which the
     //    database and the file disagree is as small as it can be — and if even
     //    that fails, the metadata goes back rather than outliving its body.
     if let Err(e) = staged.commit(&dir.join(format!("{}.md", saved.slug))).await {
@@ -453,12 +408,12 @@ pub async fn save_post(
         return Err(e);
     }
 
-    // 4. Fingerprint what is now on this machine, so the difference between
+    // 5. Fingerprint what is now on this machine, so the difference between
     //    "published" and "published, and then edited" is recorded rather than
     //    inferred.
     let hash = sync_state::content_hash(&saved, &body);
 
-    // 5. Draft → local only. Publish → push the body to R2 and metadata to D1.
+    // 6. Draft → local only. Publish → push the body to R2 and metadata to D1.
     if !published {
         db::sync_set_local(conn.inner(), saved.id, hash).await?;
         return Ok(saved);
@@ -613,14 +568,7 @@ pub async fn resolve_conflict(
 
             // Body first, by the same reasoning as `save_post`: the write is
             // what fails, and until the rename nothing has been replaced.
-            let dir = app
-                .path()
-                .app_data_dir()
-                .map_err(AppError::AppDataDir)?
-                .join("posts");
-            tokio::fs::create_dir_all(&dir)
-                .await
-                .map_err(|e| AppError::io("Failed to create posts dir", e))?;
+            let dir = posts_dir(&app).await?;
             let staged = StagedBody::write(&dir, &body).await?;
 
             // The remote's series reference is a remote primary key; translate
@@ -639,6 +587,18 @@ pub async fn resolve_conflict(
             model.series_id = series_id;
             model.series_order = series_order;
             let remote_updated_at = model.updated_at;
+
+            // "Keep cloud" is the one place the app throws away local work on
+            // purpose, so it is also the place a snapshot matters most: taken
+            // while the local body is still on disk, it turns an irreversible
+            // choice into one the history can walk back.
+            revisions::snapshot_or_log(
+                &app,
+                conn.inner(),
+                &post,
+                post_revision::CONFLICT_KEEP_REMOTE,
+            )
+            .await;
 
             let saved = db::update::<PostModel>(conn.inner(), model).await?;
             staged
@@ -905,79 +865,6 @@ mod tests {
             extract_asset_refs(body),
             vec!["assets/ok.png", "assets/../../secret.env"]
         );
-    }
-
-    /// A scratch directory of this test's own, removed on the way out.
-    async fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("blog-cms-{label}-{}", uuid::Uuid::new_v4().simple()));
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        dir
-    }
-
-    /// The ordinary path: the body lands whole and the temporary file is gone.
-    #[tokio::test]
-    async fn a_staged_body_replaces_the_destination_and_leaves_no_debris() {
-        let dir = temp_dir("staged").await;
-        let dest = dir.join("post.md");
-        tokio::fs::write(&dest, "old body").await.unwrap();
-
-        StagedBody::write(&dir, "new body")
-            .await
-            .unwrap()
-            .commit(&dest)
-            .await
-            .unwrap();
-
-        assert_eq!(tokio::fs::read_to_string(&dest).await.unwrap(), "new body");
-        assert_eq!(remaining(&dir).await, vec!["post.md"]);
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    /// The failure this whole sequence exists for. The rename cannot happen, so
-    /// the post's old body must still be the one on disk — and the staged copy
-    /// must not be left lying around.
-    #[tokio::test]
-    async fn a_body_that_cannot_be_moved_into_place_leaves_the_old_one_live() {
-        let dir = temp_dir("blocked").await;
-        // A directory cannot be replaced by a rename on either platform, which
-        // is the most portable way to make the move fail.
-        let dest = dir.join("post.md");
-        tokio::fs::create_dir(&dest).await.unwrap();
-        tokio::fs::write(dest.join("marker"), "still here").await.unwrap();
-
-        let staged = StagedBody::write(&dir, "new body").await.unwrap();
-        assert!(staged.commit(&dest).await.is_err());
-
-        // The destination is untouched, and only it remains.
-        assert_eq!(
-            tokio::fs::read_to_string(dest.join("marker")).await.unwrap(),
-            "still here"
-        );
-        assert_eq!(remaining(&dir).await, vec!["post.md"]);
-
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn a_discarded_body_is_removed() {
-        let dir = temp_dir("discard").await;
-        StagedBody::write(&dir, "unwanted").await.unwrap().discard().await;
-        assert!(remaining(&dir).await.is_empty());
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    /// Everything left in `dir`, sorted — the staged body is named so that a
-    /// leak shows up here.
-    async fn remaining(dir: &Path) -> Vec<String> {
-        let mut entries = tokio::fs::read_dir(dir).await.unwrap();
-        let mut names = Vec::new();
-        while let Some(entry) = entries.next_entry().await.unwrap() {
-            names.push(entry.file_name().to_string_lossy().into_owned());
-        }
-        names.sort();
-        names
     }
 
     fn post(slug: &str, title: &str) -> PostModel {
