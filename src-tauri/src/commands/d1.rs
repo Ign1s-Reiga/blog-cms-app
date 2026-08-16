@@ -165,7 +165,10 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> AppResult
 /// errors with a summary if any failed.
 #[tauri::command]
 pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize> {
-    let posts = db::list::<PostModel>(conn.inner()).await?;
+    // Trash excluded: pushing a post the person has thrown away would put it
+    // back on the blog, which is the opposite of what the button they pressed
+    // last says they wanted.
+    let posts = db::list_active_posts(conn.inner()).await?;
     let (client, config) = cf()?;
     let now = now_ts();
 

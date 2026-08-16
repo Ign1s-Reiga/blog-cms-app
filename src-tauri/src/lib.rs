@@ -88,7 +88,12 @@ pub fn run() {
             commands::list_posts,
             commands::get_post,
             commands::update_post,
-            commands::delete_post,
+            // Trash (local soft delete, restore, and the one path that is final)
+            commands::trash_post,
+            commands::restore_post,
+            commands::list_trashed_posts,
+            commands::delete_post_permanently,
+            commands::empty_trash,
             // Posts — Cloudflare D1
             commands::d1_create_post,
             commands::d1_list_posts,

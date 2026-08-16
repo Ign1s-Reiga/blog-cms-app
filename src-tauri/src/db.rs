@@ -12,7 +12,7 @@ use sea_orm::{
 use tauri::Manager;
 
 use crate::entities::record::{Id, Record};
-use crate::entities::{post, post_revision, post_stage, post_sync, series};
+use crate::entities::{post, post_revision, post_stage, post_sync, post_trash, series};
 use crate::error::{AppError, AppResult};
 
 /// Open (creating if needed) the local SQLite database and ensure its schema
@@ -89,6 +89,13 @@ async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
     db.execute(&sync_tbl)
         .await
         .map_err(|e| AppError::db_init("Failed to create `post_sync` table", e))?;
+
+    // Local-only as well: which posts are in the trash.
+    let mut trash_tbl = schema.create_table_from_entity(post_trash::Entity);
+    trash_tbl.if_not_exists();
+    db.execute(&trash_tbl)
+        .await
+        .map_err(|e| AppError::db_init("Failed to create `post_trash` table", e))?;
 
     // Local-only too: what each post looked like before each edit.
     let mut revision_tbl = schema.create_table_from_entity(post_revision::Entity);
@@ -313,6 +320,12 @@ impl SeriesMap {
 ///
 /// `remote_series` is the cloud's series table, needed to translate each post's
 /// `series_id` into the local row it means.
+///
+/// **A trashed post takes no part in any of this.** It is neither overwritten by
+/// the cloud's copy nor deleted for being absent from it: the first would edit
+/// something the person has thrown away, and the second would empty their trash
+/// on their behalf — destroying the only recoverable copy — as a side effect of
+/// pressing Refresh. It rejoins the library, and the sync, when it is restored.
 pub async fn mirror_posts(
     db: &DatabaseConnection,
     remote: Vec<post::Model>,
@@ -322,9 +335,10 @@ pub async fn mirror_posts(
         remote.iter().map(|p| p.slug.clone()).collect();
     let upserted = remote.len();
     let series = SeriesMap::build(db, remote_series).await?;
+    let trashed = trashed_ids(db).await?;
 
     for post in remote {
-        upsert_post_from_remote(db, post, &series).await?;
+        upsert_post_from_remote(db, post, &series, &trashed).await?;
     }
 
     // Drop anything local that no longer exists remotely (+ its staging and
@@ -341,6 +355,11 @@ pub async fn mirror_posts(
     let mut deleted = 0usize;
     for local in locals {
         if remote_slugs.contains(&local.slug) {
+            continue;
+        }
+        if trashed.contains(&local.id) {
+            // Already thrown away here, and its absence upstream says nothing
+            // about whether the person still wants it back.
             continue;
         }
         let never_pushed = sync_get(db, local.id)
@@ -438,8 +457,17 @@ async fn upsert_post_from_remote(
     db: &DatabaseConnection,
     remote: post::Model,
     series: &SeriesMap,
+    trashed: &std::collections::HashSet<i32>,
 ) -> AppResult<()> {
     let existing = post_by_slug(db, &remote.slug).await?;
+
+    // A post in the trash is not part of the library, so the cloud has nothing
+    // to say about it. Applying the refresh anyway would rewrite the copy the
+    // person is holding on to in case they want it back.
+    if existing.as_ref().is_some_and(|local| trashed.contains(&local.id)) {
+        log::info!("Post `{}` is in the trash; leaving it out of the refresh", remote.slug);
+        return Ok(());
+    }
 
     // A post with unpushed local edits is not overwritten — decided here, before
     // anything is written, because once the row is overwritten the evidence of
@@ -745,6 +773,86 @@ pub async fn sync_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()
     Ok(())
 }
 
+// ─── Trash (local only) ───────────────────────────────────────────────────────
+
+/// Every trashed post's id, for the many places that have to leave them out.
+///
+/// One query rather than a join per caller: a post being in the trash is a fact
+/// about a handful of rows, and every listing needs the whole set anyway.
+pub async fn trashed_ids(
+    db: &impl ConnectionTrait,
+) -> AppResult<std::collections::HashSet<i32>> {
+    Ok(post_trash::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|t| t.post_id)
+        .collect())
+}
+
+pub async fn trash_get(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+) -> AppResult<Option<post_trash::Model>> {
+    Ok(post_trash::Entity::find_by_id(post_id).one(db).await?)
+}
+
+/// Move a post to the trash. Trashing an already-trashed post keeps the original
+/// time, so restoring and re-trashing does not quietly reorder the view.
+pub async fn trash_set(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+    trashed_at: i64,
+) -> AppResult<post_trash::Model> {
+    if let Some(existing) = trash_get(db, post_id).await? {
+        return Ok(existing);
+    }
+    Ok(post_trash::ActiveModel {
+        post_id: Set(post_id),
+        trashed_at: Set(trashed_at),
+    }
+    .insert(db)
+    .await?)
+}
+
+/// Take a post back out of the trash. Clearing an absent row is not an error.
+pub async fn trash_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
+    post_trash::Entity::delete_by_id(post_id).exec(db).await?;
+    Ok(())
+}
+
+/// The library as everything except the trash view sees it: newest first, with
+/// trashed posts left out.
+pub async fn list_active_posts(db: &impl ConnectionTrait) -> AppResult<Vec<post::Model>> {
+    let trashed = trashed_ids(db).await?;
+    Ok(list::<post::Model>(db)
+        .await?
+        .into_iter()
+        .filter(|p| !trashed.contains(&p.id))
+        .collect())
+}
+
+/// The trash itself, most recently thrown away first, each post paired with when
+/// it went.
+pub async fn list_trashed_posts(
+    db: &impl ConnectionTrait,
+) -> AppResult<Vec<(post::Model, post_trash::Model)>> {
+    let trash: std::collections::HashMap<i32, post_trash::Model> = post_trash::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|t| (t.post_id, t))
+        .collect();
+
+    let mut rows: Vec<(post::Model, post_trash::Model)> = list::<post::Model>(db)
+        .await?
+        .into_iter()
+        .filter_map(|post| trash.get(&post.id).map(|t| (post, t.clone())))
+        .collect();
+    rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.trashed_at));
+    Ok(rows)
+}
+
 // ─── Revisions (local only) ───────────────────────────────────────────────────
 
 /// How many snapshots a post keeps before the oldest are dropped.
@@ -847,17 +955,20 @@ pub async fn revisions_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResu
     Ok(())
 }
 
-/// Posts whose staging row is in `stage` (`"draft"` | `"published"`).
+/// Posts whose staging row is in `stage` (`"draft"` | `"published"`), trash
+/// excluded — a thrown-away draft is not one of "the drafts".
 pub async fn posts_in_stage(
     db: &DatabaseConnection,
     stage: String,
 ) -> AppResult<Vec<post::Model>> {
+    let trashed = trashed_ids(db).await?;
     let ids: Vec<i32> = post_stage::Entity::find()
         .filter(post_stage::Column::Stage.eq(stage))
         .all(db)
         .await?
         .into_iter()
         .map(|s| s.post_id)
+        .filter(|id| !trashed.contains(id))
         .collect();
 
     if ids.is_empty() {
@@ -1282,6 +1393,113 @@ mod tests {
             crate::sync_state::SyncState::Conflict,
             "the other machine's change was about to be overwritten silently"
         );
+    }
+
+    /// A trashed post is deleted as far as every listing is concerned, while
+    /// nothing about it is actually gone.
+    #[tokio::test]
+    async fn a_trashed_post_leaves_the_library_and_comes_back_whole() {
+        let db = connect_in_memory().await.unwrap();
+        let kept = create::<post::Model>(&db, post_row("kept", None, None)).await.unwrap();
+        let mut binned = post_row("binned", None, None);
+        binned.title = "Thrown away".into();
+        let binned = create::<post::Model>(&db, binned).await.unwrap();
+        revision_add(&db, revision_row(binned.id, "an old draft", 1)).await.unwrap();
+
+        trash_set(&db, binned.id, 1_700_000_000).await.unwrap();
+
+        let active: Vec<i32> = list_active_posts(&db).await.unwrap().iter().map(|p| p.id).collect();
+        assert_eq!(active, vec![kept.id]);
+        let trashed = list_trashed_posts(&db).await.unwrap();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].0.title, "Thrown away");
+        assert_eq!(trashed[0].1.trashed_at, 1_700_000_000);
+        // The history is not part of what a soft delete takes away.
+        assert_eq!(revisions_for_post(&db, binned.id).await.unwrap().len(), 1);
+
+        trash_clear(&db, binned.id).await.unwrap();
+
+        assert_eq!(list_active_posts(&db).await.unwrap().len(), 2);
+        assert!(list_trashed_posts(&db).await.unwrap().is_empty());
+        assert_eq!(
+            get::<post::Model>(&db, binned.id).await.unwrap().unwrap().title,
+            "Thrown away",
+            "the post came back changed"
+        );
+    }
+
+    /// The cloud has nothing to say about a post that has been thrown away here.
+    /// Applying the refresh would rewrite the copy being kept in case it is
+    /// wanted back.
+    #[tokio::test]
+    async fn a_refresh_leaves_a_trashed_post_alone() {
+        let db = connect_in_memory().await.unwrap();
+        let mut local = post_row("a-post", None, None);
+        local.title = "Local title".into();
+        let post = create::<post::Model>(&db, local).await.unwrap();
+        trash_set(&db, post.id, 1).await.unwrap();
+
+        let mut remote = post_row("a-post", None, None);
+        remote.title = "Cloud title".into();
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
+
+        assert_eq!(
+            get::<post::Model>(&db, post.id).await.unwrap().unwrap().title,
+            "Local title",
+            "a refresh overwrote a post in the trash"
+        );
+    }
+
+    /// And the other direction: a post deleted in the cloud must not empty the
+    /// local trash, which is the only place its recoverable copy lives.
+    #[tokio::test]
+    async fn a_refresh_does_not_empty_the_trash() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("was-live", None, None)).await.unwrap();
+        sync_mark_synced(&db, post.id, "v1".into(), None, 1_700_000_000).await.unwrap();
+        trash_set(&db, post.id, 1).await.unwrap();
+
+        let (_, deleted) = mirror_posts(&db, vec![], &[]).await.unwrap();
+
+        assert_eq!(deleted, 0);
+        assert!(
+            get::<post::Model>(&db, post.id).await.unwrap().is_some(),
+            "a refresh permanently deleted a post from the trash"
+        );
+    }
+
+    /// Trashing something twice must not reorder the view under the person
+    /// looking at it.
+    #[tokio::test]
+    async fn re_trashing_keeps_the_time_it_first_went() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+
+        trash_set(&db, post.id, 100).await.unwrap();
+        let again = trash_set(&db, post.id, 900).await.unwrap();
+
+        assert_eq!(again.trashed_at, 100);
+    }
+
+    /// A trashed draft is not one of "the drafts".
+    #[tokio::test]
+    async fn stage_listings_skip_the_trash() {
+        let db = connect_in_memory().await.unwrap();
+        let kept = create::<post::Model>(&db, post_row("kept", None, None)).await.unwrap();
+        let binned = create::<post::Model>(&db, post_row("binned", None, None)).await.unwrap();
+        for id in [kept.id, binned.id] {
+            stage_set(
+                &db,
+                post_stage::Model { post_id: id, stage: post_stage::DRAFT.into(), staged_at: 0 },
+            )
+            .await
+            .unwrap();
+        }
+
+        trash_set(&db, binned.id, 1).await.unwrap();
+
+        let drafts = posts_in_stage(&db, post_stage::DRAFT.to_string()).await.unwrap();
+        assert_eq!(drafts.iter().map(|p| p.id).collect::<Vec<_>>(), vec![kept.id]);
     }
 
     fn revision_row(post_id: i32, body: &str, at: i64) -> post_revision::Model {

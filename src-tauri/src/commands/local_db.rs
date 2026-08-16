@@ -12,6 +12,7 @@ use crate::entities::post::Model as PostModel;
 use crate::entities::{post_revision, post_stage};
 use crate::entities::series::Model as SeriesModel;
 use crate::error::{AppError, AppResult};
+use crate::media_keys;
 use crate::revisions;
 use super::*;
 
@@ -331,9 +332,11 @@ pub async fn create_post(
     Ok(created)
 }
 
+/// The library, trash excluded — what every screen except the trash view means
+/// by "the posts".
 #[tauri::command]
 pub async fn list_posts(conn: State<'_, DatabaseConnection>) -> AppResult<Vec<PostModel>> {
-    db::list::<PostModel>(conn.inner()).await
+    db::list_active_posts(conn.inner()).await
 }
 
 #[tauri::command]
@@ -354,16 +357,137 @@ pub async fn update_post(
     db::update::<PostModel>(conn.inner(), post).await
 }
 
+// ── Trash ───────────────────────────────────────────────────────────────────────
+
+/// Move a post to the trash: it leaves every listing, and nothing else about it
+/// changes.
+///
+/// This is what the delete button does. The body, the staging and sync rows and
+/// the entire revision history stay exactly where they are, which is what makes
+/// [`restore_post`] a single row deletion rather than a reconstruction.
+///
+/// **Nothing here reaches the cloud.** A published post that is trashed is still
+/// on the blog and stays there; taking it down is `unpublish_post`, deliberately
+/// and separately. Deleting a local copy and unpublishing are different
+/// intentions, and a delete button that quietly did both would be the more
+/// destructive of the two guesses.
 #[tauri::command]
-pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<()> {
-    // The staging, sync and revision rows describe a post that is about to stop
-    // existing; leaving them behind would attach them to whichever post is
-    // assigned this id next — and a stranger's history is a worse thing to
-    // inherit than a stale stage.
-    let _ = db::stage_clear(conn.inner(), id).await;
-    let _ = db::sync_clear(conn.inner(), id).await;
-    let _ = db::revisions_clear(conn.inner(), id).await;
-    db::delete::<PostModel>(conn.inner(), id).await
+pub async fn trash_post(
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+) -> AppResult<crate::entities::post_trash::Model> {
+    // Refuse a post that is not there rather than writing a trash row pointing
+    // at nothing, which would be invisible in every listing including the trash.
+    db::get::<PostModel>(conn.inner(), id)
+        .await?
+        .ok_or(AppError::PostNotFound(id))?;
+    db::trash_set(conn.inner(), id, now_ts()).await
+}
+
+/// Take a post back out of the trash, with everything it had when it went in.
+#[tauri::command]
+pub async fn restore_post(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<PostModel> {
+    let post = db::get::<PostModel>(conn.inner(), id)
+        .await?
+        .ok_or(AppError::PostNotFound(id))?;
+    db::trash_clear(conn.inner(), id).await?;
+    Ok(post)
+}
+
+/// The trash, most recently thrown away first.
+#[tauri::command]
+pub async fn list_trashed_posts(
+    conn: State<'_, DatabaseConnection>,
+) -> AppResult<Vec<TrashedPost>> {
+    Ok(db::list_trashed_posts(conn.inner())
+        .await?
+        .into_iter()
+        .map(|(post, trash)| TrashedPost { trashed_at: trash.trashed_at, post })
+        .collect())
+}
+
+/// A post in the trash, as the trash view reads it.
+#[derive(serde::Serialize)]
+pub struct TrashedPost {
+    #[serde(flatten)]
+    pub post: PostModel,
+    /// Unix seconds. The view sorts and dates by this rather than by the post's
+    /// own timestamps, which describe when it was written, not when it went.
+    pub trashed_at: i64,
+}
+
+/// Delete a post from this machine for good: the row, the cached Markdown, the
+/// staging and sync rows, and the revision history.
+///
+/// Only reachable from the trash, and only from a control that says what it
+/// does. Everything else in this file can be walked back; this is the one thing
+/// that cannot, which is why it is behind two deliberate steps rather than one.
+///
+/// **Local only, like trashing.** A post that is live on the blog stays live
+/// after this — the local copy is what goes. Deleting the published article is
+/// `unpublish_post` followed by the cloud's own delete, and doing it silently
+/// from here would mean a control labelled "delete from this machine" quietly
+/// editing the blog.
+#[tauri::command]
+pub async fn delete_post_permanently(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+) -> AppResult<()> {
+    let post = db::get::<PostModel>(conn.inner(), id)
+        .await?
+        .ok_or(AppError::PostNotFound(id))?;
+    purge(&app, conn.inner(), &post).await
+}
+
+/// Empty the trash, returning how many posts went.
+///
+/// One failure does not stop the rest: a body file that cannot be removed is
+/// worth logging, not worth leaving the other twelve posts in a trash the person
+/// has just asked to empty.
+#[tauri::command]
+pub async fn empty_trash(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+) -> AppResult<usize> {
+    let trashed = db::list_trashed_posts(conn.inner()).await?;
+    let mut removed = 0usize;
+    for (post, _) in trashed {
+        match purge(&app, conn.inner(), &post).await {
+            Ok(()) => removed += 1,
+            Err(e) => log::error!("Could not permanently delete post {}: {e}", post.id),
+        }
+    }
+    Ok(removed)
+}
+
+/// Remove every local trace of a post. Shared by the single and bulk deletes.
+///
+/// The row goes last. Everything before it is a side table keyed by the post's
+/// id, and leaving one behind would attach a stranger's staging, sync record or
+/// draft history to whichever post is assigned that id next.
+async fn purge(
+    app: &tauri::AppHandle,
+    conn: &DatabaseConnection,
+    post: &PostModel,
+) -> AppResult<()> {
+    // The body, which nothing else would ever clean up: `posts/<slug>.md`
+    // outlives the row, and the next post to take that slug would open with a
+    // deleted post's text in it.
+    if media_keys::is_safe_slug(&post.slug) {
+        let path = posts_dir(app).await?.join(format!("{}.md", post.slug));
+        if let Err(e) = tokio::fs::remove_file(&path).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("Could not remove {}: {e}", path.display());
+            }
+        }
+    }
+
+    let _ = db::stage_clear(conn, post.id).await;
+    let _ = db::sync_clear(conn, post.id).await;
+    let _ = db::revisions_clear(conn, post.id).await;
+    let _ = db::trash_clear(conn, post.id).await;
+    db::delete::<PostModel>(conn, post.id).await
 }
 
 /// Every post's sync state, keyed by post id — what the list needs to show
@@ -387,7 +511,7 @@ pub async fn list_sync_states(
             .map(|s| (s.post_id, s))
             .collect();
 
-    Ok(db::list::<PostModel>(conn.inner())
+    Ok(db::list_active_posts(conn.inner())
         .await?
         .into_iter()
         .map(|post| PostSyncState {

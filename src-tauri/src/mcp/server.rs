@@ -218,11 +218,25 @@ impl BlogMcp {
             .join("posts"))
     }
 
+    /// One post by id, refusing anything in the trash.
+    ///
+    /// A trashed post is deleted as far as the app is concerned, and an agent
+    /// editing or publishing one would be reaching around a decision the person
+    /// made. Saying so is better than a bare "no such post": the id is real, and
+    /// the agent may have read it from a listing taken before the delete.
     async fn load_post(&self, id: i32) -> Result<PostModel, ErrorData> {
-        db::get::<PostModel>(self.conn().inner(), id)
+        let post = db::get::<PostModel>(self.conn().inner(), id)
             .await
             .map_err(internal)?
-            .ok_or_else(|| invalid(format!("No post with id {id}")))
+            .ok_or_else(|| invalid(format!("No post with id {id}")))?;
+        if db::trash_get(self.conn().inner(), id)
+            .await
+            .map_err(internal)?
+            .is_some()
+        {
+            return Err(invalid(format!("Post {id} is in the trash")));
+        }
+        Ok(post)
     }
 
     /// A post's editorial stage and how its content compares with the cloud —
@@ -245,7 +259,9 @@ impl BlogMcp {
         description = "List every post in the local library with its metadata and editorial stage. Bodies are omitted; use get_post for one post's Markdown."
     )]
     pub async fn list_posts(&self) -> Result<Json<Vec<PostOut>>, ErrorData> {
-        let posts = db::list::<PostModel>(self.conn().inner())
+        // Trash excluded, so an agent's view of the library is the same one the
+        // person has in front of them.
+        let posts = db::list_active_posts(self.conn().inner())
             .await
             .map_err(internal)?;
 

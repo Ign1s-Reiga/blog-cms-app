@@ -394,9 +394,19 @@ pub async fn mcp_approve_publish(
     // Read the post fresh rather than trusting what was captured at request
     // time: the human is approving the post as it stands now.
     let outcome = async {
-        let post = db::get::<PostModel>(app.state::<DatabaseConnection>().inner(), request.post_id)
+        let conn = app.state::<DatabaseConnection>();
+        let post = db::get::<PostModel>(conn.inner(), request.post_id)
             .await?
             .ok_or(AppError::PostVanished(request.post_id))?;
+
+        // A request can outlive the person's mind about the post: it is queued,
+        // and the post is thrown away before anyone gets to the queue. Approving
+        // it then would publish something that has been deleted here — and the
+        // approval screen shows the request, not the trash, so there is nothing
+        // on it to give that away.
+        if db::trash_get(conn.inner(), post.id).await?.is_some() {
+            return Err(AppError::PostInTrash(post.slug));
+        }
 
         let body = commands::read_post_markdown(app.clone(), post.slug.clone()).await?;
         let tags = post
