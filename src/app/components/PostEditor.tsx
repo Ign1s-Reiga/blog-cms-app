@@ -205,6 +205,17 @@ export function PostEditor() {
   /// The post id as it is right now — a new post gains one mid-session, and the
   /// unmount flush has to write to it rather than create a second post.
   const postIdRef = useRef<number | null>(null);
+  /// Whether a post is being read out of the backend right now.
+  ///
+  /// Autosave must stand well clear of that. `loadFromBackend` sets the title
+  /// and tags as soon as the row arrives and the body only once it has been
+  /// fetched — which reaches R2 for a post this machine has not cached — so for
+  /// as long as that download takes, the editor is showing a real title over an
+  /// empty body. A flush in that window writes the empty body over the post,
+  /// and then the load finishes and records the downloaded text as persisted:
+  /// the editor believes the right thing is on disk, nothing corrects it, and
+  /// every later read gets the emptied cache.
+  const loadingRef = useRef(false);
   /// The pending debounce, so a manual save can cancel it rather than have it
   /// fire again straight afterwards.
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -221,6 +232,9 @@ export function PostEditor() {
   // post is neither, so it starts clean and unpublished.
   const [live, setLive] = useState(false);
   const [sync, setSync] = useState<SyncState>('clean');
+  /// Bumped whenever a load finishes, purely to re-run the debounce effect —
+  /// see the `finally` in `loadFromBackend`.
+  const [loadEpoch, setLoadEpoch] = useState(0);
 
   /// Pull one post's metadata, body and sync state out of the backend into the
   /// editor. Used on mount and again after resolving a conflict, where keeping
@@ -231,26 +245,38 @@ export function PostEditor() {
       id: number,
       keepGoing: () => boolean = () => true,
     ) => {
-      const post = await invoke<{
-        title: string;
-        tags: string | null;
-        slug: string;
-        published: boolean;
-      } | null>('get_post', { id });
-      if (!post || !keepGoing()) return;
-      setTitle(post.title);
-      setTags(parseTags(post.tags));
-      setLive(post.published);
-      const md = await invoke<string>('read_post_markdown', { slug: post.slug });
-      if (!keepGoing()) return;
-      setBody(md);
-      // What was just loaded *is* what is on disk, so autosave has nothing to
-      // do until something changes. Without this, opening a post would write it
-      // straight back — and, for a published post, report unpublished edits
-      // nobody made.
-      persisted.current = { title: post.title, tags: parseTags(post.tags), body: md };
-      const state = await readSyncState(invoke, id);
-      if (keepGoing()) setSync(state);
+      // Held for the whole load, not just the fetch: the title lands on screen
+      // before the body does, and an autosave in between would write the empty
+      // body over the post. See `loadingRef`.
+      loadingRef.current = true;
+      try {
+        const post = await invoke<{
+          title: string;
+          tags: string | null;
+          slug: string;
+          published: boolean;
+        } | null>('get_post', { id });
+        if (!post || !keepGoing()) return;
+        setTitle(post.title);
+        setTags(parseTags(post.tags));
+        setLive(post.published);
+        const md = await invoke<string>('read_post_markdown', { slug: post.slug });
+        if (!keepGoing()) return;
+        setBody(md);
+        // What was just loaded *is* what is on disk, so autosave has nothing to
+        // do until something changes. Without this, opening a post would write
+        // it straight back — and, for a published post, report unpublished
+        // edits nobody made.
+        persisted.current = { title: post.title, tags: parseTags(post.tags), body: md };
+        const state = await readSyncState(invoke, id);
+        if (keepGoing()) setSync(state);
+      } finally {
+        loadingRef.current = false;
+        // The debounce effect reads a ref, so it needs telling that the answer
+        // has changed — otherwise an edit made *during* the load would sit
+        // unscheduled until the next keystroke.
+        setLoadEpoch((n) => n + 1);
+      }
     },
     [],
   );
@@ -326,14 +352,27 @@ export function PostEditor() {
         // Read after the queue has drained, not before: a manual save ahead of
         // this one has already stored its text and moved `persisted`, and the
         // usual answer here is that there is nothing left to write.
+        // A load may have started while this sat in the queue, and a load is
+        // exactly when the editor's state is half a post. See `loadingRef`.
+        if (loadingRef.current) return;
+
         const content = latest.current;
         if (sameContent(content, persisted.current)) return;
-        // A post that does not exist yet and has nothing in it is not worth
-        // creating. Otherwise opening the editor, typing one character and
-        // deleting it again would leave an untitled draft behind.
-        if (postIdRef.current === null && content.title.trim() === '' && content.body.trim() === '') {
-          return;
-        }
+
+        // Autosave writes to posts; it does not create them. A post's slug is
+        // derived from its title when the row is first written and never moves
+        // again — nothing in the app can edit it — so a timer firing partway
+        // through a title would fix the URL as `/my` for "My Complete Post",
+        // permanently and silently. The first Save or Publish is the moment the
+        // author has decided what the post is called, and that is the moment
+        // worth deriving a permanent name from.
+        //
+        // The cost is that a post which has never been saved at all is not
+        // protected by autosave. That is the smaller loss: an unsaved new draft
+        // is one Ctrl-S from safety and is visibly unsaved, whereas a wrong slug
+        // is invisible, permanent, and public once published.
+        const id = postIdRef.current;
+        if (id === null) return;
 
         const { invoke, isTauri } = await import('@tauri-apps/api/core');
         if (!isTauri()) return;
@@ -341,19 +380,12 @@ export function PostEditor() {
         setLocalSave({ kind: 'saving' });
         try {
           const saved = await invoke<{ id: number; published: boolean }>('autosave_post', {
-            id: postIdRef.current,
+            id,
             ...content,
           });
           // Recorded before anything else can fail: this text is on disk now,
           // and the next flush must not write it again.
           persisted.current = content;
-          if (postIdRef.current === null) {
-            postIdRef.current = saved.id;
-            setPostId(saved.id);
-            // Point the URL at the post autosave just created, so a reload — or
-            // the next manual save — targets it instead of making a second one.
-            window.history.replaceState(null, '', `/posts/edit?id=${saved.id}`);
-          }
           setLocalSave({ kind: 'saved' });
           setSync(await readSyncState(invoke, saved.id));
         } catch (err) {
@@ -401,6 +433,12 @@ export function PostEditor() {
   // typing stops. An edit that leaves the content as it was found schedules
   // nothing at all.
   useEffect(() => {
+    // Nothing is scheduled while a post is being read in. The title arrives
+    // before the body, and a timer started on that half-loaded state would be
+    // counting down towards writing an empty body over the post — `loadEpoch`
+    // re-runs this once the load is done, so an edit made during it is not
+    // forgotten either.
+    if (loadingRef.current) return;
     if (sameContent({ title, tags, body }, persisted.current)) return;
     const timer = setTimeout(() => void persistLocally(), AUTOSAVE_DELAY_MS);
     autosaveTimer.current = timer;
@@ -408,7 +446,7 @@ export function PostEditor() {
       clearTimeout(timer);
       if (autosaveTimer.current === timer) autosaveTimer.current = null;
     };
-  }, [title, tags, body, persistLocally]);
+  }, [title, tags, body, loadEpoch, persistLocally]);
 
   // Leaving the editor with a debounce still pending would lose whatever was
   // typed in the last second and a half. Both exits are covered: navigating
@@ -474,9 +512,16 @@ export function PostEditor() {
       // saved locally and staged `sync_failed`, and the error message here is
       // on a timer. Without this the pill would not appear until the page was
       // reloaded, and the post would look fine the moment the message cleared.
-      // A brand-new post whose first save failed has no id yet, so there is
-      // nothing to read.
-      if (postId !== null) setSync(await readSyncState(invoke, postId));
+      // The ref, not the state: this handler closed over `postId` before the
+      // save was queued, and a save that ran ahead of it may have given the
+      // post an id since. Reading the stale `null` would skip the refresh and
+      // leave the pre-publish state on screen once the error message clears,
+      // in exactly the case the badge matters most.
+      //
+      // A brand-new post whose first save failed still has no id anywhere, so
+      // there is genuinely nothing to read.
+      const current = postIdRef.current;
+      if (current !== null) setSync(await readSyncState(invoke, current));
       // `persisted` deliberately stays where it was. A failed publish may well
       // have stored the text locally before the upload failed — `save_post`
       // does the local half first — but the error does not say so, and an
