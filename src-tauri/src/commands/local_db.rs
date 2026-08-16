@@ -603,11 +603,31 @@ impl ArchivedBody {
     }
 
     /// Put it back, because the deletion did not happen after all.
+    ///
+    /// Only onto an empty space. A deletion that failed because the post was
+    /// restored leaves it live and editable, so an autosave or an MCP edit can
+    /// have written a newer body by the time this runs — and a plain rename
+    /// replaces files, which would lose that newer text under an older one that
+    /// was only ever set aside. Where something is already there, it is by
+    /// definition more recent than the copy this archived, and it wins.
+    ///
+    /// The check and the rename are not atomic, and cannot be: there is no
+    /// rename-if-absent. It narrows the window to the width of one syscall
+    /// pair, which is as far as the filesystem allows.
     async fn restore(self) {
-        if let Some((from, to)) = self.moved {
-            if let Err(e) = tokio::fs::rename(&to, &from).await {
-                log::error!("Could not put {} back after a failed deletion: {e}", from.display());
+        let Some((from, to)) = self.moved else { return };
+        if tokio::fs::try_exists(&from).await.unwrap_or(false) {
+            log::warn!(
+                "A newer body was written for {} while it was being deleted; keeping it",
+                from.display()
+            );
+            if let Err(e) = tokio::fs::remove_file(&to).await {
+                log::warn!("Could not remove {}: {e}", to.display());
             }
+            return;
+        }
+        if let Err(e) = tokio::fs::rename(&to, &from).await {
+            log::error!("Could not put {} back after a failed deletion: {e}", from.display());
         }
     }
 
@@ -774,11 +794,23 @@ pub async fn restore_revision(
         None => None,
     };
 
+    // Re-checked inside the transaction that writes. The guard above ran before
+    // the snapshot and the staged body, and another window can throw the post
+    // away in that time — leaving Restore-from-trash handing back a version
+    // changed after the deletion rather than the one discarded.
+    let txn = conn.inner().begin().await?;
+    if db::trash_get(&txn, current.id).await?.is_some() {
+        if let Some((staged, _)) = staged {
+            staged.discard().await;
+        }
+        return Err(AppError::PostInTrash(current.slug));
+    }
     let restored = db::update::<PostModel>(
-        conn.inner(),
+        &txn,
         PostModel { updated_at: now_ts(), ..revisions::apply(current.clone(), &revision) },
     )
     .await?;
+    txn.commit().await?;
 
     let body = match staged {
         Some((staged, body)) => {

@@ -673,7 +673,19 @@ pub async fn resolve_conflict(
             )
             .await;
 
-            let saved = db::update::<PostModel>(conn.inner(), model).await?;
+            // The trash check that counts: inside the transaction that writes.
+            // The one at the top of this command ran before a D1 listing and an
+            // R2 download, which is plenty of time for another window to throw
+            // the post away — and taking the cloud's copy over it would replace
+            // the very version being kept for recovery.
+            let txn = conn.inner().begin().await?;
+            if db::trash_get(&txn, post.id).await?.is_some() {
+                staged.discard().await;
+                return Err(AppError::PostInTrash(post.slug));
+            }
+            let saved = db::update::<PostModel>(&txn, model).await?;
+            txn.commit().await?;
+
             staged
                 .commit(&dir.join(format!("{}.md", saved.slug)))
                 .await?;
