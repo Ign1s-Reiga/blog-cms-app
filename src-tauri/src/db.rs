@@ -12,7 +12,9 @@ use sea_orm::{
 use tauri::Manager;
 
 use crate::entities::record::{Id, Record};
-use crate::entities::{post, post_revision, post_stage, post_sync, post_trash, series};
+use crate::entities::{
+    post, post_revision, post_stage, post_sync, post_tombstone, post_trash, series,
+};
 use crate::error::{AppError, AppResult};
 
 /// Open (creating if needed) the local SQLite database and ensure its schema
@@ -89,6 +91,14 @@ async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
     db.execute(&sync_tbl)
         .await
         .map_err(|e| AppError::db_init("Failed to create `post_sync` table", e))?;
+
+    // Local-only as well: which slugs have been deleted here for good. See
+    // `post_tombstone` for why "forever" needs writing down.
+    let mut tombstone_tbl = schema.create_table_from_entity(post_tombstone::Entity);
+    tombstone_tbl.if_not_exists();
+    db.execute(&tombstone_tbl)
+        .await
+        .map_err(|e| AppError::db_init("Failed to create `post_tombstone` table", e))?;
 
     // Local-only as well: which posts are in the trash.
     let mut trash_tbl = schema.create_table_from_entity(post_trash::Entity);
@@ -337,7 +347,26 @@ pub async fn mirror_posts(
     let series = SeriesMap::build(db, remote_series).await?;
     let trashed = trashed_ids(db).await?;
 
+    // Slugs deleted here for good. The cloud's copy is deliberately left alone
+    // by a local deletion, so without this the very next pull would insert the
+    // post back into the library and "Delete forever" would last exactly until
+    // somebody pressed Refresh.
+    let tombstoned = tombstoned_slugs(db).await?;
+
+    // And any tombstone whose post the cloud no longer has is finished: there is
+    // nothing left for it to keep out, and leaving it would silently refuse a
+    // slug somebody may want to use again.
+    for slug in &tombstoned {
+        if !remote_slugs.contains(slug) {
+            let _ = tombstone_clear(db, slug).await;
+        }
+    }
+
     for post in remote {
+        if tombstoned.contains(&post.slug) && post_by_slug(db, &post.slug).await?.is_none() {
+            log::info!("Post `{}` was deleted here for good; not pulling it back", post.slug);
+            continue;
+        }
         upsert_post_from_remote(db, post, &series, &trashed).await?;
     }
 
@@ -785,6 +814,48 @@ pub async fn sync_mark_synced(
 /// Forget a post's sync record. Clearing an absent row is not an error.
 pub async fn sync_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
     post_sync::Entity::delete_by_id(post_id).exec(db).await?;
+    Ok(())
+}
+
+// ─── Tombstones (local only) ──────────────────────────────────────────────────
+
+/// Record that a slug was permanently deleted here — see [`post_tombstone`].
+pub async fn tombstone_set(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    deleted_at: i64,
+) -> AppResult<()> {
+    if post_tombstone::Entity::find_by_id(slug.to_string())
+        .one(db)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    post_tombstone::ActiveModel {
+        slug: Set(slug.to_string()),
+        deleted_at: Set(deleted_at),
+    }
+    .insert(db)
+    .await?;
+    Ok(())
+}
+
+/// Every slug this machine has deleted for good.
+pub async fn tombstoned_slugs(
+    db: &impl ConnectionTrait,
+) -> AppResult<std::collections::HashSet<String>> {
+    Ok(post_tombstone::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|t| t.slug)
+        .collect())
+}
+
+/// Forget a tombstone, because the thing it was keeping out is gone.
+pub async fn tombstone_clear(db: &impl ConnectionTrait, slug: &str) -> AppResult<()> {
+    post_tombstone::Entity::delete_by_id(slug.to_string()).exec(db).await?;
     Ok(())
 }
 
@@ -1481,6 +1552,45 @@ mod tests {
             get::<post::Model>(&db, post.id).await.unwrap().is_some(),
             "a refresh permanently deleted a post from the trash"
         );
+    }
+
+    /// "Delete forever" has to survive the next Refresh. The cloud's copy is
+    /// deliberately left alone by a local deletion, so without a tombstone the
+    /// mirror reads the remote post as one this machine has never seen and
+    /// inserts it straight back.
+    #[tokio::test]
+    async fn a_permanently_deleted_post_is_not_pulled_back() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("was-live", None, None)).await.unwrap();
+
+        // What `purge` leaves behind.
+        delete::<post::Model>(&db, post.id).await.unwrap();
+        tombstone_set(&db, "was-live", 1_700_000_000).await.unwrap();
+
+        // The cloud still has it, as it always would.
+        mirror_posts(&db, vec![post_row("was-live", None, None)], &[]).await.unwrap();
+
+        assert!(
+            post_by_slug(&db, "was-live").await.unwrap().is_none(),
+            "a refresh undid a permanent deletion"
+        );
+    }
+
+    /// And the tombstone is not forever either: once the cloud's copy is gone
+    /// there is nothing left to keep out, and a slug nobody is using should not
+    /// stay quietly refused.
+    #[tokio::test]
+    async fn a_tombstone_is_dropped_once_the_cloud_forgets_the_post_too() {
+        let db = connect_in_memory().await.unwrap();
+        tombstone_set(&db, "was-live", 1_700_000_000).await.unwrap();
+
+        mirror_posts(&db, vec![], &[]).await.unwrap();
+
+        assert!(tombstoned_slugs(&db).await.unwrap().is_empty());
+
+        // So the same slug can come back from the cloud afterwards.
+        mirror_posts(&db, vec![post_row("was-live", None, None)], &[]).await.unwrap();
+        assert!(post_by_slug(&db, "was-live").await.unwrap().is_some());
     }
 
     /// Trashing something twice must not reorder the view under the person

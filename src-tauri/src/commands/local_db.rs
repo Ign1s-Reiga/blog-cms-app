@@ -522,6 +522,11 @@ async fn purge(
     db::revisions_clear(&txn, post.id).await?;
     db::trash_clear(&txn, post.id).await?;
     db::delete::<PostModel>(&txn, post.id).await?;
+    // The one thing this deletion leaves behind, and the reason it can be called
+    // permanent: the cloud's copy is untouched by design, so without a record
+    // that this slug was deleted here the next refresh would pull the post
+    // straight back in. See `post_tombstone`.
+    db::tombstone_set(&txn, &post.slug, now_ts()).await?;
     txn.commit().await?;
 
     // `posts/<slug>.md`, which nothing else would ever clean up.
