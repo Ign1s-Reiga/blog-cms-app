@@ -315,6 +315,14 @@ export function PostEditor() {
     }
     setSaveState({ kind: 'saving', publish: false });
     try {
+      // "Keep mine" settles the conflict on what is *stored*, so what is on
+      // screen has to be stored first — cancelling the debounce above would
+      // otherwise drop the last second and a half of typing, and the reload
+      // afterwards would replace the editor with the older copy that won.
+      //
+      // "Keep cloud" discards local work by definition, so there is nothing to
+      // flush and the cancelled timer is exactly right.
+      if (keep === 'keep_local') await flushPending();
       // Through the queue, so an autosave already in flight finishes first and
       // this lands after it rather than under it.
       await enqueueWrite(() => invoke('resolve_conflict', { postId, keep }));
@@ -413,7 +421,11 @@ export function PostEditor() {
           // Recorded before anything else can fail: this text is on disk now,
           // and the next flush must not write it again.
           persisted.current = content;
-          setLocalSave({ kind: 'saved' });
+          // Only if nothing has moved since. Typing while a write is in flight
+          // leaves this content already out of date on arrival, and announcing
+          // it as saved would put "Saved locally" over text that is still
+          // waiting for the next debounce.
+          setLocalSave(sameContent(latest.current, content) ? { kind: 'saved' } : { kind: 'idle' });
           setSync(await readSyncState(invoke, saved.id));
         } catch (err) {
           // Deliberately sticky, and deliberately harmless: the editor's
@@ -427,22 +439,24 @@ export function PostEditor() {
     [enqueueWrite],
   );
 
-  /// Write what is on screen to disk before a restore replaces it.
+  /// Write what is on screen to disk, and refuse to carry on if it did not
+  /// land.
   ///
-  /// Autosave makes this nearly always a no-op — the debounce has usually
-  /// fired already — but "nearly always" is not the promise the history panel
-  /// makes. A restore within a second and a half of the last keystroke would
-  /// otherwise discard those keystrokes: `restore_revision` snapshots what is
-  /// *stored*, and the reload afterwards overwrites what is not.
+  /// Used by the two operations that go on to *replace* the editor's contents
+  /// from what is stored — restoring a revision, and settling a conflict by
+  /// keeping the local copy. Both would otherwise act on the last flushed
+  /// version and then reload it over the text on screen, discarding anything
+  /// typed in the second and a half since. Autosave makes that a narrow window
+  /// and not a closed one, which is not the promise either operation makes.
   ///
   /// `persistLocally` reports its own failures rather than throwing, so the
-  /// check is on the outcome. If the text on screen is still not the text on
-  /// disk, the flush did not land, and the restore must not proceed over it.
-  const flushBeforeRestore = async () => {
+  /// check is on the outcome: if what is on screen is still not what is on
+  /// disk, the caller must not proceed over it.
+  const flushPending = async () => {
     if (postIdRef.current === null) return;
     await persistLocally();
     if (!sameContent(latest.current, persisted.current)) {
-      throw new Error('Could not save the current version before restoring');
+      throw new Error('Could not save the current version first');
     }
   };
 
@@ -1064,7 +1078,7 @@ export function PostEditor() {
         open={historyOpen}
         postId={postId}
         onClose={() => setHistoryOpen(false)}
-        onBeforeRestore={flushBeforeRestore}
+        onBeforeRestore={flushPending}
         onRestored={reloadAfterRestore}
       />
 
