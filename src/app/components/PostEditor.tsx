@@ -7,6 +7,7 @@ import {
   Bold,
   Columns2,
   Eye,
+  History,
   ImagePlus,
   Italic,
   Link2,
@@ -27,6 +28,7 @@ import { appDataDir, join } from '@tauri-apps/api/path';
 import { Button } from '@/components/ui/button';
 import { StatusPill } from '@/components/StatusPill';
 import { MediaPicker, type MediaEntry } from '@/components/MediaPicker';
+import { RevisionHistory } from '@/components/RevisionHistory';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
 
@@ -154,6 +156,13 @@ async function readSyncState(
   }
 }
 
+/// The editor's content, as compared against what is already stored.
+type Content = { title: string; tags: string; body: string };
+
+function sameContent(a: Content, b: Content): boolean {
+  return a.title === b.title && a.tags === b.tags && a.body === b.body;
+}
+
 // Editor save/publish status, for button feedback.
 type SaveState =
   | { kind: 'idle' }
@@ -174,6 +183,10 @@ export function PostEditor() {
   // post is neither, so it starts clean and unpublished.
   const [live, setLive] = useState(false);
   const [sync, setSync] = useState<SyncState>('clean');
+
+  /// The content last known to be on disk, so the editor can tell whether what
+  /// is on screen has been written down anywhere yet.
+  const persisted = useRef<Content>({ title: '', tags: '', body: '' });
 
   /// Pull one post's metadata, body and sync state out of the backend into the
   /// editor. Used on mount and again after resolving a conflict, where keeping
@@ -197,6 +210,9 @@ export function PostEditor() {
       const md = await invoke<string>('read_post_markdown', { slug: post.slug });
       if (!keepGoing()) return;
       setBody(md);
+      // What was just loaded is what is on disk, so nothing on screen is
+      // unsaved until the author types.
+      persisted.current = { title: post.title, tags: parseTags(post.tags), body: md };
       const state = await readSyncState(invoke, id);
       if (keepGoing()) setSync(state);
     },
@@ -243,6 +259,31 @@ export function PostEditor() {
     };
   }, [loadFromBackend]);
 
+  /// Write what is on screen to disk before a restore replaces it.
+  ///
+  /// The panel promises that the version being left is kept, and the version
+  /// being left is the one the author is looking at. `restore_revision`
+  /// snapshots what is *stored*, though, so edits made since the last save
+  /// would be captured by nothing and then overwritten by the reload that
+  /// follows — the one loss this whole feature exists to prevent, arrived at
+  /// through the button labelled Restore.
+  ///
+  /// Saving them first puts them in the history twice over: this save records
+  /// the version before them, and the restore records them.
+  ///
+  /// A draft save, never a publish. Restoring is a local act, and a rollback
+  /// that pushed the author's unsaved paragraph to the blog on the way past
+  /// would be a considerably worse surprise than the one being fixed.
+  const flushBeforeRestore = async () => {
+    if (postId === null) return;
+    const content: Content = { title, tags, body };
+    if (sameContent(content, persisted.current)) return;
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
+    if (!isTauri()) return;
+    await invoke('save_post', { id: postId, ...content, published: false });
+    persisted.current = content;
+  };
+
   // Save the post: `publish=false` keeps it a local draft; `publish=true` also
   // pushes the body to R2 and metadata to D1 (see the `save_post` command).
   const handleSave = async (publish: boolean) => {
@@ -251,13 +292,15 @@ export function PostEditor() {
     if (!isTauri()) return;
     setSaveState({ kind: 'saving', publish });
     try {
+      // Captured before the await, so the baseline recorded below is the text
+      // that actually went to disk rather than whatever has been typed since.
+      const content: Content = { title, tags, body };
       const saved = await invoke<{ id: number; published: boolean }>('save_post', {
         id: postId,
-        title,
-        tags,
-        body,
+        ...content,
         published: publish,
       });
+      persisted.current = content;
       setPostId(saved.id);
       // Point the URL at the saved post so a refresh / next save targets it.
       window.history.replaceState(null, '', `/posts/edit?id=${saved.id}`);
@@ -283,6 +326,21 @@ export function PostEditor() {
 
   const [mode, setMode] = useState<EditorMode>('write');
   const [preview, setPreview] = useState('');
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  /// Re-read the post after a restore. The backend has replaced the row and the
+  /// cached Markdown, so whatever is in the textarea is a version that no longer
+  /// exists — leaving it there would let the next save push it straight back
+  /// over the thing that was just restored.
+  const reloadAfterRestore = async () => {
+    if (postId === null) return;
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
+    if (!isTauri()) return;
+    // Failures propagate to the history panel, which keeps itself open and says
+    // so. Swallowing them here would close the panel over an editor still
+    // showing the version that was just replaced.
+    await loadFromBackend(invoke, postId);
+  };
 
   // The preview palette is bound to the app theme in markdown-theme.css (the
   // preset's light-dark() colors don't follow next-themes' class — see that
@@ -761,6 +819,13 @@ export function PostEditor() {
   return (
     <div className='flex flex-col flex-1 min-h-0 bg-white dark:bg-[#161616]'>
       <MediaPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={pickFromLibrary} />
+      <RevisionHistory
+        open={historyOpen}
+        postId={postId}
+        onClose={() => setHistoryOpen(false)}
+        onBeforeRestore={flushBeforeRestore}
+        onRestored={reloadAfterRestore}
+      />
 
       {/* ── Topbar ──────────────────────────────────────────────────────── */}
       <div className='relative flex items-center justify-between px-5 h-[48px] shrink-0 border-b border-zinc-200 dark:border-white/[0.06]'>
@@ -861,6 +926,30 @@ export function PostEditor() {
             <ImagePlus size={13} strokeWidth={2} />
             Insert media
           </Button>
+
+          {/* Hidden until the post has been saved once: history is kept from
+              the first save onwards, so a post that has never been saved has
+              nothing to offer behind this button.
+
+              Disabled while a save or publish is in flight, for the same reason
+              those buttons disable themselves — and one more. A restore during a
+              slow publish would run its own save and its own rollback alongside
+              a command that finishes by recording the hash of the version it
+              started with, leaving the restored text marked as the version the
+              cloud holds. */}
+          {postId !== null && (
+            <Button
+              variant='ghost'
+              size='sm'
+              onClick={() => setHistoryOpen(true)}
+              disabled={saveState.kind === 'saving'}
+              title='Earlier versions of this post, and a way back to any of them'
+              className='h-[28px] px-2 gap-1.5 rounded-[5px] text-[12px] font-medium text-zinc-500 dark:text-zinc-400'
+            >
+              <History size={13} strokeWidth={2} />
+              History
+            </Button>
+          )}
 
           <Button
             variant='outline'

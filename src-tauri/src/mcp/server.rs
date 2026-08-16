@@ -309,6 +309,9 @@ impl BlogMcp {
         Parameters(params): Parameters<UpdateDraftParams>,
     ) -> Result<Json<PostOut>, ErrorData> {
         let mut post = self.load_post(params.id).await?;
+        // Kept whole before the parameters are applied over it, so the snapshot
+        // below records the post as it stood rather than half of this edit.
+        let original = post.clone();
 
         if let Some(title) = params.title {
             let title = title.trim().to_string();
@@ -353,6 +356,22 @@ impl BlogMcp {
                 .await
                 .map_err(internal)?,
         };
+
+        // An agent's edit is exactly the kind this history is for: it arrives
+        // without anyone watching, and the post it lands on may be one a person
+        // was in the middle of. Taken before the row is touched and while the
+        // old body is still on disk, and best effort — an agent's edit is not
+        // refused because a record of the previous version could not be kept.
+        //
+        // `original` rather than `post`: the latter already carries this edit's
+        // title and tags.
+        crate::revisions::snapshot_or_log(
+            &self.app,
+            self.conn().inner(),
+            &original,
+            crate::entities::post_revision::MCP,
+        )
+        .await;
 
         let saved = db::update::<PostModel>(self.conn().inner(), post)
             .await

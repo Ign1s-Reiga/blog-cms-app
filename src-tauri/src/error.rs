@@ -210,6 +210,12 @@ pub enum AppError {
     #[error("Post {0} is not in conflict")]
     NotConflicted(i32),
 
+    // ─── Revisions ────────────────────────────────────────────────────────────
+    /// A snapshot that is no longer in the table — most likely pruned by
+    /// [`crate::db::REVISIONS_PER_POST`] while its row sat on screen.
+    #[error("revision {0} not found")]
+    RevisionNotFound(i32),
+
     // ─── Updater ──────────────────────────────────────────────────────────────
     #[error("Updater unavailable: {0}")]
     UpdaterUnavailable(#[source] tauri_plugin_updater::Error),

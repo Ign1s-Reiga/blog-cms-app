@@ -6,12 +6,13 @@
 
 use sea_orm::{
     ActiveModelBehavior, ActiveModelTrait, ColumnTrait, ConnectionTrait, Database,
-    DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Schema, Set,
+    DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Schema,
+    Set,
 };
 use tauri::Manager;
 
 use crate::entities::record::{Id, Record};
-use crate::entities::{post, post_stage, post_sync, series};
+use crate::entities::{post, post_revision, post_stage, post_sync, series};
 use crate::error::{AppError, AppResult};
 
 /// Open (creating if needed) the local SQLite database and ensure its schema
@@ -88,6 +89,25 @@ async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
     db.execute(&sync_tbl)
         .await
         .map_err(|e| AppError::db_init("Failed to create `post_sync` table", e))?;
+
+    // Local-only too: what each post looked like before each edit.
+    let mut revision_tbl = schema.create_table_from_entity(post_revision::Entity);
+    revision_tbl.if_not_exists();
+    db.execute(&revision_tbl)
+        .await
+        .map_err(|e| AppError::db_init("Failed to create `post_revision` table", e))?;
+
+    // Every read of the table is "this post's history, newest first", and a
+    // library with a few hundred revisions would otherwise scan all of them to
+    // answer it.
+    db.execute_raw(sea_orm::Statement::from_string(
+        db.get_database_backend(),
+        "CREATE INDEX IF NOT EXISTS `idx_post_revision_post` \
+         ON `post_revision` (`post_id`, `created_at` DESC, `id` DESC)"
+            .to_string(),
+    ))
+    .await
+    .map_err(|e| AppError::db_init("Failed to index `post_revision`", e))?;
 
     // `post_sync` grew two columns after it first shipped. See `ensure_columns`
     // for why creating the table is not enough.
@@ -336,6 +356,7 @@ pub async fn mirror_posts(
 
         let _ = post_stage::Entity::delete_by_id(local.id).exec(db).await;
         let _ = sync_clear(db, local.id).await;
+        let _ = revisions_clear(db, local.id).await;
         post::Entity::delete_by_id(local.id).exec(db).await?;
         deleted += 1;
     }
@@ -721,6 +742,108 @@ pub async fn sync_mark_synced(
 /// Forget a post's sync record. Clearing an absent row is not an error.
 pub async fn sync_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
     post_sync::Entity::delete_by_id(post_id).exec(db).await?;
+    Ok(())
+}
+
+// ─── Revisions (local only) ───────────────────────────────────────────────────
+
+/// How many snapshots a post keeps before the oldest are dropped.
+///
+/// Whole bodies are stored, so the table grows with every edit and nothing else
+/// would ever shrink it — a post edited daily for a year would carry its entire
+/// first draft's worth of prose forever. Fifty is far more than the "undo that
+/// bad edit" this exists for needs, and still only a few hundred kilobytes of
+/// prose per post.
+pub const REVISIONS_PER_POST: usize = 50;
+
+/// Record a snapshot and drop anything past the cap.
+///
+/// Pruning happens here rather than on a schedule so the bound holds
+/// continuously: there is no window in which the table is over its limit, and no
+/// second place that has to remember this table exists.
+pub async fn revision_add(
+    db: &impl ConnectionTrait,
+    model: post_revision::Model,
+) -> AppResult<post_revision::Model> {
+    let post_id = model.post_id;
+    let created = model.into_insert().insert(db).await?;
+    prune_revisions(db, post_id).await?;
+    Ok(created)
+}
+
+/// Delete everything past the newest [`REVISIONS_PER_POST`] for one post.
+async fn prune_revisions(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
+    // Ordered exactly as the history is read, so the rows dropped are the ones
+    // the UI would have shown last. `id` breaks ties because several snapshots
+    // can share a second — a save and the publish that follows it, say — and a
+    // tie broken arbitrarily would prune whichever the query planner felt like.
+    //
+    // Ids only, and the offset is taken here rather than in SQL: SQLite rejects
+    // an `OFFSET` with no `LIMIT` beside it, and the alternative — a sentinel
+    // limit — reads as a magic number for the sake of a list that is fifty rows
+    // long by construction.
+    let ids: Vec<i32> = post_revision::Entity::find()
+        .select_only()
+        .column(post_revision::Column::Id)
+        .filter(post_revision::Column::PostId.eq(post_id))
+        .order_by_desc(post_revision::Column::CreatedAt)
+        .order_by_desc(post_revision::Column::Id)
+        .into_tuple()
+        .all(db)
+        .await?;
+    let surplus: Vec<i32> = ids.into_iter().skip(REVISIONS_PER_POST).collect();
+
+    if surplus.is_empty() {
+        return Ok(());
+    }
+    post_revision::Entity::delete_many()
+        .filter(post_revision::Column::Id.is_in(surplus))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// One post's snapshots, newest first.
+pub async fn revisions_for_post(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+) -> AppResult<Vec<post_revision::Model>> {
+    Ok(post_revision::Entity::find()
+        .filter(post_revision::Column::PostId.eq(post_id))
+        .order_by_desc(post_revision::Column::CreatedAt)
+        .order_by_desc(post_revision::Column::Id)
+        .all(db)
+        .await?)
+}
+
+/// The newest snapshot of a post, if it has any.
+pub async fn revision_head(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+) -> AppResult<Option<post_revision::Model>> {
+    Ok(post_revision::Entity::find()
+        .filter(post_revision::Column::PostId.eq(post_id))
+        .order_by_desc(post_revision::Column::CreatedAt)
+        .order_by_desc(post_revision::Column::Id)
+        .one(db)
+        .await?)
+}
+
+/// One snapshot by its own id.
+pub async fn revision_get(
+    db: &impl ConnectionTrait,
+    id: i32,
+) -> AppResult<Option<post_revision::Model>> {
+    Ok(post_revision::Entity::find_by_id(id).one(db).await?)
+}
+
+/// Forget a post's history. Only for a post that is itself being deleted —
+/// otherwise the rows would attach to whichever post is assigned that id next.
+pub async fn revisions_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
+    post_revision::Entity::delete_many()
+        .filter(post_revision::Column::PostId.eq(post_id))
+        .exec(db)
+        .await?;
     Ok(())
 }
 
@@ -1159,6 +1282,100 @@ mod tests {
             crate::sync_state::SyncState::Conflict,
             "the other machine's change was about to be overwritten silently"
         );
+    }
+
+    fn revision_row(post_id: i32, body: &str, at: i64) -> post_revision::Model {
+        post_revision::Model {
+            id: 0,
+            post_id,
+            title: "A post".into(),
+            excerpt: None,
+            tags: None,
+            published: false,
+            body: Some(body.to_string()),
+            origin: post_revision::SAVE.into(),
+            created_at: at,
+        }
+    }
+
+    /// History is read newest first, and snapshots sharing a second — a save and
+    /// the publish right after it — must still come back in the order they were
+    /// taken rather than in whatever order the rows were scanned.
+    #[tokio::test]
+    async fn revisions_come_back_newest_first() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+
+        for (body, at) in [("oldest", 100), ("middle", 200), ("newest", 200)] {
+            revision_add(&db, revision_row(post.id, body, at)).await.unwrap();
+        }
+
+        let bodies: Vec<String> = revisions_for_post(&db, post.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| r.body)
+            .collect();
+        assert_eq!(bodies, ["newest", "middle", "oldest"]);
+        assert_eq!(
+            revision_head(&db, post.id).await.unwrap().and_then(|r| r.body).as_deref(),
+            Some("newest")
+        );
+    }
+
+    /// Whole bodies are stored, so without a bound the table only ever grows.
+    /// The cap has to drop the *oldest* end: pruning the newest would leave a
+    /// history that cannot reach the version somebody just left.
+    #[tokio::test]
+    async fn the_oldest_revisions_are_pruned_once_the_cap_is_reached() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+
+        let total = REVISIONS_PER_POST as i64 + 5;
+        for n in 0..total {
+            revision_add(&db, revision_row(post.id, &format!("body {n}"), n)).await.unwrap();
+        }
+
+        let kept = revisions_for_post(&db, post.id).await.unwrap();
+        assert_eq!(kept.len(), REVISIONS_PER_POST);
+        assert_eq!(kept.first().unwrap().body.as_deref(), Some(format!("body {}", total - 1).as_str()));
+        assert_eq!(
+            kept.last().unwrap().body.as_deref(),
+            Some(format!("body {}", total - REVISIONS_PER_POST as i64).as_str()),
+            "pruning took from the wrong end"
+        );
+    }
+
+    /// One post's history is not another's — the pruning and the clearing both
+    /// have to stay inside the post they were asked about.
+    #[tokio::test]
+    async fn clearing_a_history_leaves_every_other_post_alone() {
+        let db = connect_in_memory().await.unwrap();
+        let mine = create::<post::Model>(&db, post_row("mine", None, None)).await.unwrap();
+        let yours = create::<post::Model>(&db, post_row("yours", None, None)).await.unwrap();
+
+        revision_add(&db, revision_row(mine.id, "mine", 1)).await.unwrap();
+        revision_add(&db, revision_row(yours.id, "yours", 1)).await.unwrap();
+
+        revisions_clear(&db, mine.id).await.unwrap();
+
+        assert!(revisions_for_post(&db, mine.id).await.unwrap().is_empty());
+        assert_eq!(revisions_for_post(&db, yours.id).await.unwrap().len(), 1);
+    }
+
+    /// A post deleted in the cloud takes its local history with it. Leaving the
+    /// rows behind would hand a stranger's drafts to whichever post is assigned
+    /// that id next.
+    #[tokio::test]
+    async fn a_post_removed_by_a_refresh_takes_its_history_with_it() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("was-live", None, None)).await.unwrap();
+        sync_mark_synced(&db, post.id, "v1".into(), None, 1_700_000_000).await.unwrap();
+        revision_add(&db, revision_row(post.id, "an old draft", 1)).await.unwrap();
+
+        mirror_posts(&db, vec![], &[]).await.unwrap();
+
+        assert!(revisions_for_post(&db, post.id).await.unwrap().is_empty());
     }
 
     /// What goes up carries the cloud's id for the series, never this machine's
