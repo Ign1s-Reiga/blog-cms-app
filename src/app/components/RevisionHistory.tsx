@@ -130,15 +130,28 @@ export function RevisionHistory({
     if (open) void load();
   }, [open, load]);
 
+  /// Dismissing the panel, from wherever it is asked for — Escape, the X, the
+  /// backdrop.
+  ///
+  /// Refused outright while a restore is running. The panel is what stands
+  /// between the editor and work that is still in flight: closing it hands back
+  /// an interactive editor whose text is about to be replaced by the reload,
+  /// and anything typed in that window is overwritten without trace. It is a
+  /// short wait, and the button says what it is waiting for.
+  const dismiss = useCallback(() => {
+    if (restoring) return;
+    onClose();
+  }, [restoring, onClose]);
+
   // Escape closes, matching the editor's other transient surfaces.
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') dismiss();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
+  }, [open, dismiss]);
 
   const select = async (summary: RevisionSummary) => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
@@ -180,7 +193,7 @@ export function RevisionHistory({
       aria-label='Version history'
       className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6'
       onPointerDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget) dismiss();
       }}
     >
       <div className='flex h-[76vh] w-full max-w-[900px] flex-col rounded-[8px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616]'>
@@ -198,7 +211,8 @@ export function RevisionHistory({
             variant='ghost'
             size='icon'
             aria-label='Close'
-            onClick={onClose}
+            onClick={dismiss}
+            disabled={restoring}
             className='size-[26px] rounded-[5px] text-zinc-400 dark:text-zinc-500'
           >
             <X size={13} strokeWidth={2} />
