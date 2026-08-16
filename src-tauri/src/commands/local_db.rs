@@ -4,7 +4,7 @@
 //! Cloudflare credentials. Anything that also writes to the cloud lives in
 //! `d1` or `r2` instead.
 
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, TransactionTrait};
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use crate::db;
@@ -468,6 +468,15 @@ pub async fn empty_trash(
     let trashed = db::list_trashed_posts(conn.inner()).await?;
     let mut removed = 0usize;
     for (post, _) in trashed {
+        // Re-read per post rather than trusted from the listing. Emptying the
+        // trash walks it one post at a time while the trash view stays live and
+        // interactive, so somebody can pull a post back out partway through —
+        // and this loop, working from the snapshot it started with, would then
+        // permanently delete the post they had just rescued.
+        if db::trash_get(conn.inner(), post.id).await?.is_none() {
+            log::info!("Post {} was restored while the trash was emptying; keeping it", post.id);
+            continue;
+        }
         match purge(&app, conn.inner(), &post).await {
             Ok(()) => removed += 1,
             Err(e) => log::error!("Could not permanently delete post {}: {e}", post.id),
@@ -486,9 +495,25 @@ async fn purge(
     conn: &DatabaseConnection,
     post: &PostModel,
 ) -> AppResult<()> {
-    // The body, which nothing else would ever clean up: `posts/<slug>.md`
-    // outlives the row, and the next post to take that slug would open with a
-    // deleted post's text in it.
+    // The database first, and all of it in one transaction, so a failure
+    // partway leaves the post exactly where it was — in the trash, whole, and
+    // still restorable.
+    //
+    // The body has to come after that commit, not before. Removing the file
+    // first means a database error afterwards reports the deletion as
+    // unsuccessful while the text is already gone: for a local-only draft, that
+    // is the content destroyed by an operation that said it had failed. A file
+    // left behind by the opposite ordering is only debris, and every path that
+    // creates a post writes its own body over whatever is there.
+    let txn = conn.begin().await?;
+    db::stage_clear(&txn, post.id).await?;
+    db::sync_clear(&txn, post.id).await?;
+    db::revisions_clear(&txn, post.id).await?;
+    db::trash_clear(&txn, post.id).await?;
+    db::delete::<PostModel>(&txn, post.id).await?;
+    txn.commit().await?;
+
+    // `posts/<slug>.md`, which nothing else would ever clean up.
     if media_keys::is_safe_slug(&post.slug) {
         let path = posts_dir(app).await?.join(format!("{}.md", post.slug));
         if let Err(e) = tokio::fs::remove_file(&path).await {
@@ -497,12 +522,7 @@ async fn purge(
             }
         }
     }
-
-    let _ = db::stage_clear(conn, post.id).await;
-    let _ = db::sync_clear(conn, post.id).await;
-    let _ = db::revisions_clear(conn, post.id).await;
-    let _ = db::trash_clear(conn, post.id).await;
-    db::delete::<PostModel>(conn, post.id).await
+    Ok(())
 }
 
 /// Every post's sync state, keyed by post id — what the list needs to show

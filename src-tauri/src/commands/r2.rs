@@ -479,6 +479,15 @@ async fn save(
         .join("assets");
 
     let synced = async {
+        // Re-checked here, immediately before the first cloud write. The guard
+        // at the top of this function ran several awaits ago — long enough to
+        // stage a body, commit metadata and take a snapshot — and the post can
+        // be thrown away in that window. What must not happen is publishing a
+        // deleted post; the local half above is recoverable, this is not.
+        if let Some(existing) = previous.as_ref() {
+            refuse_if_trashed(conn, &existing.post).await?;
+        }
+
         let (client, config) = cf()?;
 
         // Referenced local images → R2 under `posts/<slug>/<sha256>.<ext>`, and
