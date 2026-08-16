@@ -7,7 +7,7 @@
 use sea_orm::{
     ActiveModelBehavior, ActiveModelTrait, ColumnTrait, ConnectionTrait, Database,
     DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Schema,
-    Set,
+    Set, TransactionTrait,
 };
 use tauri::Manager;
 
@@ -345,29 +345,30 @@ pub async fn mirror_posts(
         remote.iter().map(|p| p.slug.clone()).collect();
     let upserted = remote.len();
     let series = SeriesMap::build(db, remote_series).await?;
-    let trashed = trashed_ids(db).await?;
 
-    // Slugs deleted here for good. The cloud's copy is deliberately left alone
-    // by a local deletion, so without this the very next pull would insert the
-    // post back into the library and "Delete forever" would last exactly until
-    // somebody pressed Refresh.
-    let tombstoned = tombstoned_slugs(db).await?;
-
-    // And any tombstone whose post the cloud no longer has is finished: there is
+    // Any tombstone whose post the cloud no longer has is finished: there is
     // nothing left for it to keep out, and leaving it would silently refuse a
     // slug somebody may want to use again.
-    for slug in &tombstoned {
-        if !remote_slugs.contains(slug) {
-            let _ = tombstone_clear(db, slug).await;
+    for slug in tombstoned_slugs(db).await? {
+        if !remote_slugs.contains(&slug) {
+            let _ = tombstone_clear(db, &slug).await;
         }
     }
 
+    // ── One transaction per post ──────────────────────────────────────────────
+    //
+    // A refresh is a long walk: a library's worth of reads and writes, over
+    // which somebody can perfectly well throw a post away or delete one for
+    // good. Every decision below therefore reads its precondition *inside* the
+    // transaction that acts on it. Checking first and writing afterwards — even
+    // immediately afterwards — leaves a window in which the answer changes
+    // between the two, and the losses on the other side of that window are the
+    // permanent kind: a trashed post overwritten or deleted outright, a
+    // "Delete forever" undone by the pull that follows it.
     for post in remote {
-        if tombstoned.contains(&post.slug) && post_by_slug(db, &post.slug).await?.is_none() {
-            log::info!("Post `{}` was deleted here for good; not pulling it back", post.slug);
-            continue;
-        }
-        upsert_post_from_remote(db, post, &series, &trashed).await?;
+        let txn = db.begin().await?;
+        upsert_post_from_remote(&txn, post, &series).await?;
+        txn.commit().await?;
     }
 
     // Drop anything local that no longer exists remotely (+ its staging and
@@ -386,17 +387,21 @@ pub async fn mirror_posts(
         if remote_slugs.contains(&local.slug) {
             continue;
         }
-        // Re-read rather than taken from the set captured before the refresh
-        // began. Mirroring a library is a long walk through the database, and a
-        // post thrown away partway through it would otherwise be deleted
-        // outright here — turning a recoverable trash action into permanent
-        // loss, and leaving its trash row pointing at nothing.
-        if trashed.contains(&local.id) || trash_get(db, local.id).await?.is_some() {
+
+        // Same rule as the upsert loop: the conditions are read inside the
+        // transaction that deletes, so a post thrown away while this walk was
+        // running cannot be deleted out from under the trash — which would turn
+        // a recoverable action into permanent loss and leave a trash row
+        // pointing at nothing.
+        let txn = db.begin().await?;
+
+        if trash_get(&txn, local.id).await?.is_some() {
             // Already thrown away here, and its absence upstream says nothing
             // about whether the person still wants it back.
+            txn.rollback().await?;
             continue;
         }
-        let never_pushed = sync_get(db, local.id)
+        let never_pushed = sync_get(&txn, local.id)
             .await?
             .is_some_and(|sync| sync.synced_hash.is_none());
         if never_pushed {
@@ -404,13 +409,15 @@ pub async fn mirror_posts(
                 "Post `{}` is absent from the cloud because it has never been pushed; keeping it",
                 local.slug
             );
+            txn.rollback().await?;
             continue;
         }
 
-        let _ = post_stage::Entity::delete_by_id(local.id).exec(db).await;
-        let _ = sync_clear(db, local.id).await;
-        let _ = revisions_clear(db, local.id).await;
-        post::Entity::delete_by_id(local.id).exec(db).await?;
+        post_stage::Entity::delete_by_id(local.id).exec(&txn).await?;
+        sync_clear(&txn, local.id).await?;
+        revisions_clear(&txn, local.id).await?;
+        post::Entity::delete_by_id(local.id).exec(&txn).await?;
+        txn.commit().await?;
         deleted += 1;
     }
 
@@ -488,10 +495,9 @@ fn unpack(local: Option<(i32, Option<i32>)>) -> (Option<i32>, Option<i32>) {
 /// Series membership is the one field the cloud does not win outright even when
 /// it does otherwise — see [`resolve_series`].
 async fn upsert_post_from_remote(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     remote: post::Model,
     series: &SeriesMap,
-    trashed: &std::collections::HashSet<i32>,
 ) -> AppResult<()> {
     let existing = post_by_slug(db, &remote.slug).await?;
 
@@ -504,13 +510,23 @@ async fn upsert_post_from_remote(
     // The captured set is consulted first because it answers for free; the row
     // itself is read when it does not, since a refresh walks the whole library
     // and a post can be trashed while it does.
-    let trashed_now = match existing.as_ref() {
-        Some(local) => trashed.contains(&local.id) || trash_get(db, local.id).await?.is_some(),
-        None => false,
-    };
-    if trashed_now {
-        log::info!("Post `{}` is in the trash; leaving it out of the refresh", remote.slug);
-        return Ok(());
+    match existing.as_ref() {
+        Some(local) => {
+            if trash_get(db, local.id).await?.is_some() {
+                log::info!("Post `{}` is in the trash; leaving it out of the refresh", remote.slug);
+                return Ok(());
+            }
+        }
+        // No local row and a tombstone means this post was deleted here for
+        // good. The cloud's copy is deliberately left alone by that deletion, so
+        // this is the only thing standing between "Delete forever" and the very
+        // next pull putting the post back.
+        None => {
+            if tombstoned_slugs(db).await?.contains(&remote.slug) {
+                log::info!("Post `{}` was deleted here for good; not pulling it back", remote.slug);
+                return Ok(());
+            }
+        }
     }
 
     // A post with unpushed local edits is not overwritten — decided here, before

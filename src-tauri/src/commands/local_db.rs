@@ -495,62 +495,112 @@ async fn purge(
     conn: &DatabaseConnection,
     post: &PostModel,
 ) -> AppResult<()> {
-    // The database first, and all of it in one transaction, so a failure
-    // partway leaves the post exactly where it was — in the trash, whole, and
-    // still restorable.
+    // The body is moved aside *before* the transaction and removed after it —
+    // the same staged-write idea `StagedBody` uses for saving, run backwards.
     //
-    // The body has to come after that commit, not before. Removing the file
-    // first means a database error afterwards reports the deletion as
-    // unsuccessful while the text is already gone: for a local-only draft, that
-    // is the content destroyed by an operation that said it had failed. A file
-    // left behind by the opposite ordering is only debris, and every path that
-    // creates a post writes its own body over whatever is there.
-    let txn = conn.begin().await?;
+    // Deleting the file first would mean a database error afterwards reporting
+    // the deletion as unsuccessful with the text already gone: for a local-only
+    // draft, content destroyed by an operation that said it had failed. But
+    // deleting it *after* the commit is no better, because the commit frees the
+    // slug: another window can create and save a post under the same name in
+    // that gap, and the cleanup would take its body instead.
+    //
+    // A rename settles both. Nothing is destroyed before the commit — a failure
+    // puts the file straight back — and the slug's file is already out of the
+    // way before the slug becomes available, so no replacement post's Markdown
+    // can be standing there when the removal happens.
+    let staged = ArchivedBody::take(app, &post.slug).await?;
 
-    // The precondition, checked inside the transaction that acts on it. Restore
-    // and Delete forever are two buttons on the same row, and the list reloads
-    // asynchronously between them: without this, confirming a deletion just
-    // after a restore would permanently delete the post that was rescued. A
-    // check outside the transaction would only narrow that window rather than
-    // close it.
-    if db::trash_get(&txn, post.id).await?.is_none() {
-        return Err(AppError::PostNotInTrash(post.slug.clone()));
+    let removed = async {
+        let txn = conn.begin().await?;
+
+        // The precondition, checked inside the transaction that acts on it.
+        // Restore and Delete forever are two buttons on the same row, and the
+        // list reloads asynchronously between them: without this, confirming a
+        // deletion just after a restore would permanently delete the post that
+        // was rescued. A check outside the transaction would only narrow that
+        // window rather than close it.
+        if db::trash_get(&txn, post.id).await?.is_none() {
+            return Err(AppError::PostNotInTrash(post.slug.clone()));
+        }
+
+        db::stage_clear(&txn, post.id).await?;
+        db::sync_clear(&txn, post.id).await?;
+        db::revisions_clear(&txn, post.id).await?;
+        db::trash_clear(&txn, post.id).await?;
+        db::delete::<PostModel>(&txn, post.id).await?;
+        // The one thing this deletion leaves behind, and the reason it can be
+        // called permanent: the cloud's copy is untouched by design, so without
+        // a record that this slug was deleted here the next refresh would pull
+        // the post straight back in. See `post_tombstone`.
+        db::tombstone_set(&txn, &post.slug, now_ts()).await?;
+        txn.commit().await?;
+        Ok::<(), AppError>(())
     }
+    .await;
 
-    db::stage_clear(&txn, post.id).await?;
-    db::sync_clear(&txn, post.id).await?;
-    db::revisions_clear(&txn, post.id).await?;
-    db::trash_clear(&txn, post.id).await?;
-    db::delete::<PostModel>(&txn, post.id).await?;
-    // The one thing this deletion leaves behind, and the reason it can be called
-    // permanent: the cloud's copy is untouched by design, so without a record
-    // that this slug was deleted here the next refresh would pull the post
-    // straight back in. See `post_tombstone`.
-    db::tombstone_set(&txn, &post.slug, now_ts()).await?;
-    txn.commit().await?;
-
-    // `posts/<slug>.md`, which nothing else would ever clean up.
-    //
-    // Best effort throughout, including resolving the directory: the deletion
-    // has already happened by here and cannot be undone, so reporting a failure
-    // would tell the person the irreversible thing did not happen — and stop the
-    // UI reloading a list the post has genuinely left. A file that outlives its
-    // post is debris, and every path that creates a post writes its own body
-    // over whatever is there.
-    if media_keys::is_safe_slug(&post.slug) {
-        match posts_dir(app).await {
-            Ok(dir) => {
-                let path = dir.join(format!("{}.md", post.slug));
-                if let Err(e) = tokio::fs::remove_file(&path).await {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        log::warn!("Could not remove {}: {e}", path.display());
-                    }
-                }
-            }
-            Err(e) => log::warn!("Could not resolve the posts dir to clean up after {}: {e}", post.slug),
+    match removed {
+        Ok(()) => {
+            staged.discard().await;
+            Ok(())
+        }
+        // Nothing was deleted, so the post keeps its text.
+        Err(e) => {
+            staged.restore().await;
+            Err(e)
         }
     }
-    Ok(())
+}
+
+/// A deleted post's Markdown, moved out of the way while its row is removed.
+///
+/// See [`purge`] for why neither ordering works without this: before the commit
+/// the content must still be recoverable, and after it the slug is free for
+/// somebody else's post to occupy.
+struct ArchivedBody {
+    /// Where the file went, and where it came from — `None` when the post had
+    /// no cached body at all, which is an ordinary state for a post pulled from
+    /// the cloud and never opened.
+    moved: Option<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+impl ArchivedBody {
+    /// Rename `posts/<slug>.md` aside. A missing file is not a failure.
+    async fn take(app: &tauri::AppHandle, slug: &str) -> AppResult<Self> {
+        if !media_keys::is_safe_slug(slug) {
+            return Ok(Self { moved: None });
+        }
+        let dir = posts_dir(app).await?;
+        let from = dir.join(format!("{slug}.md"));
+        let to = dir.join(format!(".purge-{}.md.tmp", uuid::Uuid::new_v4().simple()));
+        match tokio::fs::rename(&from, &to).await {
+            Ok(()) => Ok(Self { moved: Some((from, to)) }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self { moved: None }),
+            Err(e) => Err(AppError::io("Failed to set the post's body aside", e)),
+        }
+    }
+
+    /// Put it back, because the deletion did not happen after all.
+    async fn restore(self) {
+        if let Some((from, to)) = self.moved {
+            if let Err(e) = tokio::fs::rename(&to, &from).await {
+                log::error!("Could not put {} back after a failed deletion: {e}", from.display());
+            }
+        }
+    }
+
+    /// Throw it away, the deletion having gone through.
+    ///
+    /// Best effort: the post is already gone and cannot come back, so a failure
+    /// here is untidiness rather than something to report as the deletion having
+    /// failed.
+    async fn discard(self) {
+        if let Some((_, to)) = self.moved {
+            if let Err(e) = tokio::fs::remove_file(&to).await {
+                log::warn!("Could not remove {}: {e}", to.display());
+            }
+        }
+    }
 }
 
 /// Every post's sync state, keyed by post id — what the list needs to show
