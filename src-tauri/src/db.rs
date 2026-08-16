@@ -604,6 +604,27 @@ async fn upsert_post_from_remote(
     Ok(())
 }
 
+/// Refuse to write a side-table row for a post that no longer exists.
+///
+/// `post_stage`, `post_sync` and `post_revision` are keyed by the post's id and
+/// carry no foreign key, so nothing at the database level stops a row outliving
+/// the post it describes. That matters more than it sounds: the primary key is a
+/// plain `INTEGER PRIMARY KEY` rather than `AUTOINCREMENT`, so SQLite is free to
+/// hand a deleted post's id to the next one — which would inherit its stage, its
+/// idea of what the cloud holds, and its draft history.
+///
+/// A save that loses a race with a permanent deletion is exactly how that
+/// happens: its metadata commits, the post is deleted, and its remaining writes
+/// land afterwards. Checked here rather than in each caller so no future path
+/// has to remember, and inside whatever transaction the caller passes, which is
+/// what makes it airtight where one is used.
+async fn require_post(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
+    match post::Entity::find_by_id(post_id).one(db).await? {
+        Some(_) => Ok(()),
+        None => Err(AppError::PostVanished(post_id)),
+    }
+}
+
 // ─── Publish staging (local only) ───────────────────────────────────────────────
 
 /// Every post's staging row, for building a whole-library view in one query.
@@ -629,6 +650,7 @@ pub async fn stage_set(
     db: &impl ConnectionTrait,
     model: post_stage::Model,
 ) -> AppResult<post_stage::Model> {
+    require_post(db, model.post_id).await?;
     let exists = post_stage::Entity::find_by_id(model.post_id)
         .one(db)
         .await?
@@ -672,6 +694,7 @@ pub async fn sync_set_local(
     post_id: i32,
     local_hash: String,
 ) -> AppResult<post_sync::Model> {
+    require_post(db, post_id).await?;
     let existing = post_sync::Entity::find_by_id(post_id).one(db).await?;
     Ok(match existing {
         Some(row) => post_sync::ActiveModel {
@@ -781,6 +804,7 @@ pub async fn sync_agree(
     remote_updated_at: Option<i64>,
     at: i64,
 ) -> AppResult<post_sync::Model> {
+    require_post(db, post_id).await?;
     let exists = post_sync::Entity::find_by_id(post_id).one(db).await?.is_some();
     let model = post_sync::ActiveModel {
         post_id: if exists {
@@ -806,6 +830,7 @@ pub async fn sync_mark_synced(
     remote_updated_at: Option<i64>,
     at: i64,
 ) -> AppResult<post_sync::Model> {
+    require_post(db, post_id).await?;
     let existing = post_sync::Entity::find_by_id(post_id).one(db).await?;
     // The baseline becomes the version *we just wrote*, not the one last seen
     // before writing it. A push sets the remote row's `updated_at` to this
@@ -976,6 +1001,7 @@ pub async fn revision_add(
     model: post_revision::Model,
 ) -> AppResult<post_revision::Model> {
     let post_id = model.post_id;
+    require_post(db, post_id).await?;
     let created = model.into_insert().insert(db).await?;
     prune_revisions(db, post_id).await?;
     Ok(created)
@@ -1567,6 +1593,42 @@ mod tests {
         assert!(
             get::<post::Model>(&db, post.id).await.unwrap().is_some(),
             "a refresh permanently deleted a post from the trash"
+        );
+    }
+
+    /// A row in a side table can outlive the post it describes, and the primary
+    /// key is a plain `INTEGER PRIMARY KEY` — so SQLite may hand a deleted
+    /// post's id to the next one, which would inherit its stage, its idea of
+    /// what the cloud holds, and its draft history. A save that loses a race
+    /// with a permanent deletion is how that happens, and refusing the write is
+    /// what makes it impossible rather than unlikely.
+    #[tokio::test]
+    async fn side_tables_refuse_a_post_that_no_longer_exists() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+        let id = post.id;
+        delete::<post::Model>(&db, id).await.unwrap();
+
+        assert!(
+            stage_set(
+                &db,
+                post_stage::Model { post_id: id, stage: post_stage::DRAFT.into(), staged_at: 0 }
+            )
+            .await
+            .is_err(),
+            "a stage row outlived its post"
+        );
+        assert!(
+            sync_set_local(&db, id, "v1".into()).await.is_err(),
+            "a sync row outlived its post"
+        );
+        assert!(
+            sync_mark_synced(&db, id, "v1".into(), None, 0).await.is_err(),
+            "a sync row outlived its post"
+        );
+        assert!(
+            revision_add(&db, revision_row(id, "somebody else's draft", 1)).await.is_err(),
+            "a revision outlived its post"
         );
     }
 

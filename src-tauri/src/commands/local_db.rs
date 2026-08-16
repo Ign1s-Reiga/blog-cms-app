@@ -573,16 +573,10 @@ async fn purge(
     match removed {
         Ok(()) => {
             staged.discard().await;
-
-            // A save that committed its metadata just before the post was
-            // trashed can still be finishing: its body rename and its sync row
-            // land after this deletion has gone through, for a post that no
-            // longer exists. The post is deleted either way — that part is not
-            // in question — but the leftovers would attach to whichever post is
-            // assigned that id next, so they are swept once more here.
-            let _ = db::stage_clear(conn, post.id).await;
-            let _ = db::sync_clear(conn, post.id).await;
-            let _ = db::revisions_clear(conn, post.id).await;
+            // No sweep afterwards: `db::require_post` refuses a side-table write
+            // for a post that no longer exists, so a save still finishing behind
+            // this deletion cannot recreate the rows in the first place. A sweep
+            // here would only have covered the moment it happened to run.
             Ok(())
         }
         // Nothing was deleted, so the post keeps its text.
