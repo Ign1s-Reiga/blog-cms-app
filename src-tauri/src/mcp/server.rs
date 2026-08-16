@@ -23,7 +23,7 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -389,9 +389,17 @@ impl BlogMcp {
         )
         .await;
 
-        let saved = db::update::<PostModel>(self.conn().inner(), post)
-            .await
-            .map_err(internal)?;
+        // Re-checked inside the transaction that writes. `load_post` refused a
+        // trashed post several awaits ago — a body fetched from R2, a snapshot
+        // taken — and an agent's edit is exactly the kind that arrives while
+        // somebody is doing something else in the app.
+        let conn = self.conn();
+        let txn = conn.begin().await.map_err(internal)?;
+        if db::trash_get(&txn, post.id).await.map_err(internal)?.is_some() {
+            return Err(invalid(format!("Post {} is in the trash", post.id)));
+        }
+        let saved = db::update::<PostModel>(&txn, post).await.map_err(internal)?;
+        txn.commit().await.map_err(internal)?;
 
         if params.body.is_some() {
             let dir = self.posts_dir()?;

@@ -139,7 +139,14 @@ async fn commit_metadata(
 ) -> AppResult<PostModel> {
     let txn = conn.begin().await?;
 
+    // The trash check that matters, because it is the one inside the
+    // transaction that writes. The guard at the top of `save` runs several
+    // awaits earlier — a body staged, a snapshot taken — and a post can be
+    // thrown away in between.
     let saved = if existing {
+        if db::trash_get(&txn, model.id).await?.is_some() {
+            return Err(AppError::PostInTrash(model.slug));
+        }
         db::update::<PostModel>(&txn, model).await?
     } else {
         db::create::<PostModel>(&txn, model).await?
