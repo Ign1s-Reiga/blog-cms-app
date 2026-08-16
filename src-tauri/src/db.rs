@@ -357,7 +357,12 @@ pub async fn mirror_posts(
         if remote_slugs.contains(&local.slug) {
             continue;
         }
-        if trashed.contains(&local.id) {
+        // Re-read rather than taken from the set captured before the refresh
+        // began. Mirroring a library is a long walk through the database, and a
+        // post thrown away partway through it would otherwise be deleted
+        // outright here — turning a recoverable trash action into permanent
+        // loss, and leaving its trash row pointing at nothing.
+        if trashed.contains(&local.id) || trash_get(db, local.id).await?.is_some() {
             // Already thrown away here, and its absence upstream says nothing
             // about whether the person still wants it back.
             continue;

@@ -215,6 +215,11 @@ pub enum AppError {
     #[error("Post `{0}` is in the trash, so it cannot be published")]
     PostInTrash(String),
 
+    /// Permanent deletion asked for a post that is not in the trash — most
+    /// likely restored between the click and the confirmation.
+    #[error("Post `{0}` is not in the trash, so it was not deleted")]
+    PostNotInTrash(String),
+
     #[error("Post `{0}` no longer exists in the cloud, so there is no cloud version to keep")]
     RemotePostGone(String),
 

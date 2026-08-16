@@ -506,6 +506,17 @@ async fn purge(
     // left behind by the opposite ordering is only debris, and every path that
     // creates a post writes its own body over whatever is there.
     let txn = conn.begin().await?;
+
+    // The precondition, checked inside the transaction that acts on it. Restore
+    // and Delete forever are two buttons on the same row, and the list reloads
+    // asynchronously between them: without this, confirming a deletion just
+    // after a restore would permanently delete the post that was rescued. A
+    // check outside the transaction would only narrow that window rather than
+    // close it.
+    if db::trash_get(&txn, post.id).await?.is_none() {
+        return Err(AppError::PostNotInTrash(post.slug.clone()));
+    }
+
     db::stage_clear(&txn, post.id).await?;
     db::sync_clear(&txn, post.id).await?;
     db::revisions_clear(&txn, post.id).await?;
