@@ -84,10 +84,37 @@ pub async fn record(
     };
 
     let head = db::revision_head(conn, post.id).await?;
-    if head.as_ref().is_some_and(|head| duplicates_head(&candidate, head)) {
-        return Ok(None);
+    if let Some(head) = head.as_ref() {
+        if duplicates_head(&candidate, head) || coalesces_into_head(&candidate, head) {
+            return Ok(None);
+        }
     }
     db::revision_add(conn, candidate).await.map(Some)
+}
+
+/// How long one autosave's snapshot stands in for the autosaves that follow it.
+///
+/// Every other origin is a deliberate act at human speed, and each deserves its
+/// own entry. Autosave is not: it fires every couple of seconds for as long as
+/// somebody is typing, and one snapshot per flush would spend the whole cap on a
+/// single afternoon — the version the author actually wants back, the one they
+/// opened this morning, would be the first thing pruned.
+///
+/// Five minutes keeps what matters at either end. The *first* autosave after a
+/// pause still records the text as it was before this burst of editing — which
+/// is the version worth having — and continuous work leaves a checkpoint every
+/// five minutes rather than every two seconds.
+pub const AUTOSAVE_COALESCE_SECS: i64 = 300;
+
+/// Is this autosave close enough behind the last one to be covered by it?
+///
+/// Only autosaves coalesce, and only into other autosaves. A manual save,
+/// publish or MCP edit is somebody deciding something, and one of those landing
+/// mid-burst is exactly the moment worth being able to return to.
+fn coalesces_into_head(candidate: &post_revision::Model, head: &post_revision::Model) -> bool {
+    candidate.origin == post_revision::AUTOSAVE
+        && head.origin == post_revision::AUTOSAVE
+        && candidate.created_at - head.created_at < AUTOSAVE_COALESCE_SECS
 }
 
 /// Would this snapshot be a second copy of the newest one already stored?
@@ -217,6 +244,94 @@ mod tests {
         assert!(record(&db, &edited, post_revision::SAVE, Some("body".into())).await.unwrap().is_some());
         assert!(record(&db, &edited, post_revision::SAVE, Some("new body".into())).await.unwrap().is_some());
         assert_eq!(db::revisions_for_post(&db, saved.id).await.unwrap().len(), 3);
+    }
+
+    /// Seed a head revision taken `age` seconds ago by `origin`, so the
+    /// coalescing window can be exercised without waiting five minutes.
+    async fn head_taken(
+        db: &sea_orm::DatabaseConnection,
+        post_id: i32,
+        origin: &str,
+        age: i64,
+    ) -> RevisionModel {
+        db::revision_add(
+            db,
+            RevisionModel {
+                id: 0,
+                post_id,
+                title: "Head".into(),
+                excerpt: None,
+                tags: None,
+                published: false,
+                body: Some("head body".into()),
+                origin: origin.to_string(),
+                created_at: chrono::Utc::now().timestamp() - age,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Autosave fires every couple of seconds. One entry per flush would spend a
+    /// fifty-row history on a single afternoon's typing, so a flush close behind
+    /// another autosave is covered by it.
+    #[tokio::test]
+    async fn autosaves_in_quick_succession_are_covered_by_the_first() {
+        let db = db::connect_in_memory().await.unwrap();
+        let saved = db::create::<PostModel>(&db, post("Original")).await.unwrap();
+        head_taken(&db, saved.id, post_revision::AUTOSAVE, 5).await;
+
+        // Genuinely different content, and still skipped — the point is the
+        // rate, not the sameness.
+        assert!(
+            record(&db, &saved, post_revision::AUTOSAVE, Some("typed some more".into()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(db::revisions_for_post(&db, saved.id).await.unwrap().len(), 1);
+    }
+
+    /// Once the window has passed, continuous editing leaves a checkpoint again.
+    #[tokio::test]
+    async fn an_autosave_past_the_window_is_recorded() {
+        let db = db::connect_in_memory().await.unwrap();
+        let saved = db::create::<PostModel>(&db, post("Original")).await.unwrap();
+        head_taken(&db, saved.id, post_revision::AUTOSAVE, AUTOSAVE_COALESCE_SECS + 1).await;
+
+        assert!(
+            record(&db, &saved, post_revision::AUTOSAVE, Some("much later".into()))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// Only autosaves coalesce, and only into other autosaves. A save, publish
+    /// or MCP edit is somebody deciding something, and one landing mid-burst is
+    /// exactly the moment worth being able to return to.
+    #[tokio::test]
+    async fn a_deliberate_save_is_never_coalesced_away() {
+        let db = db::connect_in_memory().await.unwrap();
+        let saved = db::create::<PostModel>(&db, post("Original")).await.unwrap();
+        head_taken(&db, saved.id, post_revision::AUTOSAVE, 1).await;
+
+        assert!(
+            record(&db, &saved, post_revision::SAVE, Some("pressed save".into()))
+                .await
+                .unwrap()
+                .is_some(),
+            "a manual save was swallowed by the autosave window"
+        );
+
+        // And the reverse: an autosave following a deliberate save records the
+        // text that save left behind.
+        assert!(
+            record(&db, &saved, post_revision::AUTOSAVE, Some("typed after saving".into()))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// "The body was not cached" and "the body was empty" are different facts,

@@ -139,6 +139,15 @@ pub enum AppError {
     #[error("Invalid post slug: {0}")]
     InvalidSlug(String),
 
+    /// The post's Markdown is not cached on this machine and there are no
+    /// credentials to fetch it with — so its body is unknown, which is a
+    /// different fact from it being empty.
+    #[error(
+        "The text of `{0}` is not on this machine and Cloudflare is not configured, \
+         so it cannot be read. Sign in and try again."
+    )]
+    BodyUnavailable(String),
+
     #[error("Invalid stage `{0}` (expected `draft`, `published`, or `sync_failed`)")]
     InvalidStage(String),
 

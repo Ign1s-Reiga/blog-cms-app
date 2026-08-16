@@ -276,11 +276,16 @@ pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> AppResul
         return Ok(content);
     }
 
-    // 2. Not cached locally — download from R2 if we can reach it.
-    let (client, config) = match cf() {
-        Ok(cc) => cc,
-        Err(_) => return Ok(String::new()), // offline / no credentials
-    };
+    // 2. Not cached locally — download from R2.
+    //
+    // Without credentials there is nowhere to read it from, and that is not the
+    // same fact as "this post has no body". Reporting it as an empty document,
+    // which this used to do, is a lie the rest of the app then acts on: the
+    // editor shows an empty post, a save writes that emptiness into the local
+    // cache, later reads prefer the cache, and publishing puts it over the
+    // Markdown still sitting in R2. Saying "I cannot tell you" costs one error
+    // message and keeps the post intact.
+    let (client, config) = cf().map_err(|_| AppError::BodyUnavailable(slug.clone()))?;
     let key = media_keys::body_key(&slug);
     match cloudflare::download_from_r2(&client, &config, &key).await? {
         Some(content) => {
@@ -316,13 +321,55 @@ pub async fn save_post(
     body: String,
     published: bool,
 ) -> AppResult<PostModel> {
+    let origin = if published { post_revision::PUBLISH } else { post_revision::SAVE };
+    save(app, conn.inner(), id, title, tags, body, published, origin).await
+}
+
+/// Persist the editor's in-progress work to this machine, and to nowhere else.
+///
+/// The same local half of [`save_post`], with two deliberate differences.
+///
+/// It **cannot publish**: there is no flag to pass, so a background timer can
+/// never upload a half-written paragraph to the blog, and the editor's promise
+/// that autosave is local is a property of the command surface rather than of
+/// the caller remembering to send `false`.
+///
+/// And it is recorded in the history as an autosave, which is what lets those
+/// snapshots coalesce — see [`crate::revisions::AUTOSAVE_COALESCE_SECS`]. A
+/// flush every couple of seconds recorded as an ordinary save would push the
+/// version somebody actually wants out of a fifty-row history within the hour.
+#[tauri::command]
+pub async fn autosave_post(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    id: Option<i32>,
+    title: String,
+    tags: String,
+    body: String,
+) -> AppResult<PostModel> {
+    save(app, conn.inner(), id, title, tags, body, false, post_revision::AUTOSAVE).await
+}
+
+/// The save itself, shared by the editor's Save/Publish buttons and its
+/// autosave. `origin` is the history entry this save's snapshot is filed under.
+#[allow(clippy::too_many_arguments)]
+async fn save(
+    app: tauri::AppHandle,
+    conn: &DatabaseConnection,
+    id: Option<i32>,
+    title: String,
+    tags: String,
+    body: String,
+    published: bool,
+    origin: &'static str,
+) -> AppResult<PostModel> {
     let now = now_ts();
 
     // Start from the existing row (preserving slug/created_at/series/excerpt) or
     // build a fresh one for a new post. The untouched row is kept: it is what
     // `restore_metadata` writes back if the body cannot be moved into place.
     let previous = match id {
-        Some(id) => Some(PreviousState::read(conn.inner(), id).await?),
+        Some(id) => Some(PreviousState::read(conn, id).await?),
         None => None,
     };
 
@@ -379,7 +426,7 @@ pub async fn save_post(
     //    known. A post that stays live keeps the stage it has: saving edits
     //    locally does not demote it to a draft, and its publish stage moves only
     //    when a push succeeds or fails.
-    let saved = match commit_metadata(conn.inner(), model, id.is_some(), (!live).then_some(now))
+    let saved = match commit_metadata(conn, model, id.is_some(), (!live).then_some(now))
         .await
     {
         Ok(saved) => saved,
@@ -396,15 +443,14 @@ pub async fn save_post(
     //
     //    Best effort by design — see `revisions::snapshot_or_log`.
     if let Some(before) = previous.as_ref() {
-        let origin = if published { post_revision::PUBLISH } else { post_revision::SAVE };
-        revisions::snapshot_or_log(&app, conn.inner(), &before.post, origin).await;
+        revisions::snapshot_or_log(&app, conn, &before.post, origin).await;
     }
 
     // 4. Swap the new body in. Only a rename is left, so the window in which the
     //    database and the file disagree is as small as it can be — and if even
     //    that fails, the metadata goes back rather than outliving its body.
     if let Err(e) = staged.commit(&dir.join(format!("{}.md", saved.slug))).await {
-        restore_metadata(conn.inner(), previous, &saved).await;
+        restore_metadata(conn, previous, &saved).await;
         return Err(e);
     }
 
@@ -415,7 +461,7 @@ pub async fn save_post(
 
     // 6. Draft → local only. Publish → push the body to R2 and metadata to D1.
     if !published {
-        db::sync_set_local(conn.inner(), saved.id, hash).await?;
+        db::sync_set_local(conn, saved.id, hash).await?;
         return Ok(saved);
     }
 
@@ -458,7 +504,7 @@ pub async fn save_post(
         // Metadata → D1, with the series reference translated into the cloud's
         // ids — a local `series_id` would file the post under an unrelated
         // remote series.
-        let outbound = post_for_cloud(conn.inner(), &client, &config, saved.clone()).await?;
+        let outbound = post_for_cloud(conn, &client, &config, saved.clone()).await?;
         cloudflare::d1_post_upsert(&client, &config, outbound).await?;
         Ok::<(), AppError>(())
     }
@@ -466,7 +512,7 @@ pub async fn save_post(
 
     let stage = if synced.is_ok() { post_stage::PUBLISHED } else { post_stage::SYNC_FAILED };
     db::stage_set(
-        conn.inner(),
+        conn,
         post_stage::Model { post_id: saved.id, stage: stage.to_string(), staged_at: now },
     )
     .await?;
@@ -478,9 +524,9 @@ pub async fn save_post(
         // `d1_post_upsert` writes this post's own `updated_at` into D1, so that
         // is the cloud's version now — record it as the baseline, or the next
         // refresh reads our own push as somebody else's change.
-        db::sync_mark_synced(conn.inner(), saved.id, hash, Some(saved.updated_at), now).await?;
+        db::sync_mark_synced(conn, saved.id, hash, Some(saved.updated_at), now).await?;
     } else {
-        db::sync_set_local(conn.inner(), saved.id, hash).await?;
+        db::sync_set_local(conn, saved.id, hash).await?;
     }
 
     match synced {

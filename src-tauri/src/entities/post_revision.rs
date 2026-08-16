@@ -9,6 +9,10 @@ pub const SAVE: &str = "save";
 pub const PUBLISH: &str = "publish";
 pub const MCP: &str = "mcp";
 pub const RESTORE: &str = "restore";
+/// The editor's own background flush, which happens seconds apart rather than
+/// at human speed — see [`crate::revisions::AUTOSAVE_COALESCE_SECS`] for what
+/// keeps a typing session from filling the history on its own.
+pub const AUTOSAVE: &str = "autosave";
 /// The local copy, kept just before a conflict was settled by taking the
 /// cloud's — the one overwrite in the app that is not the author's own typing.
 pub const CONFLICT_KEEP_REMOTE: &str = "conflict_keep_remote";
