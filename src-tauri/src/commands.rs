@@ -126,6 +126,24 @@ async fn posts_dir(app: &tauri::AppHandle) -> AppResult<std::path::PathBuf> {
     Ok(dir)
 }
 
+/// Refuse an operation on a post that is in the trash.
+///
+/// The trash is a deletion as far as the rest of the app is concerned, and the
+/// editor can still be pointed at one — a bookmark, browser history, a tab left
+/// open when the post was thrown away. Without this, that editor would happily
+/// autosave into the copy being kept for recovery, and Publish would put a
+/// deleted post on the blog.
+///
+/// Checked per operation rather than once at load: the post can be trashed from
+/// the posts list while an editor is open on it, and the answer that matters is
+/// the one at the moment of the write.
+async fn refuse_if_trashed(conn: &DatabaseConnection, post: &PostModel) -> AppResult<()> {
+    if db::trash_get(conn, post.id).await?.is_some() {
+        return Err(AppError::PostInTrash(post.slug.clone()));
+    }
+    Ok(())
+}
+
 /// Current time as a Unix timestamp in seconds (the schema's date encoding).
 fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()

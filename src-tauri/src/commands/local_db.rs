@@ -339,12 +339,23 @@ pub async fn list_posts(conn: State<'_, DatabaseConnection>) -> AppResult<Vec<Po
     db::list_active_posts(conn.inner()).await
 }
 
+/// One post for the editor, refusing anything in the trash.
+///
+/// A trashed post is deleted as far as the app is concerned, but the editor can
+/// still be pointed at one through a bookmark or browser history. Saying so is
+/// better than opening it: an editor on a trashed post writes into the copy
+/// being kept for recovery, and its Publish button puts a deleted post on the
+/// blog.
 #[tauri::command]
 pub async fn get_post(
     conn: State<'_, DatabaseConnection>,
     id: i32,
 ) -> AppResult<Option<PostModel>> {
-    db::get::<PostModel>(conn.inner(), id).await
+    let Some(post) = db::get::<PostModel>(conn.inner(), id).await? else {
+        return Ok(None);
+    };
+    refuse_if_trashed(conn.inner(), &post).await?;
+    Ok(Some(post))
 }
 
 #[tauri::command]
@@ -352,6 +363,10 @@ pub async fn update_post(
     conn: State<'_, DatabaseConnection>,
     post: PostModel,
 ) -> AppResult<PostModel> {
+    // Every other write path refuses a trashed post; this one is the raw row
+    // update, and leaving it open would make the rule a matter of which command
+    // somebody happened to call.
+    refuse_if_trashed(conn.inner(), &post).await?;
     let mut post = post;
     post.updated_at = now_ts();
     db::update::<PostModel>(conn.inner(), post).await
@@ -621,6 +636,10 @@ pub async fn restore_revision(
     let current = db::get::<PostModel>(conn.inner(), revision.post_id)
         .await?
         .ok_or(AppError::PostNotFound(revision.post_id))?;
+    // A post in the trash keeps its history precisely so that restoring it
+    // brings everything back — but the restoring happens after it comes out of
+    // the trash, not into it.
+    refuse_if_trashed(conn.inner(), &current).await?;
 
     // Where we are now, before it is replaced.
     revisions::snapshot(&app, conn.inner(), &current, post_revision::RESTORE).await?;

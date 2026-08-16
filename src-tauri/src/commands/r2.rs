@@ -373,6 +373,13 @@ async fn save(
         None => None,
     };
 
+    // An editor left open on a post that has since been thrown away must not
+    // write into the copy being kept for recovery — nor, on Publish, put a
+    // deleted post on the blog.
+    if let Some(existing) = previous.as_ref() {
+        refuse_if_trashed(conn, &existing.post).await?;
+    }
+
     let mut model = match previous.clone() {
         Some(existing) => existing.post,
         None => {
@@ -576,6 +583,10 @@ pub async fn resolve_conflict(
     let post = db::get::<PostModel>(conn.inner(), post_id)
         .await?
         .ok_or(AppError::PostNotFound(post_id))?;
+    // A post can be trashed while carrying an unsettled conflict. Settling it
+    // then writes to a deleted post, and "keep cloud" would download over the
+    // very copy the trash is holding on to.
+    refuse_if_trashed(conn.inner(), &post).await?;
 
     // Refuse anything that is not actually a conflict. Resolving a post that is
     // merely modified would silently discard the pending edit under a button
