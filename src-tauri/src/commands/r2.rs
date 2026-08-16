@@ -491,9 +491,12 @@ async fn save(
         // stage a body, commit metadata and take a snapshot — and the post can
         // be thrown away in that window. What must not happen is publishing a
         // deleted post; the local half above is recoverable, this is not.
-        if let Some(existing) = previous.as_ref() {
-            refuse_if_trashed(conn, &existing.post).await?;
-        }
+        //
+        // Against `saved`, not `previous`: a brand-new post has no previous
+        // state, and its row exists from the moment the metadata commits — so
+        // it can be listed and trashed while the images are still uploading,
+        // which is the longest part of a publish.
+        refuse_if_trashed(conn, &saved).await?;
 
         let (client, config) = cf()?;
 

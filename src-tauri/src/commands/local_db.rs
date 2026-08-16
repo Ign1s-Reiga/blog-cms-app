@@ -531,6 +531,15 @@ async fn purge(
     // puts the file straight back — and the slug's file is already out of the
     // way before the slug becomes available, so no replacement post's Markdown
     // can be standing there when the removal happens.
+    // Asked before the file is touched at all. The transaction below checks the
+    // same thing and is what actually decides, but a deletion that has already
+    // lost the race to Restore should not be moving anybody's Markdown around
+    // in the meantime: while the archive is aside, the post is live with no
+    // body, and anything that opens it reads a cache miss.
+    if db::trash_get(conn, post.id).await?.is_none() {
+        return Err(AppError::PostNotInTrash(post.slug.clone()));
+    }
+
     let staged = ArchivedBody::take(app, &post.slug).await?;
 
     let removed = async {
@@ -564,6 +573,16 @@ async fn purge(
     match removed {
         Ok(()) => {
             staged.discard().await;
+
+            // A save that committed its metadata just before the post was
+            // trashed can still be finishing: its body rename and its sync row
+            // land after this deletion has gone through, for a post that no
+            // longer exists. The post is deleted either way — that part is not
+            // in question — but the leftovers would attach to whichever post is
+            // assigned that id next, so they are swept once more here.
+            let _ = db::stage_clear(conn, post.id).await;
+            let _ = db::sync_clear(conn, post.id).await;
+            let _ = db::revisions_clear(conn, post.id).await;
             Ok(())
         }
         // Nothing was deleted, so the post keeps its text.
@@ -616,18 +635,34 @@ impl ArchivedBody {
     /// pair, which is as far as the filesystem allows.
     async fn restore(self) {
         let Some((from, to)) = self.moved else { return };
-        if tokio::fs::try_exists(&from).await.unwrap_or(false) {
-            log::warn!(
-                "A newer body was written for {} while it was being deleted; keeping it",
-                from.display()
-            );
-            if let Err(e) = tokio::fs::remove_file(&to).await {
-                log::warn!("Could not remove {}: {e}", to.display());
+        if !tokio::fs::try_exists(&from).await.unwrap_or(false) {
+            if let Err(e) = tokio::fs::rename(&to, &from).await {
+                log::error!("Could not put {} back after a failed deletion: {e}", from.display());
             }
             return;
         }
-        if let Err(e) = tokio::fs::rename(&to, &from).await {
-            log::error!("Could not put {} back after a failed deletion: {e}", from.display());
+
+        // Something is already there. It may be newer than what was archived —
+        // a save that landed while this was aside — or it may be *older*: the
+        // post was live with no cached body for a moment, so anything that
+        // opened it read a cache miss and may have refilled the file from R2,
+        // which for a post carrying unpublished edits is the previous version.
+        //
+        // The two are indistinguishable from here, and overwriting either way
+        // could destroy the better copy. So the archive is neither restored nor
+        // deleted: it is left under a name the app ignores, and said out loud.
+        let kept = to.with_file_name(format!(
+            ".recovered-{}-{}.md",
+            from.file_stem().and_then(|s| s.to_str()).unwrap_or("post"),
+            uuid::Uuid::new_v4().simple()
+        ));
+        match tokio::fs::rename(&to, &kept).await {
+            Ok(()) => log::error!(
+                "{} was rewritten while its deletion was failing; the copy from before is kept at {}",
+                from.display(),
+                kept.display()
+            ),
+            Err(e) => log::error!("Could not set aside the archived body {}: {e}", to.display()),
         }
     }
 
