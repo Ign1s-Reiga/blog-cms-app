@@ -156,19 +156,29 @@ async function readSyncState(
   }
 }
 
-/// The editor's content, as compared against what is already stored.
-type Content = { title: string; tags: string; body: string };
-
-function sameContent(a: Content, b: Content): boolean {
-  return a.title === b.title && a.tags === b.tags && a.body === b.body;
-}
-
 // Editor save/publish status, for button feedback.
 type SaveState =
   | { kind: 'idle' }
   | { kind: 'saving'; publish: boolean }
   | { kind: 'saved'; publish: boolean }
   | { kind: 'error'; message: string };
+
+/// Where the editor's text stands relative to this machine's copy of it —
+/// nothing to do with the cloud, which autosave never touches.
+type LocalSaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } | { kind: 'failed'; message: string };
+
+/// How long the editor waits after the last keystroke before writing to disk.
+///
+/// Short enough that closing the app after a thought is finished keeps it, long
+/// enough that ordinary typing is one write rather than one per word.
+const AUTOSAVE_DELAY_MS = 1500;
+
+/// The editor's content, as compared against what is already stored.
+type Content = { title: string; tags: string; body: string };
+
+function sameContent(a: Content, b: Content): boolean {
+  return a.title === b.title && a.tags === b.tags && a.body === b.body;
+}
 
 // ─── PostEditor ───────────────────────────────────────────────────────────────
 
@@ -179,14 +189,38 @@ export function PostEditor() {
 
   const [postId, setPostId] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' });
+  const [localSave, setLocalSave] = useState<LocalSaveState>({ kind: 'idle' });
+
+  // ── What autosave needs to know, outside of React's render cycle ────────────
+  //
+  // The flush can be triggered by a timer or by the editor closing, neither of
+  // which re-renders first, so the values it writes are read from refs rather
+  // than captured in a closure that may be a keystroke out of date.
+
+  /// The content last known to be on disk. Autosave compares against this, so
+  /// typing a character and deleting it again writes nothing.
+  const persisted = useRef<Content>({ title: '', tags: '', body: '' });
+  /// The content as it is right now.
+  const latest = useRef<Content>({ title: '', tags: '', body: '' });
+  /// The post id as it is right now — a new post gains one mid-session, and the
+  /// unmount flush has to write to it rather than create a second post.
+  const postIdRef = useRef<number | null>(null);
+  /// The pending debounce, so a manual save can cancel it rather than have it
+  /// fire again straight afterwards.
+  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /// Tail of the chain of writes to this post.
+  ///
+  /// Autosave and the Save/Publish buttons write the same row and the same
+  /// file, and a timer can fire while a click is already in flight. Left to
+  /// race, the *older* text can land second: an autosave that started before
+  /// Publish would overwrite the local body afterwards, leaving the machine a
+  /// version behind the blog and the post reporting edits that are older than
+  /// what readers are served. Queueing them makes last-issued mean last-written.
+  const writes = useRef<Promise<unknown>>(Promise.resolve());
   // Whether this post is live, and whether what is live is what is here. A new
   // post is neither, so it starts clean and unpublished.
   const [live, setLive] = useState(false);
   const [sync, setSync] = useState<SyncState>('clean');
-
-  /// The content last known to be on disk, so the editor can tell whether what
-  /// is on screen has been written down anywhere yet.
-  const persisted = useRef<Content>({ title: '', tags: '', body: '' });
 
   /// Pull one post's metadata, body and sync state out of the backend into the
   /// editor. Used on mount and again after resolving a conflict, where keeping
@@ -210,8 +244,10 @@ export function PostEditor() {
       const md = await invoke<string>('read_post_markdown', { slug: post.slug });
       if (!keepGoing()) return;
       setBody(md);
-      // What was just loaded is what is on disk, so nothing on screen is
-      // unsaved until the author types.
+      // What was just loaded *is* what is on disk, so autosave has nothing to
+      // do until something changes. Without this, opening a post would write it
+      // straight back — and, for a published post, report unpublished edits
+      // nobody made.
       persisted.current = { title: post.title, tags: parseTags(post.tags), body: md };
       const state = await readSyncState(invoke, id);
       if (keepGoing()) setSync(state);
@@ -259,30 +295,135 @@ export function PostEditor() {
     };
   }, [loadFromBackend]);
 
+  // ── Autosave ────────────────────────────────────────────────────────────────
+
+  /// Run `write` once everything queued before it has finished, and hand back
+  /// its result.
+  ///
+  /// One writer at a time, in the order the writes were asked for — see
+  /// [`writes`]. A failure does not poison the queue: the next write is still
+  /// allowed to run, because the usual cause is the cloud being unreachable and
+  /// the usual next write is a local one that has no opinion about that.
+  const enqueueWrite = useCallback(<T,>(write: () => Promise<T>): Promise<T> => {
+    const run = writes.current.then(write, write);
+    writes.current = run.catch(() => {});
+    return run;
+  }, []);
+
+  /// Write the editor's current text to this machine, and to nowhere else.
+  ///
+  /// `autosave_post` has no publish flag at all, so no timer can ever push a
+  /// half-written paragraph to the blog — the promise that autosave is local is
+  /// a property of the command, not of this function remembering to pass
+  /// `false`.
+  ///
+  /// Stable across renders: the timer and the unmount flush both hold a
+  /// reference to it, and re-creating it on every keystroke would leave those
+  /// pointing at an older copy.
+  const persistLocally = useCallback(
+    () =>
+      enqueueWrite(async () => {
+        // Read after the queue has drained, not before: a manual save ahead of
+        // this one has already stored its text and moved `persisted`, and the
+        // usual answer here is that there is nothing left to write.
+        const content = latest.current;
+        if (sameContent(content, persisted.current)) return;
+        // A post that does not exist yet and has nothing in it is not worth
+        // creating. Otherwise opening the editor, typing one character and
+        // deleting it again would leave an untitled draft behind.
+        if (postIdRef.current === null && content.title.trim() === '' && content.body.trim() === '') {
+          return;
+        }
+
+        const { invoke, isTauri } = await import('@tauri-apps/api/core');
+        if (!isTauri()) return;
+
+        setLocalSave({ kind: 'saving' });
+        try {
+          const saved = await invoke<{ id: number; published: boolean }>('autosave_post', {
+            id: postIdRef.current,
+            ...content,
+          });
+          // Recorded before anything else can fail: this text is on disk now,
+          // and the next flush must not write it again.
+          persisted.current = content;
+          if (postIdRef.current === null) {
+            postIdRef.current = saved.id;
+            setPostId(saved.id);
+            // Point the URL at the post autosave just created, so a reload — or
+            // the next manual save — targets it instead of making a second one.
+            window.history.replaceState(null, '', `/posts/edit?id=${saved.id}`);
+          }
+          setLocalSave({ kind: 'saved' });
+          setSync(await readSyncState(invoke, saved.id));
+        } catch (err) {
+          // Deliberately sticky, and deliberately harmless: the editor's
+          // contents are untouched, so the text is still there to be saved by
+          // hand. A message that cleared itself would be the one thing worse
+          // than no message, since the next keystroke schedules another attempt
+          // anyway.
+          setLocalSave({ kind: 'failed', message: String(err) });
+        }
+      }),
+    [enqueueWrite],
+  );
+
   /// Write what is on screen to disk before a restore replaces it.
   ///
-  /// The panel promises that the version being left is kept, and the version
-  /// being left is the one the author is looking at. `restore_revision`
-  /// snapshots what is *stored*, though, so edits made since the last save
-  /// would be captured by nothing and then overwritten by the reload that
-  /// follows — the one loss this whole feature exists to prevent, arrived at
-  /// through the button labelled Restore.
+  /// Autosave makes this nearly always a no-op — the debounce has usually
+  /// fired already — but "nearly always" is not the promise the history panel
+  /// makes. A restore within a second and a half of the last keystroke would
+  /// otherwise discard those keystrokes: `restore_revision` snapshots what is
+  /// *stored*, and the reload afterwards overwrites what is not.
   ///
-  /// Saving them first puts them in the history twice over: this save records
-  /// the version before them, and the restore records them.
-  ///
-  /// A draft save, never a publish. Restoring is a local act, and a rollback
-  /// that pushed the author's unsaved paragraph to the blog on the way past
-  /// would be a considerably worse surprise than the one being fixed.
+  /// `persistLocally` reports its own failures rather than throwing, so the
+  /// check is on the outcome. If the text on screen is still not the text on
+  /// disk, the flush did not land, and the restore must not proceed over it.
   const flushBeforeRestore = async () => {
-    if (postId === null) return;
-    const content: Content = { title, tags, body };
-    if (sameContent(content, persisted.current)) return;
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
-    if (!isTauri()) return;
-    await invoke('save_post', { id: postId, ...content, published: false });
-    persisted.current = content;
+    if (postIdRef.current === null) return;
+    await persistLocally();
+    if (!sameContent(latest.current, persisted.current)) {
+      throw new Error('Could not save the current version before restoring');
+    }
   };
+
+  // The values the flush reads. Kept in refs because it can run from a timer or
+  // from the editor closing, neither of which renders first.
+  useEffect(() => {
+    latest.current = { title, tags, body };
+  }, [title, tags, body]);
+
+  useEffect(() => {
+    postIdRef.current = postId;
+  }, [postId]);
+
+  // Debounce: every change restarts the clock, and the write happens once the
+  // typing stops. An edit that leaves the content as it was found schedules
+  // nothing at all.
+  useEffect(() => {
+    if (sameContent({ title, tags, body }, persisted.current)) return;
+    const timer = setTimeout(() => void persistLocally(), AUTOSAVE_DELAY_MS);
+    autosaveTimer.current = timer;
+    return () => {
+      clearTimeout(timer);
+      if (autosaveTimer.current === timer) autosaveTimer.current = null;
+    };
+  }, [title, tags, body, persistLocally]);
+
+  // Leaving the editor with a debounce still pending would lose whatever was
+  // typed in the last second and a half. Both exits are covered: navigating
+  // away unmounts, and closing the window fires `beforeunload`.
+  //
+  // Best effort on the second one — the write is asynchronous and the window
+  // may go first — which is why the debounce is short rather than clever.
+  useEffect(() => {
+    const flush = () => void persistLocally();
+    window.addEventListener('beforeunload', flush);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      flush();
+    };
+  }, [persistLocally]);
 
   // Save the post: `publish=false` keeps it a local draft; `publish=true` also
   // pushes the body to R2 and metadata to D1 (see the `save_post` command).
@@ -290,18 +431,33 @@ export function PostEditor() {
     if (saveState.kind === 'saving') return;
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
+    // Take the write from autosave: a pending debounce firing straight after
+    // this would be a second write of text this one has already stored.
+    if (autosaveTimer.current !== null) {
+      clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+    }
+    setLocalSave({ kind: 'idle' });
     setSaveState({ kind: 'saving', publish });
     try {
-      // Captured before the await, so the baseline recorded below is the text
-      // that actually went to disk rather than whatever has been typed since.
+      // What is being saved, captured before the await so the baseline recorded
+      // below is the text that actually went to disk rather than whatever has
+      // been typed since.
       const content: Content = { title, tags, body };
-      const saved = await invoke<{ id: number; published: boolean }>('save_post', {
-        id: postId,
-        ...content,
-        published: publish,
-      });
+      // Behind any autosave already in flight, and — through the ref rather
+      // than the state — aimed at the post autosave may have just created.
+      // Reading the state here would send `id: null` for a post that exists,
+      // and make a second one.
+      const saved = await enqueueWrite(() =>
+        invoke<{ id: number; published: boolean }>('save_post', {
+          id: postIdRef.current,
+          ...content,
+          published: publish,
+        }),
+      );
       persisted.current = content;
       setPostId(saved.id);
+      postIdRef.current = saved.id;
       // Point the URL at the saved post so a refresh / next save targets it.
       window.history.replaceState(null, '', `/posts/edit?id=${saved.id}`);
       // Re-read rather than assume: a publish that reached the cloud clears the
@@ -321,6 +477,11 @@ export function PostEditor() {
       // A brand-new post whose first save failed has no id yet, so there is
       // nothing to read.
       if (postId !== null) setSync(await readSyncState(invoke, postId));
+      // `persisted` deliberately stays where it was. A failed publish may well
+      // have stored the text locally before the upload failed — `save_post`
+      // does the local half first — but the error does not say so, and an
+      // autosave that repeats a write that already landed costs nothing, while
+      // skipping one that did not would lose the edit.
     }
   };
 
@@ -905,6 +1066,28 @@ export function PostEditor() {
           {saveState.kind === 'saved' && (
             <span className='text-[12px] font-medium text-emerald-600 dark:text-emerald-400'>
               {saveState.publish ? 'Published' : 'Saved'}
+            </span>
+          )}
+          {/* Autosave, which is about this machine only — never the blog. Kept
+              out of the way of the manual save's own feedback, and silent until
+              autosave has actually done something. */}
+          {saveState.kind === 'idle' && localSave.kind !== 'idle' && (
+            <span
+              title={
+                localSave.kind === 'failed'
+                  ? localSave.message
+                  : 'Autosave keeps this post on this machine only. Publishing is still a separate, deliberate step.'
+              }
+              className={cn(
+                'max-w-[220px] truncate text-[12px] font-medium',
+                localSave.kind === 'failed' ? 'text-red-600 dark:text-red-400' : 'text-zinc-400 dark:text-zinc-500',
+              )}
+            >
+              {localSave.kind === 'saving'
+                ? 'Saving locally…'
+                : localSave.kind === 'saved'
+                  ? 'Saved locally'
+                  : 'Autosave failed'}
             </span>
           )}
           {saveState.kind === 'error' && (
