@@ -391,21 +391,43 @@ pub async fn trash_post(
     conn: State<'_, DatabaseConnection>,
     id: i32,
 ) -> AppResult<crate::entities::post_trash::Model> {
+    // One transaction for the read and the write. A refresh deleting this post
+    // — because the cloud no longer has it — checks the trash inside its own
+    // transaction, so without this the two interleave: the post is read here,
+    // the refresh commits the deletion, and the trash row lands afterwards
+    // pointing at nothing. `post_trash` has no foreign key and the trash view
+    // lists only rows that still have a post, so the result would be a success
+    // message over a post that had been permanently deleted, and an orphan
+    // nobody could see.
+    let txn = conn.inner().begin().await?;
+
     // Refuse a post that is not there rather than writing a trash row pointing
     // at nothing, which would be invisible in every listing including the trash.
-    db::get::<PostModel>(conn.inner(), id)
+    db::get::<PostModel>(&txn, id)
         .await?
         .ok_or(AppError::PostNotFound(id))?;
-    db::trash_set(conn.inner(), id, now_ts()).await
+
+    let trashed = db::trash_set(&txn, id, now_ts()).await?;
+    txn.commit().await?;
+    Ok(trashed)
 }
 
 /// Take a post back out of the trash, with everything it had when it went in.
+///
+/// Read and clear in one transaction, because Restore and Delete forever sit on
+/// the same row. `purge` checks for the trash row inside *its* transaction, so
+/// with two statements here the two overlap: purge commits between them,
+/// `trash_clear` succeeds as a no-op, and this hands back a post whose row,
+/// history and Markdown are gone. One transaction each means exactly one of the
+/// two can win.
 #[tauri::command]
 pub async fn restore_post(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<PostModel> {
-    let post = db::get::<PostModel>(conn.inner(), id)
+    let txn = conn.inner().begin().await?;
+    let post = db::get::<PostModel>(&txn, id)
         .await?
         .ok_or(AppError::PostNotFound(id))?;
-    db::trash_clear(conn.inner(), id).await?;
+    db::trash_clear(&txn, id).await?;
+    txn.commit().await?;
     Ok(post)
 }
 
