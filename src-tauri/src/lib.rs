@@ -10,6 +10,7 @@ mod imaging;
 // library; every other module stays crate-private.
 pub mod mcp;
 mod media_keys;
+mod media_usage;
 mod revisions;
 mod sync_state;
 mod update;
@@ -134,6 +135,7 @@ pub fn run() {
             // Media library
             commands::upload_media,
             commands::list_media,
+            commands::media_usage,
             commands::delete_media,
             commands::stage_media_from_library,
             // Post thumbnail

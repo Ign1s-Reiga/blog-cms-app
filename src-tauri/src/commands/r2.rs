@@ -17,6 +17,7 @@ use crate::entities::{post_revision, post_stage};
 use crate::error::{AppError, AppResult};
 use crate::imaging::{self, StagedImage};
 use crate::media_keys;
+use crate::media_usage;
 use crate::revisions;
 use crate::sync_state;
 use super::*;
@@ -688,7 +689,6 @@ pub async fn resolve_conflict(
             }
             let saved = db::update::<PostModel>(&txn, model).await?;
             txn.commit().await?;
-
             staged
                 .commit(&dir.join(format!("{}.md", saved.slug)))
                 .await?;
@@ -890,9 +890,36 @@ pub async fn list_media(app: tauri::AppHandle) -> AppResult<Vec<MediaItem>> {
     Ok(items)
 }
 
-/// Delete a media object from R2 and its local cache.
+/// Which posts still reference each media object — see [`crate::media_usage`]
+/// for why the answer is derived from the posts rather than kept in a table.
 #[tauri::command]
-pub async fn delete_media(app: tauri::AppHandle, key: String) -> AppResult<()> {
+pub async fn media_usage(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+) -> AppResult<Vec<media_usage::MediaUsage>> {
+    media_usage::survey(&app, conn.inner()).await
+}
+
+/// Delete a media object from R2 and its local cache.
+///
+/// Refused while a post still references it, unless `force` says the warning has
+/// been read and answered. The check is here rather than only in the UI because
+/// this is the point of no return: the object is gone from R2 straight away, and
+/// every post pointing at it is left serving a hole to readers.
+#[tauri::command]
+pub async fn delete_media(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    key: String,
+    force: bool,
+) -> AppResult<()> {
+    if !force {
+        let users = media_usage::users_of(&app, conn.inner(), &key).await?;
+        if !users.is_empty() {
+            return Err(AppError::MediaInUse { key, posts: users.len() });
+        }
+    }
+
     let (client, config) = cf()?;
     cloudflare::delete_from_r2(&client, &config, &key).await?;
 

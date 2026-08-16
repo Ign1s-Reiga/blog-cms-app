@@ -180,6 +180,12 @@ pub enum AppError {
     #[error("Media object not found: {0}")]
     MediaNotFound(String),
 
+    /// A deletion refused because posts still point at the object. The count is
+    /// in the message so a caller that ignores the structure still says
+    /// something useful.
+    #[error("{key} is used by {posts} post(s); deleting it would break them")]
+    MediaInUse { key: String, posts: usize },
+
     #[error("{context}: {source}")]
     Image {
         context: &'static str,
