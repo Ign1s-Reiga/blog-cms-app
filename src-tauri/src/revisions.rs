@@ -16,7 +16,7 @@
 //! operation, and would fetch what the *cloud* holds — which, for a post carrying
 //! unpublished edits, is not the thing about to be overwritten.
 
-use sea_orm::ConnectionTrait;
+use sea_orm::{ConnectionTrait, TransactionTrait};
 use tauri::Manager;
 
 use crate::db;
@@ -54,7 +54,7 @@ pub async fn cached_body(app: &tauri::AppHandle, slug: &str) -> Option<String> {
 /// row is mostly of interest to tests; callers on the write paths ignore it.
 pub async fn snapshot(
     app: &tauri::AppHandle,
-    conn: &impl ConnectionTrait,
+    conn: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     post: &PostModel,
     origin: &str,
 ) -> AppResult<Option<post_revision::Model>> {
@@ -66,7 +66,7 @@ pub async fn snapshot(
 /// snapshot except reading the file, so the policy can be tested without an
 /// `AppHandle` and a real app data directory behind it.
 pub async fn record(
-    conn: &impl ConnectionTrait,
+    conn: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     post: &PostModel,
     origin: &str,
     body: Option<String>,
@@ -147,7 +147,7 @@ fn duplicates_head(candidate: &post_revision::Model, head: &post_revision::Model
 /// cannot take one must not proceed.
 pub async fn snapshot_or_log(
     app: &tauri::AppHandle,
-    conn: &impl ConnectionTrait,
+    conn: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     post: &PostModel,
     origin: &str,
 ) {

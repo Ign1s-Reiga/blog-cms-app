@@ -495,7 +495,7 @@ fn unpack(local: Option<(i32, Option<i32>)>) -> (Option<i32>, Option<i32>) {
 /// Series membership is the one field the cloud does not win outright even when
 /// it does otherwise — see [`resolve_series`].
 async fn upsert_post_from_remote(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     remote: post::Model,
     series: &SeriesMap,
 ) -> AppResult<()> {
@@ -647,30 +647,34 @@ pub async fn stage_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<(
 
 /// Upsert a post's staging row (there is one row per post).
 pub async fn stage_set(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     model: post_stage::Model,
 ) -> AppResult<post_stage::Model> {
-    require_post(db, model.post_id).await?;
+    let txn = db.begin().await?;
+    require_post(&txn, model.post_id).await?;
+    let db = &txn;
     let exists = post_stage::Entity::find_by_id(model.post_id)
         .one(db)
         .await?
         .is_some();
 
-    if exists {
+    let written = if exists {
         let active = post_stage::ActiveModel {
             post_id: sea_orm::ActiveValue::Unchanged(model.post_id),
             stage: Set(model.stage),
             staged_at: Set(model.staged_at),
         };
-        Ok(active.update(db).await?)
+        active.update(db).await?
     } else {
         let active = post_stage::ActiveModel {
             post_id: Set(model.post_id),
             stage: Set(model.stage),
             staged_at: Set(model.staged_at),
         };
-        Ok(active.insert(db).await?)
-    }
+        active.insert(db).await?
+    };
+    txn.commit().await?;
+    Ok(written)
 }
 
 // ─── Sync state (local only) ────────────────────────────────────────────────────
@@ -690,13 +694,15 @@ pub async fn sync_all(db: &impl ConnectionTrait) -> AppResult<Vec<post_sync::Mod
 /// Record what the post's content hashes to right now, leaving the synced
 /// fingerprint alone — the cloud has not been told anything by a local edit.
 pub async fn sync_set_local(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     post_id: i32,
     local_hash: String,
 ) -> AppResult<post_sync::Model> {
-    require_post(db, post_id).await?;
+    let txn = db.begin().await?;
+    require_post(&txn, post_id).await?;
+    let db = &txn;
     let existing = post_sync::Entity::find_by_id(post_id).one(db).await?;
-    Ok(match existing {
+    let written = match existing {
         Some(row) => post_sync::ActiveModel {
             post_id: sea_orm::ActiveValue::Unchanged(post_id),
             local_hash: Set(local_hash),
@@ -719,7 +725,9 @@ pub async fn sync_set_local(
         }
         .insert(db)
         .await?,
-    })
+    };
+    txn.commit().await?;
+    Ok(written)
 }
 
 /// Record what the last refresh saw of the cloud's copy, without touching the
@@ -798,13 +806,15 @@ pub async fn sync_accept_remote_baseline(
 /// — which is sound because both hashes are set to the same value here, so the
 /// post reads clean until something local genuinely changes it.
 pub async fn sync_agree(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     post_id: i32,
     hash: String,
     remote_updated_at: Option<i64>,
     at: i64,
 ) -> AppResult<post_sync::Model> {
-    require_post(db, post_id).await?;
+    let txn = db.begin().await?;
+    require_post(&txn, post_id).await?;
+    let db = &txn;
     let exists = post_sync::Entity::find_by_id(post_id).one(db).await?.is_some();
     let model = post_sync::ActiveModel {
         post_id: if exists {
@@ -818,19 +828,23 @@ pub async fn sync_agree(
         remote_updated_at: Set(remote_updated_at),
         remote_seen_at: Set(remote_updated_at),
     };
-    Ok(if exists { model.update(db).await? } else { model.insert(db).await? })
+    let written = if exists { model.update(db).await? } else { model.insert(db).await? };
+    txn.commit().await?;
+    Ok(written)
 }
 
 /// Record that the cloud has accepted exactly this content: the two
 /// fingerprints agree from here until the next local edit.
 pub async fn sync_mark_synced(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     post_id: i32,
     hash: String,
     remote_updated_at: Option<i64>,
     at: i64,
 ) -> AppResult<post_sync::Model> {
-    require_post(db, post_id).await?;
+    let txn = db.begin().await?;
+    require_post(&txn, post_id).await?;
+    let db = &txn;
     let existing = post_sync::Entity::find_by_id(post_id).one(db).await?;
     // The baseline becomes the version *we just wrote*, not the one last seen
     // before writing it. A push sets the remote row's `updated_at` to this
@@ -849,7 +863,9 @@ pub async fn sync_mark_synced(
         remote_updated_at: Set(baseline),
         remote_seen_at: Set(baseline),
     };
-    Ok(if existing.is_some() { model.update(db).await? } else { model.insert(db).await? })
+    let written = if existing.is_some() { model.update(db).await? } else { model.insert(db).await? };
+    txn.commit().await?;
+    Ok(written)
 }
 
 /// Forget a post's sync record. Clearing an absent row is not an error.
@@ -997,13 +1013,15 @@ pub const REVISIONS_PER_POST: usize = 50;
 /// continuously: there is no window in which the table is over its limit, and no
 /// second place that has to remember this table exists.
 pub async fn revision_add(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     model: post_revision::Model,
 ) -> AppResult<post_revision::Model> {
     let post_id = model.post_id;
-    require_post(db, post_id).await?;
-    let created = model.into_insert().insert(db).await?;
-    prune_revisions(db, post_id).await?;
+    let txn = db.begin().await?;
+    require_post(&txn, post_id).await?;
+    let created = model.into_insert().insert(&txn).await?;
+    prune_revisions(&txn, post_id).await?;
+    txn.commit().await?;
     Ok(created)
 }
 
