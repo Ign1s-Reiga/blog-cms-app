@@ -75,12 +75,24 @@ export function RevisionHistory({
   open,
   postId,
   onClose,
+  onBeforeRestore,
   onRestored,
 }: {
   open: boolean;
   /// `null` for a post that has never been saved, which has no history to show.
   postId: number | null;
   onClose: () => void;
+  /// Called before the restore, to write whatever is in the editor to disk.
+  ///
+  /// Restoring promises that the version being left is kept, and the version
+  /// being left is the one on screen — not the one last written. Without this,
+  /// edits made since the last save would be thrown away by the reload that
+  /// follows a restore, and no snapshot would hold them: `restore_revision`
+  /// snapshots what is *stored*, which is precisely what those edits are not.
+  ///
+  /// Rejecting cancels the restore, because the alternative is losing the work
+  /// this call exists to protect.
+  onBeforeRestore: () => Promise<void>;
   /// Called after a successful restore, so the editor can re-read the post it
   /// is showing — the text on screen is no longer what is stored.
   onRestored: () => void;
@@ -139,6 +151,9 @@ export function RevisionHistory({
     setRestoring(true);
     setError(null);
     try {
+      // What is on screen goes to disk first, so the restore's own snapshot
+      // captures it and this is one click from being undone.
+      await onBeforeRestore();
       await invoke('restore_revision', { revisionId: selected.id });
       onRestored();
       onClose();
