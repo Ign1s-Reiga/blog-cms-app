@@ -249,6 +249,14 @@ export function PostEditor() {
       // before the body does, and an autosave in between would write the empty
       // body over the post. See `loadingRef`.
       loadingRef.current = true;
+      // The gate lifts only once a *complete* load has established the
+      // baseline. A read that fails partway — an uncached body whose R2 fetch
+      // cannot reach the network — leaves the editor showing a real title over
+      // an empty body with no baseline behind it, which is precisely the state
+      // an autosave must not be allowed to write. Autosave stays off for the
+      // rest of the session in that case, and says so; a stalled timer is
+      // recoverable, an emptied cache masking the remote Markdown is not.
+      let loaded = false;
       try {
         const post = await invoke<{
           title: string;
@@ -268,14 +276,23 @@ export function PostEditor() {
         // it straight back — and, for a published post, report unpublished
         // edits nobody made.
         persisted.current = { title: post.title, tags: parseTags(post.tags), body: md };
+        loaded = true;
         const state = await readSyncState(invoke, id);
         if (keepGoing()) setSync(state);
+      } catch (err) {
+        setLocalSave({
+          kind: 'failed',
+          message: `Autosave is off — this post did not finish loading: ${String(err)}`,
+        });
+        throw err;
       } finally {
-        loadingRef.current = false;
-        // The debounce effect reads a ref, so it needs telling that the answer
-        // has changed — otherwise an edit made *during* the load would sit
-        // unscheduled until the next keystroke.
-        setLoadEpoch((n) => n + 1);
+        if (loaded) {
+          loadingRef.current = false;
+          // The debounce effect reads a ref, so it needs telling that the
+          // answer has changed — otherwise an edit made *during* the load would
+          // sit unscheduled until the next keystroke.
+          setLoadEpoch((n) => n + 1);
+        }
       }
     },
     [],
@@ -288,9 +305,19 @@ export function PostEditor() {
     if (postId === null || saveState.kind === 'saving') return;
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
+    // Take the write from autosave, exactly as a manual save does. Keeping the
+    // cloud's copy installs a downloaded body; an autosave landing after it
+    // would put the editor's stale text straight back over that body and mark
+    // the post modified — silently undoing the choice the person just made.
+    if (autosaveTimer.current !== null) {
+      clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+    }
     setSaveState({ kind: 'saving', publish: false });
     try {
-      await invoke('resolve_conflict', { postId, keep });
+      // Through the queue, so an autosave already in flight finishes first and
+      // this lands after it rather than under it.
+      await enqueueWrite(() => invoke('resolve_conflict', { postId, keep }));
       await loadFromBackend(invoke, postId);
       setSaveState({ kind: 'idle' });
     } catch (err) {
