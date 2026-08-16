@@ -332,17 +332,14 @@ export function PostEditor() {
   /// cached Markdown, so whatever is in the textarea is a version that no longer
   /// exists — leaving it there would let the next save push it straight back
   /// over the thing that was just restored.
-  const reloadAfterRestore = () => {
+  const reloadAfterRestore = async () => {
     if (postId === null) return;
-    void (async () => {
-      const { invoke, isTauri } = await import('@tauri-apps/api/core');
-      if (!isTauri()) return;
-      try {
-        await loadFromBackend(invoke, postId);
-      } catch (err) {
-        console.error('Failed to reload the restored post:', err);
-      }
-    })();
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
+    if (!isTauri()) return;
+    // Failures propagate to the history panel, which keeps itself open and says
+    // so. Swallowing them here would close the panel over an editor still
+    // showing the version that was just replaced.
+    await loadFromBackend(invoke, postId);
   };
 
   // The preview palette is bound to the app theme in markdown-theme.css (the
@@ -932,12 +929,20 @@ export function PostEditor() {
 
           {/* Hidden until the post has been saved once: history is kept from
               the first save onwards, so a post that has never been saved has
-              nothing to offer behind this button. */}
+              nothing to offer behind this button.
+
+              Disabled while a save or publish is in flight, for the same reason
+              those buttons disable themselves — and one more. A restore during a
+              slow publish would run its own save and its own rollback alongside
+              a command that finishes by recording the hash of the version it
+              started with, leaving the restored text marked as the version the
+              cloud holds. */}
           {postId !== null && (
             <Button
               variant='ghost'
               size='sm'
               onClick={() => setHistoryOpen(true)}
+              disabled={saveState.kind === 'saving'}
               title='Earlier versions of this post, and a way back to any of them'
               className='h-[28px] px-2 gap-1.5 rounded-[5px] text-[12px] font-medium text-zinc-500 dark:text-zinc-400'
             >

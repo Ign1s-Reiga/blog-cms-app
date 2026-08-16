@@ -95,7 +95,13 @@ export function RevisionHistory({
   onBeforeRestore: () => Promise<void>;
   /// Called after a successful restore, so the editor can re-read the post it
   /// is showing — the text on screen is no longer what is stored.
-  onRestored: () => void;
+  ///
+  /// Awaited, and the panel stays open until it finishes. Closing first would
+  /// hand back an editor still showing the pre-restore text, with a reload
+  /// landing on it moments later: type into that gap and the reload overwrites
+  /// what was typed. A reload that fails would leave the stale text on screen
+  /// under a dialog that had already reported success.
+  onRestored: () => Promise<void>;
 }) {
   const [items, setItems] = useState<RevisionSummary[]>([]);
   const [selected, setSelected] = useState<Revision | null>(null);
@@ -155,7 +161,8 @@ export function RevisionHistory({
       // captures it and this is one click from being undone.
       await onBeforeRestore();
       await invoke('restore_revision', { revisionId: selected.id });
-      onRestored();
+      // Only once the editor is showing the restored version is this finished.
+      await onRestored();
       onClose();
     } catch (err) {
       setError(String(err));
