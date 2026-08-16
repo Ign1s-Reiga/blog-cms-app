@@ -467,6 +467,14 @@ export function PostEditor() {
     // forgotten either.
     if (loadingRef.current) return;
     if (sameContent({ title, tags, body }, persisted.current)) return;
+    // "Saved locally" was about the previous content, and this content is not
+    // on disk yet — least of all during continuous typing, where the message
+    // would otherwise stand unchanged for as long as somebody keeps writing,
+    // right up to a close whose flush is explicitly best effort.
+    //
+    // A failure is left where it is: it is sticky by design, and the flush that
+    // eventually succeeds is what clears it.
+    setLocalSave((current) => (current.kind === 'saved' ? { kind: 'idle' } : current));
     const timer = setTimeout(() => void persistLocally(), AUTOSAVE_DELAY_MS);
     autosaveTimer.current = timer;
     return () => {
