@@ -139,7 +139,14 @@ async fn commit_metadata(
 ) -> AppResult<PostModel> {
     let txn = conn.begin().await?;
 
+    // The trash check that matters, because it is the one inside the
+    // transaction that writes. The guard at the top of `save` runs several
+    // awaits earlier — a body staged, a snapshot taken — and a post can be
+    // thrown away in between.
     let saved = if existing {
+        if db::trash_get(&txn, model.id).await?.is_some() {
+            return Err(AppError::PostInTrash(model.slug));
+        }
         db::update::<PostModel>(&txn, model).await?
     } else {
         db::create::<PostModel>(&txn, model).await?
@@ -373,6 +380,13 @@ async fn save(
         None => None,
     };
 
+    // An editor left open on a post that has since been thrown away must not
+    // write into the copy being kept for recovery — nor, on Publish, put a
+    // deleted post on the blog.
+    if let Some(existing) = previous.as_ref() {
+        refuse_if_trashed(conn, &existing.post).await?;
+    }
+
     let mut model = match previous.clone() {
         Some(existing) => existing.post,
         None => {
@@ -472,6 +486,18 @@ async fn save(
         .join("assets");
 
     let synced = async {
+        // Re-checked here, immediately before the first cloud write. The guard
+        // at the top of this function ran several awaits ago — long enough to
+        // stage a body, commit metadata and take a snapshot — and the post can
+        // be thrown away in that window. What must not happen is publishing a
+        // deleted post; the local half above is recoverable, this is not.
+        //
+        // Against `saved`, not `previous`: a brand-new post has no previous
+        // state, and its row exists from the moment the metadata commits — so
+        // it can be listed and trashed while the images are still uploading,
+        // which is the longest part of a publish.
+        refuse_if_trashed(conn, &saved).await?;
+
         let (client, config) = cf()?;
 
         // Referenced local images → R2 under `posts/<slug>/<sha256>.<ext>`, and
@@ -576,6 +602,10 @@ pub async fn resolve_conflict(
     let post = db::get::<PostModel>(conn.inner(), post_id)
         .await?
         .ok_or(AppError::PostNotFound(post_id))?;
+    // A post can be trashed while carrying an unsettled conflict. Settling it
+    // then writes to a deleted post, and "keep cloud" would download over the
+    // very copy the trash is holding on to.
+    refuse_if_trashed(conn.inner(), &post).await?;
 
     // Refuse anything that is not actually a conflict. Resolving a post that is
     // merely modified would silently discard the pending edit under a button
@@ -646,7 +676,19 @@ pub async fn resolve_conflict(
             )
             .await;
 
-            let saved = db::update::<PostModel>(conn.inner(), model).await?;
+            // The trash check that counts: inside the transaction that writes.
+            // The one at the top of this command ran before a D1 listing and an
+            // R2 download, which is plenty of time for another window to throw
+            // the post away — and taking the cloud's copy over it would replace
+            // the very version being kept for recovery.
+            let txn = conn.inner().begin().await?;
+            if db::trash_get(&txn, post.id).await?.is_some() {
+                staged.discard().await;
+                return Err(AppError::PostInTrash(post.slug));
+            }
+            let saved = db::update::<PostModel>(&txn, model).await?;
+            txn.commit().await?;
+
             staged
                 .commit(&dir.join(format!("{}.md", saved.slug)))
                 .await?;

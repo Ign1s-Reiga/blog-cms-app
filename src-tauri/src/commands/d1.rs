@@ -121,6 +121,10 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> AppResult
     let mut post = db::get::<PostModel>(conn, post_id)
         .await?
         .ok_or(AppError::PostNotFound(post_id))?;
+    // Publishing a post out of the trash would put a deleted article on the
+    // blog; unpublishing one from there is a cloud write the trash deliberately
+    // does not make on anybody's behalf.
+    refuse_if_trashed(conn, &post).await?;
     post.published = publish;
     post.published_at = if publish { Some(now) } else { None };
     post.updated_at = now;
@@ -165,7 +169,10 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> AppResult
 /// errors with a summary if any failed.
 #[tauri::command]
 pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize> {
-    let posts = db::list::<PostModel>(conn.inner()).await?;
+    // Trash excluded: pushing a post the person has thrown away would put it
+    // back on the blog, which is the opposite of what the button they pressed
+    // last says they wanted.
+    let posts = db::list_active_posts(conn.inner()).await?;
     let (client, config) = cf()?;
     let now = now_ts();
 
@@ -180,6 +187,12 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize>
     let mut failed = 0usize;
     for mut post in posts {
         let post_id = post.id;
+        // Re-read per post rather than trusted from the listing above. A push
+        // walks the whole library over the network, and a post can be thrown
+        // away while it does — the listing is a snapshot from before that.
+        if db::trash_get(conn.inner(), post_id).await?.is_some() {
+            continue;
+        }
         let published = post.published;
         series.apply_outbound(&mut post);
         let stage = match cloudflare::d1_post_upsert(&client, &config, post).await {

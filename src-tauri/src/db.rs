@@ -7,12 +7,14 @@
 use sea_orm::{
     ActiveModelBehavior, ActiveModelTrait, ColumnTrait, ConnectionTrait, Database,
     DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Schema,
-    Set,
+    Set, TransactionTrait,
 };
 use tauri::Manager;
 
 use crate::entities::record::{Id, Record};
-use crate::entities::{post, post_revision, post_stage, post_sync, series};
+use crate::entities::{
+    post, post_revision, post_stage, post_sync, post_tombstone, post_trash, series,
+};
 use crate::error::{AppError, AppResult};
 
 /// Open (creating if needed) the local SQLite database and ensure its schema
@@ -89,6 +91,21 @@ async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
     db.execute(&sync_tbl)
         .await
         .map_err(|e| AppError::db_init("Failed to create `post_sync` table", e))?;
+
+    // Local-only as well: which slugs have been deleted here for good. See
+    // `post_tombstone` for why "forever" needs writing down.
+    let mut tombstone_tbl = schema.create_table_from_entity(post_tombstone::Entity);
+    tombstone_tbl.if_not_exists();
+    db.execute(&tombstone_tbl)
+        .await
+        .map_err(|e| AppError::db_init("Failed to create `post_tombstone` table", e))?;
+
+    // Local-only as well: which posts are in the trash.
+    let mut trash_tbl = schema.create_table_from_entity(post_trash::Entity);
+    trash_tbl.if_not_exists();
+    db.execute(&trash_tbl)
+        .await
+        .map_err(|e| AppError::db_init("Failed to create `post_trash` table", e))?;
 
     // Local-only too: what each post looked like before each edit.
     let mut revision_tbl = schema.create_table_from_entity(post_revision::Entity);
@@ -313,6 +330,12 @@ impl SeriesMap {
 ///
 /// `remote_series` is the cloud's series table, needed to translate each post's
 /// `series_id` into the local row it means.
+///
+/// **A trashed post takes no part in any of this.** It is neither overwritten by
+/// the cloud's copy nor deleted for being absent from it: the first would edit
+/// something the person has thrown away, and the second would empty their trash
+/// on their behalf — destroying the only recoverable copy — as a side effect of
+/// pressing Refresh. It rejoins the library, and the sync, when it is restored.
 pub async fn mirror_posts(
     db: &DatabaseConnection,
     remote: Vec<post::Model>,
@@ -323,8 +346,29 @@ pub async fn mirror_posts(
     let upserted = remote.len();
     let series = SeriesMap::build(db, remote_series).await?;
 
+    // Any tombstone whose post the cloud no longer has is finished: there is
+    // nothing left for it to keep out, and leaving it would silently refuse a
+    // slug somebody may want to use again.
+    for slug in tombstoned_slugs(db).await? {
+        if !remote_slugs.contains(&slug) {
+            let _ = tombstone_clear(db, &slug).await;
+        }
+    }
+
+    // ── One transaction per post ──────────────────────────────────────────────
+    //
+    // A refresh is a long walk: a library's worth of reads and writes, over
+    // which somebody can perfectly well throw a post away or delete one for
+    // good. Every decision below therefore reads its precondition *inside* the
+    // transaction that acts on it. Checking first and writing afterwards — even
+    // immediately afterwards — leaves a window in which the answer changes
+    // between the two, and the losses on the other side of that window are the
+    // permanent kind: a trashed post overwritten or deleted outright, a
+    // "Delete forever" undone by the pull that follows it.
     for post in remote {
-        upsert_post_from_remote(db, post, &series).await?;
+        let txn = db.begin().await?;
+        upsert_post_from_remote(&txn, post, &series).await?;
+        txn.commit().await?;
     }
 
     // Drop anything local that no longer exists remotely (+ its staging and
@@ -343,7 +387,21 @@ pub async fn mirror_posts(
         if remote_slugs.contains(&local.slug) {
             continue;
         }
-        let never_pushed = sync_get(db, local.id)
+
+        // Same rule as the upsert loop: the conditions are read inside the
+        // transaction that deletes, so a post thrown away while this walk was
+        // running cannot be deleted out from under the trash — which would turn
+        // a recoverable action into permanent loss and leave a trash row
+        // pointing at nothing.
+        let txn = db.begin().await?;
+
+        if trash_get(&txn, local.id).await?.is_some() {
+            // Already thrown away here, and its absence upstream says nothing
+            // about whether the person still wants it back.
+            txn.rollback().await?;
+            continue;
+        }
+        let never_pushed = sync_get(&txn, local.id)
             .await?
             .is_some_and(|sync| sync.synced_hash.is_none());
         if never_pushed {
@@ -351,13 +409,15 @@ pub async fn mirror_posts(
                 "Post `{}` is absent from the cloud because it has never been pushed; keeping it",
                 local.slug
             );
+            txn.rollback().await?;
             continue;
         }
 
-        let _ = post_stage::Entity::delete_by_id(local.id).exec(db).await;
-        let _ = sync_clear(db, local.id).await;
-        let _ = revisions_clear(db, local.id).await;
-        post::Entity::delete_by_id(local.id).exec(db).await?;
+        post_stage::Entity::delete_by_id(local.id).exec(&txn).await?;
+        sync_clear(&txn, local.id).await?;
+        revisions_clear(&txn, local.id).await?;
+        post::Entity::delete_by_id(local.id).exec(&txn).await?;
+        txn.commit().await?;
         deleted += 1;
     }
 
@@ -435,11 +495,39 @@ fn unpack(local: Option<(i32, Option<i32>)>) -> (Option<i32>, Option<i32>) {
 /// Series membership is the one field the cloud does not win outright even when
 /// it does otherwise — see [`resolve_series`].
 async fn upsert_post_from_remote(
-    db: &DatabaseConnection,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     remote: post::Model,
     series: &SeriesMap,
 ) -> AppResult<()> {
     let existing = post_by_slug(db, &remote.slug).await?;
+
+    // A post in the trash is not part of the library, so the cloud has nothing
+    // to say about it. Applying the refresh anyway would rewrite the copy the
+    // person is holding on to in case they want it back — and restoring it
+    // would then hand back the cloud's version rather than the one they threw
+    // away.
+    //
+    // The captured set is consulted first because it answers for free; the row
+    // itself is read when it does not, since a refresh walks the whole library
+    // and a post can be trashed while it does.
+    match existing.as_ref() {
+        Some(local) => {
+            if trash_get(db, local.id).await?.is_some() {
+                log::info!("Post `{}` is in the trash; leaving it out of the refresh", remote.slug);
+                return Ok(());
+            }
+        }
+        // No local row and a tombstone means this post was deleted here for
+        // good. The cloud's copy is deliberately left alone by that deletion, so
+        // this is the only thing standing between "Delete forever" and the very
+        // next pull putting the post back.
+        None => {
+            if tombstoned_slugs(db).await?.contains(&remote.slug) {
+                log::info!("Post `{}` was deleted here for good; not pulling it back", remote.slug);
+                return Ok(());
+            }
+        }
+    }
 
     // A post with unpushed local edits is not overwritten — decided here, before
     // anything is written, because once the row is overwritten the evidence of
@@ -516,6 +604,27 @@ async fn upsert_post_from_remote(
     Ok(())
 }
 
+/// Refuse to write a side-table row for a post that no longer exists.
+///
+/// `post_stage`, `post_sync` and `post_revision` are keyed by the post's id and
+/// carry no foreign key, so nothing at the database level stops a row outliving
+/// the post it describes. That matters more than it sounds: the primary key is a
+/// plain `INTEGER PRIMARY KEY` rather than `AUTOINCREMENT`, so SQLite is free to
+/// hand a deleted post's id to the next one — which would inherit its stage, its
+/// idea of what the cloud holds, and its draft history.
+///
+/// A save that loses a race with a permanent deletion is exactly how that
+/// happens: its metadata commits, the post is deleted, and its remaining writes
+/// land afterwards. Checked here rather than in each caller so no future path
+/// has to remember, and inside whatever transaction the caller passes, which is
+/// what makes it airtight where one is used.
+async fn require_post(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
+    match post::Entity::find_by_id(post_id).one(db).await? {
+        Some(_) => Ok(()),
+        None => Err(AppError::PostVanished(post_id)),
+    }
+}
+
 // ─── Publish staging (local only) ───────────────────────────────────────────────
 
 /// Every post's staging row, for building a whole-library view in one query.
@@ -538,29 +647,34 @@ pub async fn stage_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<(
 
 /// Upsert a post's staging row (there is one row per post).
 pub async fn stage_set(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     model: post_stage::Model,
 ) -> AppResult<post_stage::Model> {
+    let txn = db.begin().await?;
+    require_post(&txn, model.post_id).await?;
+    let db = &txn;
     let exists = post_stage::Entity::find_by_id(model.post_id)
         .one(db)
         .await?
         .is_some();
 
-    if exists {
+    let written = if exists {
         let active = post_stage::ActiveModel {
             post_id: sea_orm::ActiveValue::Unchanged(model.post_id),
             stage: Set(model.stage),
             staged_at: Set(model.staged_at),
         };
-        Ok(active.update(db).await?)
+        active.update(db).await?
     } else {
         let active = post_stage::ActiveModel {
             post_id: Set(model.post_id),
             stage: Set(model.stage),
             staged_at: Set(model.staged_at),
         };
-        Ok(active.insert(db).await?)
-    }
+        active.insert(db).await?
+    };
+    txn.commit().await?;
+    Ok(written)
 }
 
 // ─── Sync state (local only) ────────────────────────────────────────────────────
@@ -580,12 +694,15 @@ pub async fn sync_all(db: &impl ConnectionTrait) -> AppResult<Vec<post_sync::Mod
 /// Record what the post's content hashes to right now, leaving the synced
 /// fingerprint alone — the cloud has not been told anything by a local edit.
 pub async fn sync_set_local(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     post_id: i32,
     local_hash: String,
 ) -> AppResult<post_sync::Model> {
+    let txn = db.begin().await?;
+    require_post(&txn, post_id).await?;
+    let db = &txn;
     let existing = post_sync::Entity::find_by_id(post_id).one(db).await?;
-    Ok(match existing {
+    let written = match existing {
         Some(row) => post_sync::ActiveModel {
             post_id: sea_orm::ActiveValue::Unchanged(post_id),
             local_hash: Set(local_hash),
@@ -608,7 +725,9 @@ pub async fn sync_set_local(
         }
         .insert(db)
         .await?,
-    })
+    };
+    txn.commit().await?;
+    Ok(written)
 }
 
 /// Record what the last refresh saw of the cloud's copy, without touching the
@@ -687,12 +806,15 @@ pub async fn sync_accept_remote_baseline(
 /// — which is sound because both hashes are set to the same value here, so the
 /// post reads clean until something local genuinely changes it.
 pub async fn sync_agree(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     post_id: i32,
     hash: String,
     remote_updated_at: Option<i64>,
     at: i64,
 ) -> AppResult<post_sync::Model> {
+    let txn = db.begin().await?;
+    require_post(&txn, post_id).await?;
+    let db = &txn;
     let exists = post_sync::Entity::find_by_id(post_id).one(db).await?.is_some();
     let model = post_sync::ActiveModel {
         post_id: if exists {
@@ -706,18 +828,23 @@ pub async fn sync_agree(
         remote_updated_at: Set(remote_updated_at),
         remote_seen_at: Set(remote_updated_at),
     };
-    Ok(if exists { model.update(db).await? } else { model.insert(db).await? })
+    let written = if exists { model.update(db).await? } else { model.insert(db).await? };
+    txn.commit().await?;
+    Ok(written)
 }
 
 /// Record that the cloud has accepted exactly this content: the two
 /// fingerprints agree from here until the next local edit.
 pub async fn sync_mark_synced(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     post_id: i32,
     hash: String,
     remote_updated_at: Option<i64>,
     at: i64,
 ) -> AppResult<post_sync::Model> {
+    let txn = db.begin().await?;
+    require_post(&txn, post_id).await?;
+    let db = &txn;
     let existing = post_sync::Entity::find_by_id(post_id).one(db).await?;
     // The baseline becomes the version *we just wrote*, not the one last seen
     // before writing it. A push sets the remote row's `updated_at` to this
@@ -736,13 +863,137 @@ pub async fn sync_mark_synced(
         remote_updated_at: Set(baseline),
         remote_seen_at: Set(baseline),
     };
-    Ok(if existing.is_some() { model.update(db).await? } else { model.insert(db).await? })
+    let written = if existing.is_some() { model.update(db).await? } else { model.insert(db).await? };
+    txn.commit().await?;
+    Ok(written)
 }
 
 /// Forget a post's sync record. Clearing an absent row is not an error.
 pub async fn sync_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
     post_sync::Entity::delete_by_id(post_id).exec(db).await?;
     Ok(())
+}
+
+// ─── Tombstones (local only) ──────────────────────────────────────────────────
+
+/// Record that a slug was permanently deleted here — see [`post_tombstone`].
+pub async fn tombstone_set(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    deleted_at: i64,
+) -> AppResult<()> {
+    if post_tombstone::Entity::find_by_id(slug.to_string())
+        .one(db)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    post_tombstone::ActiveModel {
+        slug: Set(slug.to_string()),
+        deleted_at: Set(deleted_at),
+    }
+    .insert(db)
+    .await?;
+    Ok(())
+}
+
+/// Every slug this machine has deleted for good.
+pub async fn tombstoned_slugs(
+    db: &impl ConnectionTrait,
+) -> AppResult<std::collections::HashSet<String>> {
+    Ok(post_tombstone::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|t| t.slug)
+        .collect())
+}
+
+/// Forget a tombstone, because the thing it was keeping out is gone.
+pub async fn tombstone_clear(db: &impl ConnectionTrait, slug: &str) -> AppResult<()> {
+    post_tombstone::Entity::delete_by_id(slug.to_string()).exec(db).await?;
+    Ok(())
+}
+
+// ─── Trash (local only) ───────────────────────────────────────────────────────
+
+/// Every trashed post's id, for the many places that have to leave them out.
+///
+/// One query rather than a join per caller: a post being in the trash is a fact
+/// about a handful of rows, and every listing needs the whole set anyway.
+pub async fn trashed_ids(
+    db: &impl ConnectionTrait,
+) -> AppResult<std::collections::HashSet<i32>> {
+    Ok(post_trash::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|t| t.post_id)
+        .collect())
+}
+
+pub async fn trash_get(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+) -> AppResult<Option<post_trash::Model>> {
+    Ok(post_trash::Entity::find_by_id(post_id).one(db).await?)
+}
+
+/// Move a post to the trash. Trashing an already-trashed post keeps the original
+/// time, so restoring and re-trashing does not quietly reorder the view.
+pub async fn trash_set(
+    db: &impl ConnectionTrait,
+    post_id: i32,
+    trashed_at: i64,
+) -> AppResult<post_trash::Model> {
+    if let Some(existing) = trash_get(db, post_id).await? {
+        return Ok(existing);
+    }
+    Ok(post_trash::ActiveModel {
+        post_id: Set(post_id),
+        trashed_at: Set(trashed_at),
+    }
+    .insert(db)
+    .await?)
+}
+
+/// Take a post back out of the trash. Clearing an absent row is not an error.
+pub async fn trash_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
+    post_trash::Entity::delete_by_id(post_id).exec(db).await?;
+    Ok(())
+}
+
+/// The library as everything except the trash view sees it: newest first, with
+/// trashed posts left out.
+pub async fn list_active_posts(db: &impl ConnectionTrait) -> AppResult<Vec<post::Model>> {
+    let trashed = trashed_ids(db).await?;
+    Ok(list::<post::Model>(db)
+        .await?
+        .into_iter()
+        .filter(|p| !trashed.contains(&p.id))
+        .collect())
+}
+
+/// The trash itself, most recently thrown away first, each post paired with when
+/// it went.
+pub async fn list_trashed_posts(
+    db: &impl ConnectionTrait,
+) -> AppResult<Vec<(post::Model, post_trash::Model)>> {
+    let trash: std::collections::HashMap<i32, post_trash::Model> = post_trash::Entity::find()
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|t| (t.post_id, t))
+        .collect();
+
+    let mut rows: Vec<(post::Model, post_trash::Model)> = list::<post::Model>(db)
+        .await?
+        .into_iter()
+        .filter_map(|post| trash.get(&post.id).map(|t| (post, t.clone())))
+        .collect();
+    rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.trashed_at));
+    Ok(rows)
 }
 
 // ─── Revisions (local only) ───────────────────────────────────────────────────
@@ -762,12 +1013,15 @@ pub const REVISIONS_PER_POST: usize = 50;
 /// continuously: there is no window in which the table is over its limit, and no
 /// second place that has to remember this table exists.
 pub async fn revision_add(
-    db: &impl ConnectionTrait,
+    db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     model: post_revision::Model,
 ) -> AppResult<post_revision::Model> {
     let post_id = model.post_id;
-    let created = model.into_insert().insert(db).await?;
-    prune_revisions(db, post_id).await?;
+    let txn = db.begin().await?;
+    require_post(&txn, post_id).await?;
+    let created = model.into_insert().insert(&txn).await?;
+    prune_revisions(&txn, post_id).await?;
+    txn.commit().await?;
     Ok(created)
 }
 
@@ -847,17 +1101,20 @@ pub async fn revisions_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResu
     Ok(())
 }
 
-/// Posts whose staging row is in `stage` (`"draft"` | `"published"`).
+/// Posts whose staging row is in `stage` (`"draft"` | `"published"`), trash
+/// excluded — a thrown-away draft is not one of "the drafts".
 pub async fn posts_in_stage(
     db: &DatabaseConnection,
     stage: String,
 ) -> AppResult<Vec<post::Model>> {
+    let trashed = trashed_ids(db).await?;
     let ids: Vec<i32> = post_stage::Entity::find()
         .filter(post_stage::Column::Stage.eq(stage))
         .all(db)
         .await?
         .into_iter()
         .map(|s| s.post_id)
+        .filter(|id| !trashed.contains(id))
         .collect();
 
     if ids.is_empty() {
@@ -1282,6 +1539,188 @@ mod tests {
             crate::sync_state::SyncState::Conflict,
             "the other machine's change was about to be overwritten silently"
         );
+    }
+
+    /// A trashed post is deleted as far as every listing is concerned, while
+    /// nothing about it is actually gone.
+    #[tokio::test]
+    async fn a_trashed_post_leaves_the_library_and_comes_back_whole() {
+        let db = connect_in_memory().await.unwrap();
+        let kept = create::<post::Model>(&db, post_row("kept", None, None)).await.unwrap();
+        let mut binned = post_row("binned", None, None);
+        binned.title = "Thrown away".into();
+        let binned = create::<post::Model>(&db, binned).await.unwrap();
+        revision_add(&db, revision_row(binned.id, "an old draft", 1)).await.unwrap();
+
+        trash_set(&db, binned.id, 1_700_000_000).await.unwrap();
+
+        let active: Vec<i32> = list_active_posts(&db).await.unwrap().iter().map(|p| p.id).collect();
+        assert_eq!(active, vec![kept.id]);
+        let trashed = list_trashed_posts(&db).await.unwrap();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].0.title, "Thrown away");
+        assert_eq!(trashed[0].1.trashed_at, 1_700_000_000);
+        // The history is not part of what a soft delete takes away.
+        assert_eq!(revisions_for_post(&db, binned.id).await.unwrap().len(), 1);
+
+        trash_clear(&db, binned.id).await.unwrap();
+
+        assert_eq!(list_active_posts(&db).await.unwrap().len(), 2);
+        assert!(list_trashed_posts(&db).await.unwrap().is_empty());
+        assert_eq!(
+            get::<post::Model>(&db, binned.id).await.unwrap().unwrap().title,
+            "Thrown away",
+            "the post came back changed"
+        );
+    }
+
+    /// The cloud has nothing to say about a post that has been thrown away here.
+    /// Applying the refresh would rewrite the copy being kept in case it is
+    /// wanted back.
+    #[tokio::test]
+    async fn a_refresh_leaves_a_trashed_post_alone() {
+        let db = connect_in_memory().await.unwrap();
+        let mut local = post_row("a-post", None, None);
+        local.title = "Local title".into();
+        let post = create::<post::Model>(&db, local).await.unwrap();
+        trash_set(&db, post.id, 1).await.unwrap();
+
+        let mut remote = post_row("a-post", None, None);
+        remote.title = "Cloud title".into();
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
+
+        assert_eq!(
+            get::<post::Model>(&db, post.id).await.unwrap().unwrap().title,
+            "Local title",
+            "a refresh overwrote a post in the trash"
+        );
+    }
+
+    /// And the other direction: a post deleted in the cloud must not empty the
+    /// local trash, which is the only place its recoverable copy lives.
+    #[tokio::test]
+    async fn a_refresh_does_not_empty_the_trash() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("was-live", None, None)).await.unwrap();
+        sync_mark_synced(&db, post.id, "v1".into(), None, 1_700_000_000).await.unwrap();
+        trash_set(&db, post.id, 1).await.unwrap();
+
+        let (_, deleted) = mirror_posts(&db, vec![], &[]).await.unwrap();
+
+        assert_eq!(deleted, 0);
+        assert!(
+            get::<post::Model>(&db, post.id).await.unwrap().is_some(),
+            "a refresh permanently deleted a post from the trash"
+        );
+    }
+
+    /// A row in a side table can outlive the post it describes, and the primary
+    /// key is a plain `INTEGER PRIMARY KEY` — so SQLite may hand a deleted
+    /// post's id to the next one, which would inherit its stage, its idea of
+    /// what the cloud holds, and its draft history. A save that loses a race
+    /// with a permanent deletion is how that happens, and refusing the write is
+    /// what makes it impossible rather than unlikely.
+    #[tokio::test]
+    async fn side_tables_refuse_a_post_that_no_longer_exists() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+        let id = post.id;
+        delete::<post::Model>(&db, id).await.unwrap();
+
+        assert!(
+            stage_set(
+                &db,
+                post_stage::Model { post_id: id, stage: post_stage::DRAFT.into(), staged_at: 0 }
+            )
+            .await
+            .is_err(),
+            "a stage row outlived its post"
+        );
+        assert!(
+            sync_set_local(&db, id, "v1".into()).await.is_err(),
+            "a sync row outlived its post"
+        );
+        assert!(
+            sync_mark_synced(&db, id, "v1".into(), None, 0).await.is_err(),
+            "a sync row outlived its post"
+        );
+        assert!(
+            revision_add(&db, revision_row(id, "somebody else's draft", 1)).await.is_err(),
+            "a revision outlived its post"
+        );
+    }
+
+    /// "Delete forever" has to survive the next Refresh. The cloud's copy is
+    /// deliberately left alone by a local deletion, so without a tombstone the
+    /// mirror reads the remote post as one this machine has never seen and
+    /// inserts it straight back.
+    #[tokio::test]
+    async fn a_permanently_deleted_post_is_not_pulled_back() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("was-live", None, None)).await.unwrap();
+
+        // What `purge` leaves behind.
+        delete::<post::Model>(&db, post.id).await.unwrap();
+        tombstone_set(&db, "was-live", 1_700_000_000).await.unwrap();
+
+        // The cloud still has it, as it always would.
+        mirror_posts(&db, vec![post_row("was-live", None, None)], &[]).await.unwrap();
+
+        assert!(
+            post_by_slug(&db, "was-live").await.unwrap().is_none(),
+            "a refresh undid a permanent deletion"
+        );
+    }
+
+    /// And the tombstone is not forever either: once the cloud's copy is gone
+    /// there is nothing left to keep out, and a slug nobody is using should not
+    /// stay quietly refused.
+    #[tokio::test]
+    async fn a_tombstone_is_dropped_once_the_cloud_forgets_the_post_too() {
+        let db = connect_in_memory().await.unwrap();
+        tombstone_set(&db, "was-live", 1_700_000_000).await.unwrap();
+
+        mirror_posts(&db, vec![], &[]).await.unwrap();
+
+        assert!(tombstoned_slugs(&db).await.unwrap().is_empty());
+
+        // So the same slug can come back from the cloud afterwards.
+        mirror_posts(&db, vec![post_row("was-live", None, None)], &[]).await.unwrap();
+        assert!(post_by_slug(&db, "was-live").await.unwrap().is_some());
+    }
+
+    /// Trashing something twice must not reorder the view under the person
+    /// looking at it.
+    #[tokio::test]
+    async fn re_trashing_keeps_the_time_it_first_went() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
+
+        trash_set(&db, post.id, 100).await.unwrap();
+        let again = trash_set(&db, post.id, 900).await.unwrap();
+
+        assert_eq!(again.trashed_at, 100);
+    }
+
+    /// A trashed draft is not one of "the drafts".
+    #[tokio::test]
+    async fn stage_listings_skip_the_trash() {
+        let db = connect_in_memory().await.unwrap();
+        let kept = create::<post::Model>(&db, post_row("kept", None, None)).await.unwrap();
+        let binned = create::<post::Model>(&db, post_row("binned", None, None)).await.unwrap();
+        for id in [kept.id, binned.id] {
+            stage_set(
+                &db,
+                post_stage::Model { post_id: id, stage: post_stage::DRAFT.into(), staged_at: 0 },
+            )
+            .await
+            .unwrap();
+        }
+
+        trash_set(&db, binned.id, 1).await.unwrap();
+
+        let drafts = posts_in_stage(&db, post_stage::DRAFT.to_string()).await.unwrap();
+        assert_eq!(drafts.iter().map(|p| p.id).collect::<Vec<_>>(), vec![kept.id]);
     }
 
     fn revision_row(post_id: i32, body: &str, at: i64) -> post_revision::Model {

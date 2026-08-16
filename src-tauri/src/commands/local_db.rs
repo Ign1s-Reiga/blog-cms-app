@@ -4,7 +4,7 @@
 //! Cloudflare credentials. Anything that also writes to the cloud lives in
 //! `d1` or `r2` instead.
 
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, TransactionTrait};
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use crate::db;
@@ -12,6 +12,7 @@ use crate::entities::post::Model as PostModel;
 use crate::entities::{post_revision, post_stage};
 use crate::entities::series::Model as SeriesModel;
 use crate::error::{AppError, AppResult};
+use crate::media_keys;
 use crate::revisions;
 use super::*;
 
@@ -331,17 +332,30 @@ pub async fn create_post(
     Ok(created)
 }
 
+/// The library, trash excluded — what every screen except the trash view means
+/// by "the posts".
 #[tauri::command]
 pub async fn list_posts(conn: State<'_, DatabaseConnection>) -> AppResult<Vec<PostModel>> {
-    db::list::<PostModel>(conn.inner()).await
+    db::list_active_posts(conn.inner()).await
 }
 
+/// One post for the editor, refusing anything in the trash.
+///
+/// A trashed post is deleted as far as the app is concerned, but the editor can
+/// still be pointed at one through a bookmark or browser history. Saying so is
+/// better than opening it: an editor on a trashed post writes into the copy
+/// being kept for recovery, and its Publish button puts a deleted post on the
+/// blog.
 #[tauri::command]
 pub async fn get_post(
     conn: State<'_, DatabaseConnection>,
     id: i32,
 ) -> AppResult<Option<PostModel>> {
-    db::get::<PostModel>(conn.inner(), id).await
+    let Some(post) = db::get::<PostModel>(conn.inner(), id).await? else {
+        return Ok(None);
+    };
+    refuse_if_trashed(conn.inner(), &post).await?;
+    Ok(Some(post))
 }
 
 #[tauri::command]
@@ -349,21 +363,315 @@ pub async fn update_post(
     conn: State<'_, DatabaseConnection>,
     post: PostModel,
 ) -> AppResult<PostModel> {
+    // Every other write path refuses a trashed post; this one is the raw row
+    // update, and leaving it open would make the rule a matter of which command
+    // somebody happened to call.
+    refuse_if_trashed(conn.inner(), &post).await?;
     let mut post = post;
     post.updated_at = now_ts();
     db::update::<PostModel>(conn.inner(), post).await
 }
 
+// ── Trash ───────────────────────────────────────────────────────────────────────
+
+/// Move a post to the trash: it leaves every listing, and nothing else about it
+/// changes.
+///
+/// This is what the delete button does. The body, the staging and sync rows and
+/// the entire revision history stay exactly where they are, which is what makes
+/// [`restore_post`] a single row deletion rather than a reconstruction.
+///
+/// **Nothing here reaches the cloud.** A published post that is trashed is still
+/// on the blog and stays there; taking it down is `unpublish_post`, deliberately
+/// and separately. Deleting a local copy and unpublishing are different
+/// intentions, and a delete button that quietly did both would be the more
+/// destructive of the two guesses.
 #[tauri::command]
-pub async fn delete_post(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<()> {
-    // The staging, sync and revision rows describe a post that is about to stop
-    // existing; leaving them behind would attach them to whichever post is
-    // assigned this id next — and a stranger's history is a worse thing to
-    // inherit than a stale stage.
-    let _ = db::stage_clear(conn.inner(), id).await;
-    let _ = db::sync_clear(conn.inner(), id).await;
-    let _ = db::revisions_clear(conn.inner(), id).await;
-    db::delete::<PostModel>(conn.inner(), id).await
+pub async fn trash_post(
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+) -> AppResult<crate::entities::post_trash::Model> {
+    // One transaction for the read and the write. A refresh deleting this post
+    // — because the cloud no longer has it — checks the trash inside its own
+    // transaction, so without this the two interleave: the post is read here,
+    // the refresh commits the deletion, and the trash row lands afterwards
+    // pointing at nothing. `post_trash` has no foreign key and the trash view
+    // lists only rows that still have a post, so the result would be a success
+    // message over a post that had been permanently deleted, and an orphan
+    // nobody could see.
+    let txn = conn.inner().begin().await?;
+
+    // Refuse a post that is not there rather than writing a trash row pointing
+    // at nothing, which would be invisible in every listing including the trash.
+    db::get::<PostModel>(&txn, id)
+        .await?
+        .ok_or(AppError::PostNotFound(id))?;
+
+    let trashed = db::trash_set(&txn, id, now_ts()).await?;
+    txn.commit().await?;
+    Ok(trashed)
+}
+
+/// Take a post back out of the trash, with everything it had when it went in.
+///
+/// Read and clear in one transaction, because Restore and Delete forever sit on
+/// the same row. `purge` checks for the trash row inside *its* transaction, so
+/// with two statements here the two overlap: purge commits between them,
+/// `trash_clear` succeeds as a no-op, and this hands back a post whose row,
+/// history and Markdown are gone. One transaction each means exactly one of the
+/// two can win.
+#[tauri::command]
+pub async fn restore_post(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<PostModel> {
+    let txn = conn.inner().begin().await?;
+    let post = db::get::<PostModel>(&txn, id)
+        .await?
+        .ok_or(AppError::PostNotFound(id))?;
+    db::trash_clear(&txn, id).await?;
+    txn.commit().await?;
+    Ok(post)
+}
+
+/// The trash, most recently thrown away first.
+#[tauri::command]
+pub async fn list_trashed_posts(
+    conn: State<'_, DatabaseConnection>,
+) -> AppResult<Vec<TrashedPost>> {
+    Ok(db::list_trashed_posts(conn.inner())
+        .await?
+        .into_iter()
+        .map(|(post, trash)| TrashedPost { trashed_at: trash.trashed_at, post })
+        .collect())
+}
+
+/// A post in the trash, as the trash view reads it.
+#[derive(serde::Serialize)]
+pub struct TrashedPost {
+    #[serde(flatten)]
+    pub post: PostModel,
+    /// Unix seconds. The view sorts and dates by this rather than by the post's
+    /// own timestamps, which describe when it was written, not when it went.
+    pub trashed_at: i64,
+}
+
+/// Delete a post from this machine for good: the row, the cached Markdown, the
+/// staging and sync rows, and the revision history.
+///
+/// Only reachable from the trash, and only from a control that says what it
+/// does. Everything else in this file can be walked back; this is the one thing
+/// that cannot, which is why it is behind two deliberate steps rather than one.
+///
+/// **Local only, like trashing.** A post that is live on the blog stays live
+/// after this — the local copy is what goes. Deleting the published article is
+/// `unpublish_post` followed by the cloud's own delete, and doing it silently
+/// from here would mean a control labelled "delete from this machine" quietly
+/// editing the blog.
+#[tauri::command]
+pub async fn delete_post_permanently(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+) -> AppResult<()> {
+    let post = db::get::<PostModel>(conn.inner(), id)
+        .await?
+        .ok_or(AppError::PostNotFound(id))?;
+    purge(&app, conn.inner(), &post).await
+}
+
+/// Empty the trash, returning how many posts went.
+///
+/// One failure does not stop the rest: a body file that cannot be removed is
+/// worth logging, not worth leaving the other twelve posts in a trash the person
+/// has just asked to empty.
+#[tauri::command]
+pub async fn empty_trash(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+) -> AppResult<usize> {
+    let trashed = db::list_trashed_posts(conn.inner()).await?;
+    let mut removed = 0usize;
+    for (post, _) in trashed {
+        // Re-read per post rather than trusted from the listing. Emptying the
+        // trash walks it one post at a time while the trash view stays live and
+        // interactive, so somebody can pull a post back out partway through —
+        // and this loop, working from the snapshot it started with, would then
+        // permanently delete the post they had just rescued.
+        if db::trash_get(conn.inner(), post.id).await?.is_none() {
+            log::info!("Post {} was restored while the trash was emptying; keeping it", post.id);
+            continue;
+        }
+        match purge(&app, conn.inner(), &post).await {
+            Ok(()) => removed += 1,
+            Err(e) => log::error!("Could not permanently delete post {}: {e}", post.id),
+        }
+    }
+    Ok(removed)
+}
+
+/// Remove every local trace of a post. Shared by the single and bulk deletes.
+///
+/// The row goes last. Everything before it is a side table keyed by the post's
+/// id, and leaving one behind would attach a stranger's staging, sync record or
+/// draft history to whichever post is assigned that id next.
+async fn purge(
+    app: &tauri::AppHandle,
+    conn: &DatabaseConnection,
+    post: &PostModel,
+) -> AppResult<()> {
+    // The body is moved aside *before* the transaction and removed after it —
+    // the same staged-write idea `StagedBody` uses for saving, run backwards.
+    //
+    // Deleting the file first would mean a database error afterwards reporting
+    // the deletion as unsuccessful with the text already gone: for a local-only
+    // draft, content destroyed by an operation that said it had failed. But
+    // deleting it *after* the commit is no better, because the commit frees the
+    // slug: another window can create and save a post under the same name in
+    // that gap, and the cleanup would take its body instead.
+    //
+    // A rename settles both. Nothing is destroyed before the commit — a failure
+    // puts the file straight back — and the slug's file is already out of the
+    // way before the slug becomes available, so no replacement post's Markdown
+    // can be standing there when the removal happens.
+    // Asked before the file is touched at all. The transaction below checks the
+    // same thing and is what actually decides, but a deletion that has already
+    // lost the race to Restore should not be moving anybody's Markdown around
+    // in the meantime: while the archive is aside, the post is live with no
+    // body, and anything that opens it reads a cache miss.
+    if db::trash_get(conn, post.id).await?.is_none() {
+        return Err(AppError::PostNotInTrash(post.slug.clone()));
+    }
+
+    let staged = ArchivedBody::take(app, &post.slug).await?;
+
+    let removed = async {
+        let txn = conn.begin().await?;
+
+        // The precondition, checked inside the transaction that acts on it.
+        // Restore and Delete forever are two buttons on the same row, and the
+        // list reloads asynchronously between them: without this, confirming a
+        // deletion just after a restore would permanently delete the post that
+        // was rescued. A check outside the transaction would only narrow that
+        // window rather than close it.
+        if db::trash_get(&txn, post.id).await?.is_none() {
+            return Err(AppError::PostNotInTrash(post.slug.clone()));
+        }
+
+        db::stage_clear(&txn, post.id).await?;
+        db::sync_clear(&txn, post.id).await?;
+        db::revisions_clear(&txn, post.id).await?;
+        db::trash_clear(&txn, post.id).await?;
+        db::delete::<PostModel>(&txn, post.id).await?;
+        // The one thing this deletion leaves behind, and the reason it can be
+        // called permanent: the cloud's copy is untouched by design, so without
+        // a record that this slug was deleted here the next refresh would pull
+        // the post straight back in. See `post_tombstone`.
+        db::tombstone_set(&txn, &post.slug, now_ts()).await?;
+        txn.commit().await?;
+        Ok::<(), AppError>(())
+    }
+    .await;
+
+    match removed {
+        Ok(()) => {
+            staged.discard().await;
+            // No sweep afterwards: `db::require_post` refuses a side-table write
+            // for a post that no longer exists, so a save still finishing behind
+            // this deletion cannot recreate the rows in the first place. A sweep
+            // here would only have covered the moment it happened to run.
+            Ok(())
+        }
+        // Nothing was deleted, so the post keeps its text.
+        Err(e) => {
+            staged.restore().await;
+            Err(e)
+        }
+    }
+}
+
+/// A deleted post's Markdown, moved out of the way while its row is removed.
+///
+/// See [`purge`] for why neither ordering works without this: before the commit
+/// the content must still be recoverable, and after it the slug is free for
+/// somebody else's post to occupy.
+struct ArchivedBody {
+    /// Where the file went, and where it came from — `None` when the post had
+    /// no cached body at all, which is an ordinary state for a post pulled from
+    /// the cloud and never opened.
+    moved: Option<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+impl ArchivedBody {
+    /// Rename `posts/<slug>.md` aside. A missing file is not a failure.
+    async fn take(app: &tauri::AppHandle, slug: &str) -> AppResult<Self> {
+        if !media_keys::is_safe_slug(slug) {
+            return Ok(Self { moved: None });
+        }
+        let dir = posts_dir(app).await?;
+        let from = dir.join(format!("{slug}.md"));
+        let to = dir.join(format!(".purge-{}.md.tmp", uuid::Uuid::new_v4().simple()));
+        match tokio::fs::rename(&from, &to).await {
+            Ok(()) => Ok(Self { moved: Some((from, to)) }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self { moved: None }),
+            Err(e) => Err(AppError::io("Failed to set the post's body aside", e)),
+        }
+    }
+
+    /// Put it back, because the deletion did not happen after all.
+    ///
+    /// Only onto an empty space. A deletion that failed because the post was
+    /// restored leaves it live and editable, so an autosave or an MCP edit can
+    /// have written a newer body by the time this runs — and a plain rename
+    /// replaces files, which would lose that newer text under an older one that
+    /// was only ever set aside. Where something is already there, it is by
+    /// definition more recent than the copy this archived, and it wins.
+    ///
+    /// The check and the rename are not atomic, and cannot be: there is no
+    /// rename-if-absent. It narrows the window to the width of one syscall
+    /// pair, which is as far as the filesystem allows.
+    async fn restore(self) {
+        let Some((from, to)) = self.moved else { return };
+        if !tokio::fs::try_exists(&from).await.unwrap_or(false) {
+            if let Err(e) = tokio::fs::rename(&to, &from).await {
+                log::error!("Could not put {} back after a failed deletion: {e}", from.display());
+            }
+            return;
+        }
+
+        // Something is already there. It may be newer than what was archived —
+        // a save that landed while this was aside — or it may be *older*: the
+        // post was live with no cached body for a moment, so anything that
+        // opened it read a cache miss and may have refilled the file from R2,
+        // which for a post carrying unpublished edits is the previous version.
+        //
+        // The two are indistinguishable from here, and overwriting either way
+        // could destroy the better copy. So the archive is neither restored nor
+        // deleted: it is left under a name the app ignores, and said out loud.
+        let kept = to.with_file_name(format!(
+            ".recovered-{}-{}.md",
+            from.file_stem().and_then(|s| s.to_str()).unwrap_or("post"),
+            uuid::Uuid::new_v4().simple()
+        ));
+        match tokio::fs::rename(&to, &kept).await {
+            Ok(()) => log::error!(
+                "{} was rewritten while its deletion was failing; the copy from before is kept at {}",
+                from.display(),
+                kept.display()
+            ),
+            Err(e) => log::error!("Could not set aside the archived body {}: {e}", to.display()),
+        }
+    }
+
+    /// Throw it away, the deletion having gone through.
+    ///
+    /// Best effort: the post is already gone and cannot come back, so a failure
+    /// here is untidiness rather than something to report as the deletion having
+    /// failed.
+    async fn discard(self) {
+        if let Some((_, to)) = self.moved {
+            if let Err(e) = tokio::fs::remove_file(&to).await {
+                log::warn!("Could not remove {}: {e}", to.display());
+            }
+        }
+    }
 }
 
 /// Every post's sync state, keyed by post id — what the list needs to show
@@ -387,7 +695,7 @@ pub async fn list_sync_states(
             .map(|s| (s.post_id, s))
             .collect();
 
-    Ok(db::list::<PostModel>(conn.inner())
+    Ok(db::list_active_posts(conn.inner())
         .await?
         .into_iter()
         .map(|post| PostSyncState {
@@ -497,6 +805,10 @@ pub async fn restore_revision(
     let current = db::get::<PostModel>(conn.inner(), revision.post_id)
         .await?
         .ok_or(AppError::PostNotFound(revision.post_id))?;
+    // A post in the trash keeps its history precisely so that restoring it
+    // brings everything back — but the restoring happens after it comes out of
+    // the trash, not into it.
+    refuse_if_trashed(conn.inner(), &current).await?;
 
     // Where we are now, before it is replaced.
     revisions::snapshot(&app, conn.inner(), &current, post_revision::RESTORE).await?;
@@ -511,11 +823,23 @@ pub async fn restore_revision(
         None => None,
     };
 
+    // Re-checked inside the transaction that writes. The guard above ran before
+    // the snapshot and the staged body, and another window can throw the post
+    // away in that time — leaving Restore-from-trash handing back a version
+    // changed after the deletion rather than the one discarded.
+    let txn = conn.inner().begin().await?;
+    if db::trash_get(&txn, current.id).await?.is_some() {
+        if let Some((staged, _)) = staged {
+            staged.discard().await;
+        }
+        return Err(AppError::PostInTrash(current.slug));
+    }
     let restored = db::update::<PostModel>(
-        conn.inner(),
+        &txn,
         PostModel { updated_at: now_ts(), ..revisions::apply(current.clone(), &revision) },
     )
     .await?;
+    txn.commit().await?;
 
     let body = match staged {
         Some((staged, body)) => {

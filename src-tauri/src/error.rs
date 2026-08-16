@@ -143,8 +143,7 @@ pub enum AppError {
     /// credentials to fetch it with — so its body is unknown, which is a
     /// different fact from it being empty.
     #[error(
-        "The text of `{0}` is not on this machine and Cloudflare is not configured, \
-         so it cannot be read. Sign in and try again."
+        "The text of `{0}` is not on this machine and Cloudflare is not configured,          so it cannot be read. Sign in and try again."
     )]
     BodyUnavailable(String),
 
@@ -212,6 +211,14 @@ pub enum AppError {
 
     #[error("Post {0} no longer exists")]
     PostVanished(i32),
+
+    #[error("Post `{0}` is in the trash, so it cannot be published")]
+    PostInTrash(String),
+
+    /// Permanent deletion asked for a post that is not in the trash — most
+    /// likely restored between the click and the confirmation.
+    #[error("Post `{0}` is not in the trash, so it was not deleted")]
+    PostNotInTrash(String),
 
     #[error("Post `{0}` no longer exists in the cloud, so there is no cloud version to keep")]
     RemotePostGone(String),
