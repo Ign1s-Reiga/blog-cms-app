@@ -276,11 +276,16 @@ pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> AppResul
         return Ok(content);
     }
 
-    // 2. Not cached locally — download from R2 if we can reach it.
-    let (client, config) = match cf() {
-        Ok(cc) => cc,
-        Err(_) => return Ok(String::new()), // offline / no credentials
-    };
+    // 2. Not cached locally — download from R2.
+    //
+    // Without credentials there is nowhere to read it from, and that is not the
+    // same fact as "this post has no body". Reporting it as an empty document,
+    // which this used to do, is a lie the rest of the app then acts on: the
+    // editor shows an empty post, a save writes that emptiness into the local
+    // cache, later reads prefer the cache, and publishing puts it over the
+    // Markdown still sitting in R2. Saying "I cannot tell you" costs one error
+    // message and keeps the post intact.
+    let (client, config) = cf().map_err(|_| AppError::BodyUnavailable(slug.clone()))?;
     let key = media_keys::body_key(&slug);
     match cloudflare::download_from_r2(&client, &config, &key).await? {
         Some(content) => {
