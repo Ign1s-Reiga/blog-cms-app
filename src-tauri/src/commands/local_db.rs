@@ -525,12 +525,24 @@ async fn purge(
     txn.commit().await?;
 
     // `posts/<slug>.md`, which nothing else would ever clean up.
+    //
+    // Best effort throughout, including resolving the directory: the deletion
+    // has already happened by here and cannot be undone, so reporting a failure
+    // would tell the person the irreversible thing did not happen — and stop the
+    // UI reloading a list the post has genuinely left. A file that outlives its
+    // post is debris, and every path that creates a post writes its own body
+    // over whatever is there.
     if media_keys::is_safe_slug(&post.slug) {
-        let path = posts_dir(app).await?.join(format!("{}.md", post.slug));
-        if let Err(e) = tokio::fs::remove_file(&path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                log::warn!("Could not remove {}: {e}", path.display());
+        match posts_dir(app).await {
+            Ok(dir) => {
+                let path = dir.join(format!("{}.md", post.slug));
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        log::warn!("Could not remove {}: {e}", path.display());
+                    }
+                }
             }
+            Err(e) => log::warn!("Could not resolve the posts dir to clean up after {}: {e}", post.slug),
         }
     }
     Ok(())

@@ -468,8 +468,18 @@ async fn upsert_post_from_remote(
 
     // A post in the trash is not part of the library, so the cloud has nothing
     // to say about it. Applying the refresh anyway would rewrite the copy the
-    // person is holding on to in case they want it back.
-    if existing.as_ref().is_some_and(|local| trashed.contains(&local.id)) {
+    // person is holding on to in case they want it back — and restoring it
+    // would then hand back the cloud's version rather than the one they threw
+    // away.
+    //
+    // The captured set is consulted first because it answers for free; the row
+    // itself is read when it does not, since a refresh walks the whole library
+    // and a post can be trashed while it does.
+    let trashed_now = match existing.as_ref() {
+        Some(local) => trashed.contains(&local.id) || trash_get(db, local.id).await?.is_some(),
+        None => false,
+    };
+    if trashed_now {
         log::info!("Post `{}` is in the trash; leaving it out of the refresh", remote.slug);
         return Ok(());
     }
