@@ -12,15 +12,15 @@ type MediaItem = {
   size: number;
   src: string;
   isVideo: boolean;
-  /// The posts that would break if this object went, or `null` when the survey
-  /// could not answer for this object — it is not cached locally, so there are
-  /// no bytes to match posts against.
+  /// The posts that would break if this object went, and whether that list is
+  /// the whole answer.
   ///
   /// The distinction is the point. "Nothing uses this" invites a delete;
-  /// "nobody checked" must not be allowed to look like it. See
+  /// "nobody checked" must not be allowed to look like it — and neither must
+  /// "two posts use this, and possibly others nobody could check". See
   /// `src-tauri/src/media_usage.rs` for why a library object is matched to a
   /// post by content rather than by name.
-  usedBy: UsingPost[] | null;
+  usedBy: Usage;
 };
 
 /// Mirrors `UncheckedPost` in `src-tauri/src/media_usage.rs`: a post the survey
@@ -55,27 +55,31 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/// What an object's usage amounts to, given what the survey could and could not
-/// read.
+/// What an object's usage amounts to: who is known to use it, and whether
+/// anybody could have been missed.
 ///
-/// `posts` missing means the object itself could not be hashed. An empty list
-/// while some post's Markdown is unreadable means nothing checked it — which is
-/// the same amount of knowledge, and must not be dressed up as "unused". Known
-/// users are still reported as such: they are true whatever else was missed.
-function withUsage(posts: UsingPost[] | undefined, blind: boolean): UsingPost[] | null {
-  if (posts === undefined) return null;
-  if (posts.length === 0 && blind) return null;
-  return posts;
+/// Both halves are needed. Known users are true whatever else was missed, so
+/// they are always reported; but a count presented as exact when some post
+/// could not be read is a claim nobody checked.
+type Usage = { posts: UsingPost[]; complete: boolean };
+
+/// `posts` missing means the object itself could not be hashed — nothing was
+/// matched against it at all. `blind` means some post could not be accounted
+/// for in full, so any answer here is a floor rather than a total.
+function withUsage(posts: UsingPost[] | undefined, blind: boolean): Usage {
+  if (posts === undefined) return { posts: [], complete: false };
+  return { posts, complete: !blind };
 }
 
 /// How an item's usage reads on its tile. Published posts are called out on
-/// their own because those are the references readers are being served.
-function usageLabel(posts: UsingPost[] | null): string {
-  if (posts === null) return 'Usage unknown';
-  if (posts.length === 0) return 'Not used';
+/// their own because those are the references readers are being served, and an
+/// incomplete answer says so rather than rounding itself up to a fact.
+function usageLabel({ posts, complete }: Usage): string {
+  if (posts.length === 0) return complete ? 'Not used' : 'Usage unknown';
   const live = posts.filter((p) => p.published && !p.trashed).length;
   const where = `${posts.length} post${posts.length === 1 ? '' : 's'}`;
-  return live > 0 ? `${where} · ${live} live` : where;
+  const known = live > 0 ? `${where} · ${live} live` : where;
+  return complete ? known : `${known}+ · unverified`;
 }
 
 export default function MediaPage() {
@@ -180,7 +184,7 @@ export default function MediaPage() {
   /// anything else asks first — either naming the posts that depend on it, or
   /// admitting that it could not be checked.
   const requestDelete = (item: MediaItem) => {
-    if (item.usedBy !== null && item.usedBy.length === 0) {
+    if (item.usedBy.complete && item.usedBy.posts.length === 0) {
       void handleDelete(item, false);
       return;
     }
@@ -261,12 +265,16 @@ export default function MediaPage() {
                     <p className='text-[10px] text-zinc-400 dark:text-zinc-600'>
                       {formatSize(item.size)}
                       {' · '}
-                      {item.usedBy === null ? (
-                        <span title='This object is not cached on this machine, so its usage could not be checked'>
-                          {usageLabel(null)}
+                      {item.usedBy.posts.length === 0 ? (
+                        <span
+                          title={
+                            item.usedBy.complete
+                              ? undefined
+                              : 'Something could not be checked, so this cannot be called unused'
+                          }
+                        >
+                          {usageLabel(item.usedBy)}
                         </span>
-                      ) : item.usedBy.length === 0 ? (
-                        <span>Not used</span>
                       ) : (
                         <button
                           type='button'
@@ -308,12 +316,14 @@ export default function MediaPage() {
             <div className='flex max-h-[70vh] w-full max-w-[520px] flex-col rounded-[8px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616]'>
               <div className='border-b border-zinc-100 dark:border-white/[0.05] px-4 py-3'>
                 <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>
-                  Used by {(inspecting.usedBy ?? []).length} {(inspecting.usedBy ?? []).length === 1 ? 'post' : 'posts'}
+                  Used by {inspecting.usedBy.posts.length}
+                  {inspecting.usedBy.complete ? '' : ' or more'}{' '}
+                  {inspecting.usedBy.posts.length === 1 && inspecting.usedBy.complete ? 'post' : 'posts'}
                 </h2>
                 <p className='mt-0.5 font-mono text-[11px] text-zinc-400 dark:text-zinc-600'>{inspecting.name}</p>
               </div>
               <ul className='min-h-0 flex-1 overflow-y-auto p-2'>
-                {(inspecting.usedBy ?? []).map((post) => (
+                {inspecting.usedBy.posts.map((post) => (
                   <li key={post.id}>
                     {/* A trashed post is still a reference, and still worth
                         listing — but the editor refuses to open one, so
@@ -377,18 +387,22 @@ export default function MediaPage() {
             <div className='w-full max-w-[480px] rounded-[8px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616] p-4'>
               <h2 className='flex items-center gap-2 text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>
                 <FileWarning size={14} strokeWidth={2} className='text-amber-500' />
-                {confirming.usedBy === null
+                {confirming.usedBy.posts.length === 0
                   ? 'Nobody checked whether this is used'
-                  : `${confirming.usedBy.length} ${confirming.usedBy.length === 1 ? 'post uses' : 'posts use'} this image`}
+                  : `${confirming.usedBy.posts.length}${confirming.usedBy.complete ? '' : ' or more'} ${
+                      confirming.usedBy.posts.length === 1 && confirming.usedBy.complete ? 'post uses' : 'posts use'
+                    } this image`}
               </h2>
               <p className='mt-1.5 text-[12px] leading-[1.6] text-zinc-500 dark:text-zinc-500'>
-                {confirming.usedBy === null
-                  ? 'Either this object is not cached on this machine, or some post’s text is not — so there was nothing to match against. It may well be in use. Opening those posts once, or reloading this page, answers the question.'
-                  : 'Deleting it removes the object from R2. Any published post pointing at it will show a broken image to readers until it is replaced.'}
+                {confirming.usedBy.posts.length === 0
+                  ? 'Either this object is not cached on this machine, or some post could not be accounted for in full — so there was nothing conclusive to match against. It may well be in use. The banner above says what would settle it.'
+                  : confirming.usedBy.complete
+                    ? 'Deleting it removes the object from R2. Any published post pointing at it will show a broken image to readers until it is replaced.'
+                    : 'Deleting it removes the object from R2, and these are only the posts that could be checked — others may reference it too. Any published post pointing at it will show a broken image to readers until it is replaced.'}
               </p>
-              {confirming.usedBy !== null && (
+              {confirming.usedBy.posts.length > 0 && (
                 <ul className='mt-3 max-h-[180px] overflow-y-auto rounded-[6px] border border-zinc-200 dark:border-white/[0.07]'>
-                  {confirming.usedBy.map((post) => (
+                  {confirming.usedBy.posts.map((post) => (
                     <li
                       key={post.id}
                       className='flex items-baseline justify-between gap-3 border-b border-zinc-100 px-2.5 py-1.5 last:border-b-0 dark:border-white/[0.04]'
