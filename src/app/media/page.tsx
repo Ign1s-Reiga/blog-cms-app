@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { FileWarning, Trash2, Upload } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 
 type MediaItem = {
   key: string;
@@ -314,12 +315,29 @@ export default function MediaPage() {
               <ul className='min-h-0 flex-1 overflow-y-auto p-2'>
                 {(inspecting.usedBy ?? []).map((post) => (
                   <li key={post.id}>
+                    {/* A trashed post is still a reference, and still worth
+                        listing — but the editor refuses to open one, so
+                        offering it as a link would lead to an error message
+                        rather than to the post. It is shown, not offered. */}
                     <button
                       type='button'
+                      disabled={post.trashed}
+                      title={
+                        post.trashed
+                          ? 'This post is in the trash. Restore it from Posts → Trash to open it.'
+                          : undefined
+                      }
                       onClick={() => router.push(`/posts/edit?id=${post.id}`)}
-                      className='flex w-full items-baseline justify-between gap-3 rounded-[6px] px-2.5 py-2 text-left transition-colors hover:bg-zinc-50 active:scale-[0.99] dark:hover:bg-white/[0.03]'
+                      className='flex w-full items-baseline justify-between gap-3 rounded-[6px] px-2.5 py-2 text-left transition-colors enabled:hover:bg-zinc-50 enabled:active:scale-[0.99] disabled:cursor-default dark:enabled:hover:bg-white/[0.03]'
                     >
-                      <span className='truncate text-[12px] font-medium text-zinc-700 dark:text-zinc-300'>
+                      <span
+                        className={cn(
+                          'truncate text-[12px] font-medium',
+                          post.trashed
+                            ? 'text-zinc-400 line-through decoration-zinc-300 dark:text-zinc-600 dark:decoration-zinc-700'
+                            : 'text-zinc-700 dark:text-zinc-300',
+                        )}
+                      >
                         {post.title}
                       </span>
                       <span className='shrink-0 text-[10px] font-semibold uppercase tracking-[0.08em] text-zinc-400 dark:text-zinc-600'>
