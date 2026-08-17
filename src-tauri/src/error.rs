@@ -143,7 +143,8 @@ pub enum AppError {
     /// credentials to fetch it with — so its body is unknown, which is a
     /// different fact from it being empty.
     #[error(
-        "The text of `{0}` is not on this machine and Cloudflare is not configured,          so it cannot be read. Sign in and try again."
+        "The text of `{0}` is not on this machine and Cloudflare is not configured, so it \
+         cannot be read. Sign in and try again."
     )]
     BodyUnavailable(String),
 
@@ -179,6 +180,20 @@ pub enum AppError {
 
     #[error("Media object not found: {0}")]
     MediaNotFound(String),
+
+    /// A deletion refused because posts still point at the object — or because
+    /// some post's Markdown is not on this machine, so nothing can prove they
+    /// do not. The counts are in the message so a caller that ignores the
+    /// structure still says something useful.
+    #[error(
+        "{key} is used by {posts} post(s), and {unchecked_posts} post(s) could not be \
+         checked; deleting it may break them"
+    )]
+    MediaInUse {
+        key: String,
+        posts: usize,
+        unchecked_posts: usize,
+    },
 
     #[error("{context}: {source}")]
     Image {

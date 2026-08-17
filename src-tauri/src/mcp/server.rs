@@ -282,7 +282,7 @@ impl BlogMcp {
         let (stage, sync) = self.state_of(post.id).await;
         // Goes through the command so a post whose body only exists in R2 is
         // downloaded and cached, exactly as it would be for the editor.
-        let body = commands::read_post_markdown(self.app.clone(), post.slug.clone())
+        let body = commands::read_post_markdown(self.app.clone(), self.conn(), post.slug.clone())
             .await
             .map_err(internal)?;
         Ok(Json(to_out(post, stage, sync, Some(body))))
@@ -368,7 +368,7 @@ impl BlogMcp {
         // Nothing here has been written yet, so failing is simply a no-op.
         let body = match &params.body {
             Some(body) => body.clone(),
-            None => commands::read_post_markdown(self.app.clone(), slug.clone())
+            None => commands::read_post_markdown(self.app.clone(), self.conn(), slug.clone())
                 .await
                 .map_err(internal)?,
         };
@@ -389,6 +389,24 @@ impl BlogMcp {
         )
         .await;
 
+        // An agent replacing a body is the same operation the editor performs,
+        // so it takes the same lock — and takes it before the metadata below,
+        // because the three writes are one commit sequence: metadata, body,
+        // fingerprint. Acquiring it later would let this transaction commit
+        // while an editor save holds the lock, and the two sequences would
+        // interleave into a post carrying the editor's metadata, this body, and
+        // a fingerprint computed from neither — with the editor's save
+        // reporting success over a body that is gone.
+        //
+        // Ordered lock-then-database everywhere it is taken, so the paths that
+        // hold it cannot deadlock against each other. Nothing under it reaches
+        // the network. See `commands::lock_body_commits`.
+        let body_guard = if params.body.is_some() {
+            Some(commands::lock_body_commits().await)
+        } else {
+            None
+        };
+
         // Re-checked inside the transaction that writes. `load_post` refused a
         // trashed post several awaits ago — a body fetched from R2, a snapshot
         // taken — and an agent's edit is exactly the kind that arrives while
@@ -406,7 +424,21 @@ impl BlogMcp {
             tokio::fs::create_dir_all(&dir)
                 .await
                 .map_err(|e| internal(format!("Failed to create posts dir: {e}")))?;
-            tokio::fs::write(dir.join(format!("{slug}.md")), &body)
+            // Staged and renamed rather than written in place, so a concurrent
+            // read sees one whole body or the other and never half of one.
+            let staged = commands::StagedBody::write(&dir, &body)
+                .await
+                .map_err(|e| internal(format!("Failed to write local markdown: {e}")))?;
+            // Cleared before the rename, and allowed to fail the edit — see
+            // `post_body_stale`, and the same ordering in `commands::r2::save`.
+            // The other way round, a database outage after the rename leaves the
+            // agent's text on disk still described as clean and stale, and the
+            // next read fetches the published copy over it.
+            db::body_stale_clear(self.conn().inner(), &slug)
+                .await
+                .map_err(internal)?;
+            staged
+                .commit(&dir.join(format!("{slug}.md")))
                 .await
                 .map_err(|e| internal(format!("Failed to write local markdown: {e}")))?;
         }
@@ -422,6 +454,9 @@ impl BlogMcp {
         )
         .await
         .map_err(internal)?;
+
+        // The file and the fingerprint agree from here on.
+        drop(body_guard);
 
         // An unpublished post stays a draft. A published one keeps whatever
         // stage it had: it is still live with its old body, and the stage moves

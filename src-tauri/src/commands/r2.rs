@@ -17,6 +17,7 @@ use crate::entities::{post_revision, post_stage};
 use crate::error::{AppError, AppResult};
 use crate::imaging::{self, StagedImage};
 use crate::media_keys;
+use crate::media_usage;
 use crate::revisions;
 use crate::sync_state;
 use super::*;
@@ -263,8 +264,49 @@ async fn restore_metadata(
 ///
 /// Keyed by slug (not id) so it works for posts sourced from D1, whose ids don't
 /// match the local cache.
+/// Does the cached body for `slug` hold work this machine has not pushed?
+///
+/// The question every replacement of a cached body has to ask first, because a
+/// "no" is permission to write the cloud's copy over what is on disk.
+///
+/// Errors are returned rather than absorbed. This lookup is the only thing
+/// standing between a draft and the older published version of it, so a database
+/// that cannot answer must stop the read — treating "I do not know" as "nothing
+/// local" is the one reading that loses the author's work. A post the local
+/// database has never heard of is a genuine no: there is no draft to protect.
+/// What a cached body looked like at a moment in time — modification time and
+/// length — for comparing against itself later.
+///
+/// `None` for a file that is not there, which is a state worth telling apart:
+/// one appearing where there was nothing is exactly as much of a write as one
+/// being replaced.
+///
+/// Deliberately a property of the file rather than of the database. Every other
+/// signal that a body has been written — the sync fingerprint, the staleness
+/// mark — is bookkeeping recorded *after* the file moves, and each of those
+/// writes can fail on its own, leaving the text on disk newer than anything that
+/// describes it. The file is the thing being protected, so it is the thing to
+/// ask.
+async fn body_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+async fn has_local_edits(conn: &DatabaseConnection, slug: &str) -> AppResult<bool> {
+    let Some(post) = db::post_by_slug(conn, slug).await? else {
+        return Ok(false);
+    };
+    Ok(db::sync_get(conn, post.id)
+        .await?
+        .is_some_and(|row| sync_state::local_changed(&row)))
+}
+
 #[tauri::command]
-pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> AppResult<String> {
+pub async fn read_post_markdown(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    slug: String,
+) -> AppResult<String> {
     // The slug builds a local file path and an R2 key, so reject anything that
     // isn't a strict slug (guards against path traversal / injection).
     if !media_keys::is_safe_slug(&slug) {
@@ -278,10 +320,33 @@ pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> AppResul
         .join("posts");
     let local_path = dir.join(format!("{slug}.md"));
 
-    // 1. Local cache hit.
-    if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
-        return Ok(content);
-    }
+    // 1. Local cache hit — unless a refresh has marked it out of date. That
+    //    mark means the cloud's copy moved on while this file did not, so
+    //    serving it would hand back an older version of a post the app already
+    //    describes as current. See `post_body_stale`.
+    //
+    //    Except where this machine has unpushed edits: then the cached body is
+    //    the author's own newer text, and going to R2 for the published version
+    //    would put an older copy over it. Derived rather than cleared on every
+    //    write, so no failed bookkeeping can turn the mark into a way of losing
+    //    a draft.
+    //
+    //    The answer and the baseline for step 2 are taken together under the
+    //    lock. Apart, a save landing between them leaves `before` already
+    //    describing that save's own draft — and the check after the download,
+    //    finding the stamp exactly as it left it, would conclude nothing had
+    //    happened and write over the very text it was meant to protect.
+    let before = {
+        let _guard = lock_body_commits().await;
+        let stale = !has_local_edits(conn.inner(), &slug).await?
+            && db::body_is_stale(conn.inner(), &slug).await?;
+        if !stale {
+            if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
+                return Ok(content);
+            }
+        }
+        body_stamp(&local_path).await
+    };
 
     // 2. Not cached locally — download from R2.
     //
@@ -294,11 +359,45 @@ pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> AppResul
     // message and keeps the post intact.
     let (client, config) = cf().map_err(|_| AppError::BodyUnavailable(slug.clone()))?;
     let key = media_keys::body_key(&slug);
-    match cloudflare::download_from_r2(&client, &config, &key).await? {
+    let downloaded = cloudflare::download_from_r2(&client, &config, &key).await?;
+
+    // Whoever wrote this body while the download was in flight wins, and their
+    // text is the answer.
+    //
+    // Two questions, because either alone leaves a gap. The sync row catches a
+    // save that finished cleanly; the file's own stamp catches one whose
+    // bookkeeping did not — a fingerprint or a mark-clearing write that failed
+    // leaves text on disk newer than everything describing it, and only the file
+    // still says so.
+    //
+    // Asked for an empty result as much as a fetched one. R2 having no object is
+    // not evidence that this machine has none: a body created while the request
+    // was out would be answered with an empty string, the editor would take that
+    // as the post's loaded contents, and the next save would write nothing over
+    // a draft that was there all along.
+    let _guard = lock_body_commits().await;
+    if has_local_edits(conn.inner(), &slug).await? || body_stamp(&local_path).await != before {
+        return Ok(match tokio::fs::read_to_string(&local_path).await {
+            Ok(current) => current,
+            // Unreadable after all that: hand back what the cloud gave rather
+            // than nothing, and leave the file alone regardless.
+            Err(_) => downloaded.unwrap_or_default(),
+        });
+    }
+
+    match downloaded {
         Some(content) => {
-            // Cache locally for next time (best effort).
+            // Cache locally for next time (best effort). This *is* the cloud's
+            // current copy, so whatever was stale about the old one is settled.
+            //
+            // Staged like every other replacement, so a reader mid-swap sees one
+            // whole body or the other rather than a partial file.
             let _ = tokio::fs::create_dir_all(&dir).await;
-            let _ = tokio::fs::write(&local_path, &content).await;
+            if let Ok(staged) = StagedBody::write(&dir, &content).await {
+                if staged.commit(&local_path).await.is_ok() {
+                    let _ = db::body_stale_clear(conn.inner(), &slug).await;
+                }
+            }
             Ok(content)
         }
         None => Ok(String::new()),
@@ -436,6 +535,16 @@ async fn save(
     //    take the write leaves the post exactly as it was.
     let staged = StagedBody::write(&dir, &body).await?;
 
+    // From here to the end of step 4 this is the only writer of this body. A
+    // read that found the cached copy stale is at this moment holding an older
+    // version fetched from R2 and looking for somewhere to put it; without the
+    // lock it can land between the metadata below and the rename that belongs
+    // with it, and the post ends up with this save's database row and the
+    // cloud's text. See `lock_body_commits`.
+    //
+    // Taken after the staging write above, which touches nothing anybody reads.
+    let body_guard = lock_body_commits().await;
+
     // 2. Commit the metadata, with the staging row when the stage is already
     //    known. A post that stays live keeps the stage it has: saving edits
     //    locally does not demote it to a draft, and its publish stage moves only
@@ -460,11 +569,41 @@ async fn save(
         revisions::snapshot_or_log(&app, conn, &before.post, origin).await;
     }
 
+    // The cached body is about to become this machine's own writing, so whatever
+    // a refresh said about it being behind the cloud stops being true — see
+    // `post_body_stale`.
+    //
+    // Cleared *before* the rename, and allowed to fail the save. Ordered the
+    // other way, a database that goes down between the rename and here leaves
+    // new text on disk with the mark still standing and the fingerprint below
+    // never written: a later read then finds a post that reads as clean and
+    // stale, and fetches the older published copy over the draft. Nothing later
+    // can notice, because the stamp a read takes describes the draft it is about
+    // to destroy.
+    //
+    // This way round, the same outage stops the save before the file moves and
+    // the text is still in the editor. The cost is the opposite failure — a
+    // cleared mark with the rename then failing, which serves a stale body until
+    // the next write — and that one loses nothing.
+    let was_stale = db::body_is_stale(conn, &saved.slug).await?;
+    db::body_stale_clear(conn, &saved.slug).await?;
+
     // 4. Swap the new body in. Only a rename is left, so the window in which the
     //    database and the file disagree is as small as it can be — and if even
     //    that fails, the metadata goes back rather than outliving its body.
     if let Err(e) = staged.commit(&dir.join(format!("{}.md", saved.slug))).await {
         restore_metadata(conn, previous, &saved).await;
+        // The body it described never arrived, so the cloud's copy is the newer
+        // one again — but only for a post that was already behind it. Setting the
+        // mark on one that was not would send its next read to R2 for a body it
+        // already has. Best effort: the rename failure is what is worth
+        // reporting, and a mark that does not come back costs a stale read
+        // rather than any text.
+        if was_stale {
+            if let Err(mark) = db::body_stale_set(conn, &saved.slug, now).await {
+                log::warn!("Could not restore the staleness mark for `{}`: {mark}", saved.slug);
+            }
+        }
         return Err(e);
     }
 
@@ -473,9 +612,28 @@ async fn save(
     //    inferred.
     let hash = sync_state::content_hash(&saved, &body);
 
+    // Recorded before the lock goes, and for a publish as well as a draft.
+    //
+    // This row is what a waiting read consults to decide whether the body on
+    // disk may be replaced, so the moment between renaming the file and saying
+    // it is this machine's own is a moment when the post reads as untouched
+    // while holding text nobody else has. A read that was already queued on the
+    // lock would take that answer and rename its older R2 copy straight over
+    // this save. The mark cleared above does not cover it: the reader made its
+    // staleness decision before the download and only re-asks about local edits.
+    //
+    // For a publish it is momentarily true in its own right — the body is on
+    // disk and not yet in R2 — and step 6 corrects it to `synced` once the push
+    // lands. A push that never lands leaves it accurate.
+    db::sync_set_local(conn, saved.id, hash.clone()).await?;
+
+    // The file, the row and the fingerprint now agree. Released before the
+    // upload below, which is slow and has no business holding every other
+    // post's saves up.
+    drop(body_guard);
+
     // 6. Draft → local only. Publish → push the body to R2 and metadata to D1.
     if !published {
-        db::sync_set_local(conn, saved.id, hash).await?;
         return Ok(saved);
     }
 
@@ -552,6 +710,9 @@ async fn save(
         // refresh reads our own push as somebody else's change.
         db::sync_mark_synced(conn, saved.id, hash, Some(saved.updated_at), now).await?;
     } else {
+        // Already true — step 5 recorded it before the lock was released — and
+        // restated rather than left implied, so the failure path says what it
+        // leaves behind instead of depending on a caller further up.
         db::sync_set_local(conn, saved.id, hash).await?;
     }
 
@@ -688,10 +849,13 @@ pub async fn resolve_conflict(
             }
             let saved = db::update::<PostModel>(&txn, model).await?;
             txn.commit().await?;
-
             staged
                 .commit(&dir.join(format!("{}.md", saved.slug)))
                 .await?;
+
+            // This body came from R2 a moment ago, so it is the cloud's current
+            // copy by construction and any staleness is settled.
+            let _ = db::body_stale_clear(conn.inner(), &saved.slug).await;
 
             db::stage_set(
                 conn.inner(),
@@ -890,9 +1054,40 @@ pub async fn list_media(app: tauri::AppHandle) -> AppResult<Vec<MediaItem>> {
     Ok(items)
 }
 
-/// Delete a media object from R2 and its local cache.
+/// Which posts still reference each media object — see [`crate::media_usage`]
+/// for why the answer is derived from the posts rather than kept in a table.
 #[tauri::command]
-pub async fn delete_media(app: tauri::AppHandle, key: String) -> AppResult<()> {
+pub async fn media_usage(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+) -> AppResult<media_usage::UsageReport> {
+    media_usage::survey(&app, conn.inner()).await
+}
+
+/// Delete a media object from R2 and its local cache.
+///
+/// Refused while a post still references it, unless `force` says the warning has
+/// been read and answered. The check is here rather than only in the UI because
+/// this is the point of no return: the object is gone from R2 straight away, and
+/// every post pointing at it is left serving a hole to readers.
+#[tauri::command]
+pub async fn delete_media(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    key: String,
+    force: bool,
+) -> AppResult<()> {
+    if !force {
+        let check = media_usage::users_of(&app, conn.inner(), &key).await?;
+        if !check.is_safe() {
+            return Err(AppError::MediaInUse {
+                key,
+                posts: check.users.len(),
+                unchecked_posts: check.unchecked_posts.len(),
+            });
+        }
+    }
+
     let (client, config) = cf()?;
     cloudflare::delete_from_r2(&client, &config, &key).await?;
 
@@ -914,6 +1109,84 @@ pub async fn delete_media(app: tauri::AppHandle, key: String) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The question every replacement of a cached body turns on: may the
+    /// cloud's copy be written over what is on disk?
+    ///
+    /// A post nobody has touched says yes by saying there are no local edits; a
+    /// post with unpushed text says no. The published state is irrelevant to it
+    /// — what matters is whether this machine holds something the cloud has not
+    /// seen.
+    #[tokio::test]
+    async fn unpushed_text_is_reported_before_a_body_is_replaced() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let post = crate::db::create::<PostModel>(
+            &db,
+            PostModel {
+                id: 0,
+                slug: "a-post".into(),
+                title: "A post".into(),
+                excerpt: None,
+                tags: None,
+                published: true,
+                published_at: None,
+                series_id: None,
+                series_order: None,
+                created_at: 0,
+                updated_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Nothing recorded yet, so there is no draft to protect.
+        assert!(!has_local_edits(&db, "a-post").await.unwrap());
+
+        crate::db::sync_set_local(&db, post.id, "local".into()).await.unwrap();
+        assert!(has_local_edits(&db, "a-post").await.unwrap());
+
+        // Pushed: the cloud has this text now, and its copy is no longer older.
+        crate::db::sync_mark_synced(&db, post.id, "local".into(), Some(0), 0).await.unwrap();
+        assert!(!has_local_edits(&db, "a-post").await.unwrap());
+
+        // A slug the local database has never heard of is a genuine no rather
+        // than an error: there is nothing here that could be lost.
+        assert!(!has_local_edits(&db, "never-existed").await.unwrap());
+    }
+
+    /// The check that does not depend on any bookkeeping having succeeded: a
+    /// body that was written while a download was in flight has to be
+    /// recognisable from the file alone.
+    ///
+    /// Both transitions count as a write. One appearing where there was nothing
+    /// is a post that gained a body during the round trip, which is every bit as
+    /// much somebody else's work as one that was replaced.
+    #[tokio::test]
+    async fn a_body_written_during_a_download_is_visible_in_its_stamp() {
+        let dir = std::env::temp_dir()
+            .join(format!("blog-cms-stamp-{}", uuid::Uuid::new_v4().simple()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("a-post.md");
+
+        // Nothing there yet.
+        let absent = body_stamp(&path).await;
+        assert!(absent.is_none());
+
+        tokio::fs::write(&path, "the draft").await.unwrap();
+        let written = body_stamp(&path).await;
+        assert!(written.is_some());
+        assert_ne!(written, absent, "a body appearing is a write");
+
+        // Replaced with text of a different length.
+        tokio::fs::write(&path, "the draft, edited").await.unwrap();
+        assert_ne!(body_stamp(&path).await, written, "a body replaced is a write");
+
+        // Untouched between two looks.
+        let settled = body_stamp(&path).await;
+        assert_eq!(body_stamp(&path).await, settled);
+
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
 
     #[test]
     fn only_plain_file_names_are_safe() {

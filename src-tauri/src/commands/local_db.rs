@@ -559,6 +559,12 @@ async fn purge(
         db::sync_clear(&txn, post.id).await?;
         db::revisions_clear(&txn, post.id).await?;
         db::trash_clear(&txn, post.id).await?;
+        // Keyed by slug rather than id, and a slug outlives the post: nothing
+        // stops a later post being given the same title. Left behind, the mark
+        // would tell that post's first read to ignore its own cached body and
+        // fetch the deleted post's from R2, which is still there — the cloud's
+        // copy is untouched by design.
+        db::body_stale_clear(&txn, &post.slug).await?;
         db::delete::<PostModel>(&txn, post.id).await?;
         // The one thing this deletion leaves behind, and the reason it can be
         // called permanent: the cloud's copy is untouched by design, so without
@@ -823,6 +829,17 @@ pub async fn restore_revision(
         None => None,
     };
 
+    // A restore replaces a live body, so it takes the same lock a save does and
+    // holds it across the row and the rename together. Otherwise a read that
+    // found the cached copy stale can put the cloud's version on disk between
+    // the two, and the post is left describing the revision it was rolled back
+    // to while holding the published text. See `lock_body_commits`.
+    //
+    // Held to the end of the function: nothing below it reaches the network, and
+    // the fingerprint it finishes with is the very thing a reader consults to
+    // decide whether this body is safe to replace.
+    let _body_guard = lock_body_commits().await;
+
     // Re-checked inside the transaction that writes. The guard above ran before
     // the snapshot and the staged body, and another window can throw the post
     // away in that time — leaving Restore-from-trash handing back a version
@@ -843,7 +860,17 @@ pub async fn restore_revision(
 
     let body = match staged {
         Some((staged, body)) => {
+            // Cleared before the rename, and allowed to fail the restore. The
+            // other order leaves a database outage between the two with new text
+            // on disk, the mark still standing and no fingerprint — which a later
+            // read resolves by fetching the published copy over it. See the same
+            // ordering in `commands::r2::save`.
+            let was_stale = db::body_is_stale(conn.inner(), &restored.slug).await?;
+            db::body_stale_clear(conn.inner(), &restored.slug).await?;
             if let Err(e) = staged.commit(&dir.join(format!("{}.md", restored.slug))).await {
+                if was_stale {
+                    let _ = db::body_stale_set(conn.inner(), &restored.slug, now_ts()).await;
+                }
                 // The row is already back at the old version and its body is
                 // not, so the row has to go forward again rather than sit there
                 // describing text that was never written. Best effort: the

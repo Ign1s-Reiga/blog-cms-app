@@ -117,6 +117,16 @@ pub enum PatternKind {
     Media,
 }
 
+/// The content hash a body image is addressed by, as it appears in a key.
+///
+/// Public because it is the *identity* of a media object, not merely part of a
+/// key: `media_usage` matches a library object against the copies of it that
+/// travelled into posts, and the bytes are all they still have in common — the
+/// staging step gives the copy a fresh name.
+pub fn content_digest(bytes: &[u8]) -> String {
+    hex_digest(bytes)
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(digest.len() * 2);

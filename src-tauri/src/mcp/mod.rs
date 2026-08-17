@@ -408,7 +408,12 @@ pub async fn mcp_approve_publish(
             return Err(AppError::PostInTrash(post.slug));
         }
 
-        let body = commands::read_post_markdown(app.clone(), post.slug.clone()).await?;
+        let body = commands::read_post_markdown(
+            app.clone(),
+            app.state::<DatabaseConnection>(),
+            post.slug.clone(),
+        )
+        .await?;
         let tags = post
             .tags
             .as_deref()

@@ -71,7 +71,7 @@ async fn post_for_cloud(
 /// Shared because restoring a revision replaces a body for the same reasons a
 /// save does, and a rollback that could leave a half-written file would defeat
 /// the point of having a history at all.
-struct StagedBody {
+pub(crate) struct StagedBody {
     temp: std::path::PathBuf,
 }
 
@@ -83,7 +83,7 @@ impl StagedBody {
     /// The name is dotted and uuid-suffixed so a crash between here and the
     /// rename leaves something recognisable as debris rather than something the
     /// editor might list as a post.
-    async fn write(dir: &std::path::Path, body: &str) -> AppResult<Self> {
+    pub(crate) async fn write(dir: &std::path::Path, body: &str) -> AppResult<Self> {
         let temp = dir.join(format!(".save-{}.md.tmp", uuid::Uuid::new_v4().simple()));
         tokio::fs::write(&temp, body)
             .await
@@ -93,7 +93,7 @@ impl StagedBody {
 
     /// Move the staged body onto `dest`, replacing whatever is there. The
     /// temporary file is cleaned up either way.
-    async fn commit(self, dest: &std::path::Path) -> AppResult<()> {
+    pub(crate) async fn commit(self, dest: &std::path::Path) -> AppResult<()> {
         match tokio::fs::rename(&self.temp, dest).await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -110,6 +110,37 @@ impl StagedBody {
             log::warn!("Could not remove staged body {}: {e}", self.temp.display());
         }
     }
+}
+
+/// Serialises the moment a post's cached Markdown is replaced.
+///
+/// A body lives in two stores that cannot share a transaction, and `StagedBody`
+/// makes each *swap* atomic without making the pair of them consistent. Every
+/// writer here follows the same sequence — decide from the database, then move a
+/// file into place — and two of those interleaved can leave the file from one
+/// with the database of the other.
+///
+/// The costly case is a read of a post the cloud has moved on from. It decides
+/// the cached copy cannot be trusted, then spends a network round trip fetching
+/// the published version — and a save landing inside that round trip is a draft
+/// the reader is about to write over with an older copy, having decided before
+/// the draft existed. Re-asking the question is not enough on its own: the
+/// answer has to still be true when the rename happens, which is what holding
+/// this across both steps buys.
+///
+/// One lock for all posts rather than one per slug. These are local file moves
+/// measured in milliseconds, an author edits one post at a time, and nothing
+/// here is held across network I/O — every holder releases before it uploads.
+/// A map of per-slug locks would be more code for contention that does not
+/// exist.
+static BODY_COMMITS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Take the body-commit lock. See [`BODY_COMMITS`].
+///
+/// Hold it from the database write through the rename that matches it, and drop
+/// it before anything slow. Never acquired twice on one path.
+pub(crate) async fn lock_body_commits() -> tokio::sync::MutexGuard<'static, ()> {
+    BODY_COMMITS.lock().await
 }
 
 /// The directory holding every post's cached Markdown, created if it is not

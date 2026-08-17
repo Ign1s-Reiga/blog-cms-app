@@ -232,6 +232,24 @@ pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> AppRe
     let (client, config) = cf()?;
     let remote = cloudflare::d1_list::<PostModel>(&client, &config).await?;
     let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
-    let (upserted, _deleted) = db::mirror_posts(conn.inner(), remote, &remote_series).await?;
-    Ok(upserted)
+    let mirrored = db::mirror_posts(conn.inner(), remote, &remote_series).await?;
+
+    // A post whose cloud copy moved on has a cached body from before that move,
+    // and a refresh does not fetch bodies — so the file on disk is an older
+    // version of a post the metadata now describes as current.
+    //
+    // No file is deleted here. `mirror_posts` writes a `post_body_stale` row in
+    // the same transaction as the metadata, and that row *is* the invalidation:
+    // every reader of a cached body consults it. Deleting the file as well would
+    // buy nothing and could take a body a save is writing at that moment — the
+    // one file a refresh has no business touching. The cached copy is replaced
+    // the next time the post is read, which fetches the cloud's current body and
+    // settles the mark.
+
+    log::info!(
+        "Refreshed {} post(s) from the cloud, removing {} that are no longer there",
+        mirrored.upserted,
+        mirrored.deleted
+    );
+    Ok(mirrored.upserted)
 }
