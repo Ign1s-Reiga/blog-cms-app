@@ -119,16 +119,29 @@ fn asset_names(body: &str) -> Vec<&str> {
     names
 }
 
-/// Every sha256 that appears in a published image URL in this body.
+/// Which of the library's digests appear in this body's published image URLs.
 ///
 /// Read out of the key rather than reconstructed, because the key's *layout* is
 /// configurable (`media_key_pattern`) and may have changed since the post was
-/// published — while the hash in it is the one thing that cannot have. Any
-/// 64-character run of hex is taken as one: nothing else in a Markdown body
-/// looks like that, and a false positive can only match a library object whose
-/// bytes really do hash to it.
-fn published_digests(body: &str) -> Vec<String> {
-    let mut found: Vec<String> = Vec::new();
+/// published — while the hash in it is the one thing that cannot have.
+///
+/// ## Why every window, and why matched rather than collected
+///
+/// A pattern is free to put `{hash}` against something else hexadecimal —
+/// `posts/{slug}/a{hash}.{ext}`, or any slug ending in `beef` — so the digest
+/// can be a *substring* of a longer run rather than the whole of it. Reading
+/// only exact-length runs misses those and reports the image as unused, which
+/// is the answer that invites a delete.
+///
+/// Every 64-character window therefore gets looked at — but looked *up*, in the
+/// library, rather than collected as a candidate. A body is not necessarily
+/// something a human typed: an MCP client can write one, and a code block
+/// holding a long hex blob would otherwise produce a candidate per character
+/// and a growing list to compare each against, turning one pasted test vector
+/// into a stalled media page. Against a set, the whole scan is linear in the
+/// body and allocates only for the handful of windows that actually match.
+fn published_digests(body: &str, library: &HashSet<&str>) -> HashSet<String> {
+    let mut found = HashSet::new();
     let mut run = String::new();
 
     // A trailing flush after the loop would repeat this block; pushing a
@@ -138,26 +151,21 @@ fn published_digests(body: &str) -> Vec<String> {
             run.push(ch.to_ascii_lowercase());
             continue;
         }
-        // Every 64-character window of the run, not the run itself. The key
-        // layout is configurable, and a pattern is free to put `{hash}` next to
-        // something else hexadecimal — `posts/{slug}/a{hash}.{ext}`, or a slug
-        // ending in `beef` — which makes the digest a *substring* of a longer
-        // run rather than the whole of it. An exact-length check misses those
-        // and reports the image as unused, which is the answer that invites a
-        // delete.
-        //
-        // Widening this cannot produce a false positive that matters: a window
-        // only counts if some library object's bytes actually hash to it.
-        for window in run.as_bytes().windows(64) {
-            let candidate = String::from_utf8_lossy(window).into_owned();
-            if !found.contains(&candidate) {
-                found.push(candidate);
+        if run.len() >= DIGEST_LEN {
+            for start in 0..=run.len() - DIGEST_LEN {
+                let window = &run[start..start + DIGEST_LEN];
+                if library.contains(window) {
+                    found.insert(window.to_string());
+                }
             }
         }
         run.clear();
     }
     found
 }
+
+/// Characters in a hex-encoded sha256 — the length of every digest in a key.
+const DIGEST_LEN: usize = 64;
 
 /// Hash every cached media object, giving the digest each library key stands
 /// for.
@@ -193,6 +201,7 @@ async fn library_digests(media_dir: &Path) -> HashMap<String, String> {
 async fn digests_used_by(
     app: &tauri::AppHandle,
     post: &PostModel,
+    library: &HashSet<&str>,
 ) -> AppResult<Option<HashSet<String>>> {
     let Some(body) = crate::revisions::cached_body(app, &post.slug).await else {
         return Ok(None);
@@ -204,7 +213,7 @@ async fn digests_used_by(
         .map_err(AppError::AppDataDir)?
         .join("assets");
 
-    let mut digests: HashSet<String> = published_digests(&body).into_iter().collect();
+    let mut digests = published_digests(&body, library);
     for name in asset_names(&body) {
         // The same guard the publish path uses: these names reach the
         // filesystem, and a body is not necessarily something a human typed.
@@ -247,6 +256,8 @@ pub async fn survey(
     // Trashed posts count, and are marked. They still hold the reference, and a
     // restore that brought back a post with a hole in it would be a poor trade
     // for a delete made on the strength of "nothing uses this".
+    let known: HashSet<&str> = library.values().map(String::as_str).collect();
+
     let trashed = db::trashed_ids(conn).await?;
     let posts = db::list::<PostModel>(conn).await?;
 
@@ -260,7 +271,7 @@ pub async fn survey(
             trashed: trashed.contains(&post.id),
             published: post.published,
         };
-        match digests_used_by(app, &post).await? {
+        match digests_used_by(app, &post, &known).await? {
             Some(digests) => {
                 for digest in digests {
                     by_digest.entry(digest).or_default().push(using.clone());
@@ -335,6 +346,11 @@ pub async fn users_of(
 mod tests {
     use super::*;
 
+    /// A library holding exactly these digests, to look bodies up against.
+    fn library<'a>(digests: &[&'a str]) -> HashSet<&'a str> {
+        digests.iter().copied().collect()
+    }
+
     /// The published half: a body carries absolute URLs, and the hash in them is
     /// the image's identity however the key is laid out around it.
     #[test]
@@ -343,7 +359,10 @@ mod tests {
         let body = format!(
             "Text\n\n![pic](https://cdn.example.com/posts/my-post/{digest}.avif)\n\nMore text.\n"
         );
-        assert_eq!(published_digests(&body), vec![digest]);
+        assert_eq!(
+            published_digests(&body, &library(&[&digest])),
+            HashSet::from([digest])
+        );
     }
 
     /// A different layout is still readable — which is the point of taking the
@@ -351,11 +370,15 @@ mod tests {
     #[test]
     fn the_key_layout_around_the_hash_does_not_matter() {
         let digest = "b".repeat(64);
+        let known = library(&[&digest]);
         for url in [
             format!("https://cdn.example.com/img/{digest}.png"),
             format!("https://cdn.example.com/2026/{digest}/full.webp"),
         ] {
-            assert_eq!(published_digests(&url), vec![digest.clone()]);
+            assert_eq!(
+                published_digests(&url, &known),
+                HashSet::from([digest.clone()])
+            );
         }
     }
 
@@ -363,32 +386,44 @@ mod tests {
     /// must not be mistaken for one.
     #[test]
     fn nothing_else_reads_as_a_digest() {
-        assert!(published_digests("a normal post about deadbeef and cafe").is_empty());
-        assert!(published_digests(&"c".repeat(63)).is_empty());
-        // Two in one body, both found.
         let (x, y) = ("e".repeat(64), "f".repeat(64));
-        assert_eq!(published_digests(&format!("{x} and {y}")), vec![x, y]);
+        let known = library(&[&x, &y]);
+        assert!(published_digests("a normal post about deadbeef and cafe", &known).is_empty());
+        assert!(published_digests(&"c".repeat(63), &known).is_empty());
+        // Two in one body, both found.
+        assert_eq!(
+            published_digests(&format!("{x} and {y}"), &known),
+            HashSet::from([x, y])
+        );
     }
 
-    /// A run longer than a digest *contains* digests, and which of its windows
-    /// is the real one cannot be known from here.
-    ///
-    /// The key layout is configurable, so a pattern may place `{hash}` against
-    /// something else hexadecimal — `posts/{slug}/a{hash}.{ext}`, or any slug
-    /// ending in `beef`. Reading only exact-length runs missed the digest in
-    /// those layouts and reported the image as unused, which is the one answer
-    /// that invites a delete.
+    /// A digest can sit *inside* a longer hex run, because the key layout is
+    /// configurable: a pattern may place `{hash}` against something else
+    /// hexadecimal — `posts/{slug}/a{hash}.{ext}`, or any slug ending in `beef`.
+    /// Reading only exact-length runs missed the digest in those layouts and
+    /// reported the image as unused, which is the one answer that invites a
+    /// delete.
     #[test]
     fn a_hash_is_found_even_when_something_hexadecimal_abuts_it() {
         let digest = "a".repeat(64);
-        let found = published_digests(&format!("https://cdn.example.com/posts/beef/{digest}.avif"));
+        let known = library(&[&digest]);
+        let found = published_digests(
+            &format!("https://cdn.example.com/posts/beef/{digest}.avif"),
+            &known,
+        );
         assert!(found.contains(&digest), "the digest was missed next to a hex slug");
+    }
 
-        // Every *distinct* window of an over-long run is offered; only one can
-        // match a real object's bytes, so the extra candidates cost nothing.
-        // A run of one repeated character has just the one window to offer.
-        assert_eq!(published_digests(&format!("{}b", "d".repeat(64))).len(), 2);
-        assert_eq!(published_digests(&"d".repeat(65)).len(), 1);
+    /// Every window is *looked up* rather than kept, so a body full of hex — a
+    /// pasted test vector, an encoded blob from an MCP client — costs a scan
+    /// and nothing else. Nothing in it belongs to the library, so nothing is
+    /// reported and nothing is allocated.
+    #[test]
+    fn a_long_hex_run_matches_nothing_and_keeps_nothing() {
+        let digest = "a".repeat(64);
+        let known = library(&[&digest]);
+        let blob = "0123456789abcdef".repeat(4_000); // 64k of hex
+        assert!(published_digests(&blob, &known).is_empty());
     }
 
     /// The unpublished half: a staged image is referenced by name, and the name
