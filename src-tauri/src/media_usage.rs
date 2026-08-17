@@ -138,8 +138,21 @@ fn published_digests(body: &str) -> Vec<String> {
             run.push(ch.to_ascii_lowercase());
             continue;
         }
-        if run.len() == 64 && !found.contains(&run) {
-            found.push(run.clone());
+        // Every 64-character window of the run, not the run itself. The key
+        // layout is configurable, and a pattern is free to put `{hash}` next to
+        // something else hexadecimal — `posts/{slug}/a{hash}.{ext}`, or a slug
+        // ending in `beef` — which makes the digest a *substring* of a longer
+        // run rather than the whole of it. An exact-length check misses those
+        // and reports the image as unused, which is the answer that invites a
+        // delete.
+        //
+        // Widening this cannot produce a false positive that matters: a window
+        // only counts if some library object's bytes actually hash to it.
+        for window in run.as_bytes().windows(64) {
+            let candidate = String::from_utf8_lossy(window).into_owned();
+            if !found.contains(&candidate) {
+                found.push(candidate);
+            }
         }
         run.clear();
     }
@@ -281,12 +294,20 @@ pub async fn survey(
 pub struct DeletionCheck {
     pub users: Vec<UsingPost>,
     pub unread_posts: Vec<UnreadPost>,
+    /// The object itself could not be hashed, so nothing was matched against
+    /// it. Distinct from an empty `users`, which is a real answer.
+    pub unknown: bool,
 }
 
 impl DeletionCheck {
     /// Can this object be deleted without asking anybody?
+    ///
+    /// Only when the question was actually answered: no post references it, no
+    /// post's body was unreadable, and the object itself could be hashed.
+    /// Anything else is "nobody checked", which must not be allowed to look
+    /// like "nothing uses it".
     pub fn is_safe(&self) -> bool {
-        self.users.is_empty() && self.unread_posts.is_empty()
+        !self.unknown && self.users.is_empty() && self.unread_posts.is_empty()
     }
 }
 
@@ -297,13 +318,15 @@ pub async fn users_of(
     key: &str,
 ) -> AppResult<DeletionCheck> {
     let report = survey(app, conn).await?;
+    let found = report.objects.into_iter().find(|u| u.key == key);
     Ok(DeletionCheck {
-        users: report
-            .objects
-            .into_iter()
-            .find(|u| u.key == key)
-            .map(|u| u.posts)
-            .unwrap_or_default(),
+        // An object the survey has no row for is one it could not hash — not
+        // cached locally, so there were no bytes to match posts against.
+        // Defaulting that to "no users" would make the backend's own guard say
+        // an unchecked object is safe to delete, which is exactly the guarantee
+        // it exists to provide.
+        unknown: found.is_none(),
+        users: found.map(|u| u.posts).unwrap_or_default(),
         unread_posts: report.unread_posts,
     })
 }
@@ -342,11 +365,30 @@ mod tests {
     fn nothing_else_reads_as_a_digest() {
         assert!(published_digests("a normal post about deadbeef and cafe").is_empty());
         assert!(published_digests(&"c".repeat(63)).is_empty());
-        // Longer than a digest is not a digest either — it is something else.
-        assert!(published_digests(&"d".repeat(65)).is_empty());
         // Two in one body, both found.
         let (x, y) = ("e".repeat(64), "f".repeat(64));
         assert_eq!(published_digests(&format!("{x} and {y}")), vec![x, y]);
+    }
+
+    /// A run longer than a digest *contains* digests, and which of its windows
+    /// is the real one cannot be known from here.
+    ///
+    /// The key layout is configurable, so a pattern may place `{hash}` against
+    /// something else hexadecimal — `posts/{slug}/a{hash}.{ext}`, or any slug
+    /// ending in `beef`. Reading only exact-length runs missed the digest in
+    /// those layouts and reported the image as unused, which is the one answer
+    /// that invites a delete.
+    #[test]
+    fn a_hash_is_found_even_when_something_hexadecimal_abuts_it() {
+        let digest = "a".repeat(64);
+        let found = published_digests(&format!("https://cdn.example.com/posts/beef/{digest}.avif"));
+        assert!(found.contains(&digest), "the digest was missed next to a hex slug");
+
+        // Every *distinct* window of an over-long run is offered; only one can
+        // match a real object's bytes, so the extra candidates cost nothing.
+        // A run of one repeated character has just the one window to offer.
+        assert_eq!(published_digests(&format!("{}b", "d".repeat(64))).len(), 2);
+        assert_eq!(published_digests(&"d".repeat(65)).len(), 1);
     }
 
     /// The unpublished half: a staged image is referenced by name, and the name

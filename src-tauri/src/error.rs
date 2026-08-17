@@ -143,7 +143,8 @@ pub enum AppError {
     /// credentials to fetch it with — so its body is unknown, which is a
     /// different fact from it being empty.
     #[error(
-        "The text of `{0}` is not on this machine and Cloudflare is not configured, \n         so it cannot be read. Sign in and try again."
+        "The text of `{0}` is not on this machine and Cloudflare is not configured, so it \
+         cannot be read. Sign in and try again."
     )]
     BodyUnavailable(String),
 
