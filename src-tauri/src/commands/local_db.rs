@@ -853,6 +853,11 @@ pub async fn restore_revision(
                 }
                 return Err(e);
             }
+            // The cached body is this machine's own writing now, so whatever a refresh
+            // said about it being behind the cloud no longer applies. Leaving the mark
+            // would send the next read to R2 for the older published copy and put it
+            // over this text — see `post_body_stale`.
+            let _ = db::body_stale_clear(conn.inner(), &restored.slug).await;
             body
         }
         // Nothing replaced the file, so what is on disk is what the fingerprint

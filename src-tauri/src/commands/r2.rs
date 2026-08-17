@@ -482,6 +482,12 @@ async fn save(
         return Err(e);
     }
 
+    // The cached body is this machine's own writing now, so whatever a refresh
+    // said about it being behind the cloud no longer applies. Leaving the mark
+    // would send the next read to R2 for the older published copy and put it
+    // over this text — see `post_body_stale`.
+    let _ = db::body_stale_clear(conn, &saved.slug).await;
+
     // 5. Fingerprint what is now on this machine, so the difference between
     //    "published" and "published, and then edited" is recorded rather than
     //    inferred.
@@ -705,6 +711,10 @@ pub async fn resolve_conflict(
             staged
                 .commit(&dir.join(format!("{}.md", saved.slug)))
                 .await?;
+
+            // This body came from R2 a moment ago, so it is the cloud's current
+            // copy by construction and any staleness is settled.
+            let _ = db::body_stale_clear(conn.inner(), &saved.slug).await;
 
             db::stage_set(
                 conn.inner(),

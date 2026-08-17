@@ -409,6 +409,11 @@ impl BlogMcp {
             tokio::fs::write(dir.join(format!("{slug}.md")), &body)
                 .await
                 .map_err(|e| internal(format!("Failed to write local markdown: {e}")))?;
+            // The cached body is this machine's own writing now — see
+            // `post_body_stale`. Leaving a refresh's staleness mark in place
+            // would send the next read to R2 for the older published copy and
+            // put it over what the agent just wrote.
+            let _ = db::body_stale_clear(self.conn().inner(), &slug).await;
         }
 
         // This is the edit the issue is about: a published post stays published
