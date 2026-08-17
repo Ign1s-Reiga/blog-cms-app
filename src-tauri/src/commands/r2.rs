@@ -344,7 +344,11 @@ pub async fn read_post_markdown(
             // point belongs to whoever wrote it last.
             let _guard = lock_body_commits().await;
             if has_local_edits(conn.inner(), &slug).await? {
-                return Ok(content);
+                // The draft won the race, so it is also the answer. Handing back
+                // the download instead would show the caller the older published
+                // text — and the editor's next autosave would write that back
+                // over the draft, losing it a second time by a different route.
+                return Ok(tokio::fs::read_to_string(&local_path).await.unwrap_or(content));
             }
 
             // Staged like every other replacement, so a reader mid-swap sees one
@@ -540,20 +544,33 @@ async fn save(
     // over this text — see `post_body_stale`.
     let _ = db::body_stale_clear(conn, &saved.slug).await;
 
-    // The file and the row agree again, and the mark that would send a reader
-    // to R2 is gone — so a read arriving now serves this text instead of
-    // fetching over it. Released before the upload below, which is slow and has
-    // no business holding every other post's saves up.
-    drop(body_guard);
-
     // 5. Fingerprint what is now on this machine, so the difference between
     //    "published" and "published, and then edited" is recorded rather than
     //    inferred.
     let hash = sync_state::content_hash(&saved, &body);
 
+    // Recorded before the lock goes, and for a publish as well as a draft.
+    //
+    // This row is what a waiting read consults to decide whether the body on
+    // disk may be replaced, so the moment between renaming the file and saying
+    // it is this machine's own is a moment when the post reads as untouched
+    // while holding text nobody else has. A read that was already queued on the
+    // lock would take that answer and rename its older R2 copy straight over
+    // this save. The mark cleared above does not cover it: the reader made its
+    // staleness decision before the download and only re-asks about local edits.
+    //
+    // For a publish it is momentarily true in its own right — the body is on
+    // disk and not yet in R2 — and step 6 corrects it to `synced` once the push
+    // lands. A push that never lands leaves it accurate.
+    db::sync_set_local(conn, saved.id, hash.clone()).await?;
+
+    // The file, the row and the fingerprint now agree. Released before the
+    // upload below, which is slow and has no business holding every other
+    // post's saves up.
+    drop(body_guard);
+
     // 6. Draft → local only. Publish → push the body to R2 and metadata to D1.
     if !published {
-        db::sync_set_local(conn, saved.id, hash).await?;
         return Ok(saved);
     }
 
@@ -630,6 +647,9 @@ async fn save(
         // refresh reads our own push as somebody else's change.
         db::sync_mark_synced(conn, saved.id, hash, Some(saved.updated_at), now).await?;
     } else {
+        // Already true — step 5 recorded it before the lock was released — and
+        // restated rather than left implied, so the failure path says what it
+        // leaves behind instead of depending on a caller further up.
         db::sync_set_local(conn, saved.id, hash).await?;
     }
 

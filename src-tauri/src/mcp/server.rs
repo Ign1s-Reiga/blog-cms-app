@@ -401,12 +401,31 @@ impl BlogMcp {
         let saved = db::update::<PostModel>(&txn, post).await.map_err(internal)?;
         txn.commit().await.map_err(internal)?;
 
+        // An agent replacing a body is the same operation the editor performs,
+        // so it takes the same lock and holds it through the fingerprint below.
+        // Between renaming the file and recording that this machine wrote it,
+        // the post reads as untouched while holding text nobody else has — and
+        // a stale-body read already queued on this lock would take that answer
+        // and rename its older R2 copy straight over the agent's edit. Nothing
+        // in here reaches the network. See `commands::lock_body_commits`.
+        let body_guard = if params.body.is_some() {
+            Some(commands::lock_body_commits().await)
+        } else {
+            None
+        };
+
         if params.body.is_some() {
             let dir = self.posts_dir()?;
             tokio::fs::create_dir_all(&dir)
                 .await
                 .map_err(|e| internal(format!("Failed to create posts dir: {e}")))?;
-            tokio::fs::write(dir.join(format!("{slug}.md")), &body)
+            // Staged and renamed rather than written in place, so a concurrent
+            // read sees one whole body or the other and never half of one.
+            let staged = commands::StagedBody::write(&dir, &body)
+                .await
+                .map_err(|e| internal(format!("Failed to write local markdown: {e}")))?;
+            staged
+                .commit(&dir.join(format!("{slug}.md")))
                 .await
                 .map_err(|e| internal(format!("Failed to write local markdown: {e}")))?;
             // The cached body is this machine's own writing now — see
@@ -427,6 +446,9 @@ impl BlogMcp {
         )
         .await
         .map_err(internal)?;
+
+        // The file and the fingerprint agree from here on.
+        drop(body_guard);
 
         // An unpublished post stays a draft. A published one keeps whatever
         // stage it had: it is still live with its old body, and the stage moves

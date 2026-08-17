@@ -71,7 +71,7 @@ async fn post_for_cloud(
 /// Shared because restoring a revision replaces a body for the same reasons a
 /// save does, and a rollback that could leave a half-written file would defeat
 /// the point of having a history at all.
-struct StagedBody {
+pub(crate) struct StagedBody {
     temp: std::path::PathBuf,
 }
 
@@ -83,7 +83,7 @@ impl StagedBody {
     /// The name is dotted and uuid-suffixed so a crash between here and the
     /// rename leaves something recognisable as debris rather than something the
     /// editor might list as a post.
-    async fn write(dir: &std::path::Path, body: &str) -> AppResult<Self> {
+    pub(crate) async fn write(dir: &std::path::Path, body: &str) -> AppResult<Self> {
         let temp = dir.join(format!(".save-{}.md.tmp", uuid::Uuid::new_v4().simple()));
         tokio::fs::write(&temp, body)
             .await
@@ -93,7 +93,7 @@ impl StagedBody {
 
     /// Move the staged body onto `dest`, replacing whatever is there. The
     /// temporary file is cleaned up either way.
-    async fn commit(self, dest: &std::path::Path) -> AppResult<()> {
+    pub(crate) async fn commit(self, dest: &std::path::Path) -> AppResult<()> {
         match tokio::fs::rename(&self.temp, dest).await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -139,7 +139,7 @@ static BODY_COMMITS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 ///
 /// Hold it from the database write through the rename that matches it, and drop
 /// it before anything slow. Never acquired twice on one path.
-async fn lock_body_commits() -> tokio::sync::MutexGuard<'static, ()> {
+pub(crate) async fn lock_body_commits() -> tokio::sync::MutexGuard<'static, ()> {
     BODY_COMMITS.lock().await
 }
 
