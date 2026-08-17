@@ -264,6 +264,25 @@ async fn restore_metadata(
 ///
 /// Keyed by slug (not id) so it works for posts sourced from D1, whose ids don't
 /// match the local cache.
+/// Does the cached body for `slug` hold work this machine has not pushed?
+///
+/// The question every replacement of a cached body has to ask first, because a
+/// "no" is permission to write the cloud's copy over what is on disk.
+///
+/// Errors are returned rather than absorbed. This lookup is the only thing
+/// standing between a draft and the older published version of it, so a database
+/// that cannot answer must stop the read — treating "I do not know" as "nothing
+/// local" is the one reading that loses the author's work. A post the local
+/// database has never heard of is a genuine no: there is no draft to protect.
+async fn has_local_edits(conn: &DatabaseConnection, slug: &str) -> AppResult<bool> {
+    let Some(post) = db::post_by_slug(conn, slug).await? else {
+        return Ok(false);
+    };
+    Ok(db::sync_get(conn, post.id)
+        .await?
+        .is_some_and(|row| sync_state::local_changed(&row)))
+}
+
 #[tauri::command]
 pub async fn read_post_markdown(
     app: tauri::AppHandle,
@@ -293,17 +312,8 @@ pub async fn read_post_markdown(
     //    would put an older copy over it. Derived rather than cleared on every
     //    write, so no failed bookkeeping can turn the mark into a way of losing
     //    a draft.
-    let stale = match db::post_by_slug(conn.inner(), &slug).await {
-        Ok(Some(post)) => {
-            let has_local_edits = db::sync_get(conn.inner(), post.id)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|row| sync_state::local_changed(&row));
-            !has_local_edits && db::body_is_stale(conn.inner(), &slug).await.unwrap_or(false)
-        }
-        _ => false,
-    };
+    let stale = !has_local_edits(conn.inner(), &slug).await?
+        && db::body_is_stale(conn.inner(), &slug).await?;
     if !stale {
         if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
             return Ok(content);
@@ -325,9 +335,25 @@ pub async fn read_post_markdown(
         Some(content) => {
             // Cache locally for next time (best effort). This *is* the cloud's
             // current copy, so whatever was stale about the old one is settled.
+            //
+            // Under the body lock, and asked again inside it. The download above
+            // is a network round trip, and a save can land in the middle of one:
+            // the decision that sent this read to R2 was made before that draft
+            // existed, and acting on it now would write the published version
+            // over text the author has since typed. Whatever is on disk at this
+            // point belongs to whoever wrote it last.
+            let _guard = lock_body_commits().await;
+            if has_local_edits(conn.inner(), &slug).await? {
+                return Ok(content);
+            }
+
+            // Staged like every other replacement, so a reader mid-swap sees one
+            // whole body or the other rather than a partial file.
             let _ = tokio::fs::create_dir_all(&dir).await;
-            if tokio::fs::write(&local_path, &content).await.is_ok() {
-                let _ = db::body_stale_clear(conn.inner(), &slug).await;
+            if let Ok(staged) = StagedBody::write(&dir, &content).await {
+                if staged.commit(&local_path).await.is_ok() {
+                    let _ = db::body_stale_clear(conn.inner(), &slug).await;
+                }
             }
             Ok(content)
         }
@@ -466,6 +492,16 @@ async fn save(
     //    take the write leaves the post exactly as it was.
     let staged = StagedBody::write(&dir, &body).await?;
 
+    // From here to the end of step 4 this is the only writer of this body. A
+    // read that found the cached copy stale is at this moment holding an older
+    // version fetched from R2 and looking for somewhere to put it; without the
+    // lock it can land between the metadata below and the rename that belongs
+    // with it, and the post ends up with this save's database row and the
+    // cloud's text. See `lock_body_commits`.
+    //
+    // Taken after the staging write above, which touches nothing anybody reads.
+    let body_guard = lock_body_commits().await;
+
     // 2. Commit the metadata, with the staging row when the stage is already
     //    known. A post that stays live keeps the stage it has: saving edits
     //    locally does not demote it to a draft, and its publish stage moves only
@@ -503,6 +539,12 @@ async fn save(
     // would send the next read to R2 for the older published copy and put it
     // over this text — see `post_body_stale`.
     let _ = db::body_stale_clear(conn, &saved.slug).await;
+
+    // The file and the row agree again, and the mark that would send a reader
+    // to R2 is gone — so a read arriving now serves this text instead of
+    // fetching over it. Released before the upload below, which is slow and has
+    // no business holding every other post's saves up.
+    drop(body_guard);
 
     // 5. Fingerprint what is now on this machine, so the difference between
     //    "published" and "published, and then edited" is recorded rather than
@@ -984,6 +1026,50 @@ pub async fn delete_media(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The question every replacement of a cached body turns on: may the
+    /// cloud's copy be written over what is on disk?
+    ///
+    /// A post nobody has touched says yes by saying there are no local edits; a
+    /// post with unpushed text says no. The published state is irrelevant to it
+    /// — what matters is whether this machine holds something the cloud has not
+    /// seen.
+    #[tokio::test]
+    async fn unpushed_text_is_reported_before_a_body_is_replaced() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let post = crate::db::create::<PostModel>(
+            &db,
+            PostModel {
+                id: 0,
+                slug: "a-post".into(),
+                title: "A post".into(),
+                excerpt: None,
+                tags: None,
+                published: true,
+                published_at: None,
+                series_id: None,
+                series_order: None,
+                created_at: 0,
+                updated_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Nothing recorded yet, so there is no draft to protect.
+        assert!(!has_local_edits(&db, "a-post").await.unwrap());
+
+        crate::db::sync_set_local(&db, post.id, "local".into()).await.unwrap();
+        assert!(has_local_edits(&db, "a-post").await.unwrap());
+
+        // Pushed: the cloud has this text now, and its copy is no longer older.
+        crate::db::sync_mark_synced(&db, post.id, "local".into(), Some(0), 0).await.unwrap();
+        assert!(!has_local_edits(&db, "a-post").await.unwrap());
+
+        // A slug the local database has never heard of is a genuine no rather
+        // than an error: there is nothing here that could be lost.
+        assert!(!has_local_edits(&db, "never-existed").await.unwrap());
+    }
 
     #[test]
     fn only_plain_file_names_are_safe() {

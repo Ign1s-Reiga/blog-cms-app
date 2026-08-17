@@ -112,6 +112,37 @@ impl StagedBody {
     }
 }
 
+/// Serialises the moment a post's cached Markdown is replaced.
+///
+/// A body lives in two stores that cannot share a transaction, and `StagedBody`
+/// makes each *swap* atomic without making the pair of them consistent. Every
+/// writer here follows the same sequence — decide from the database, then move a
+/// file into place — and two of those interleaved can leave the file from one
+/// with the database of the other.
+///
+/// The costly case is a read of a post the cloud has moved on from. It decides
+/// the cached copy cannot be trusted, then spends a network round trip fetching
+/// the published version — and a save landing inside that round trip is a draft
+/// the reader is about to write over with an older copy, having decided before
+/// the draft existed. Re-asking the question is not enough on its own: the
+/// answer has to still be true when the rename happens, which is what holding
+/// this across both steps buys.
+///
+/// One lock for all posts rather than one per slug. These are local file moves
+/// measured in milliseconds, an author edits one post at a time, and nothing
+/// here is held across network I/O — every holder releases before it uploads.
+/// A map of per-slug locks would be more code for contention that does not
+/// exist.
+static BODY_COMMITS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Take the body-commit lock. See [`BODY_COMMITS`].
+///
+/// Hold it from the database write through the rename that matches it, and drop
+/// it before anything slow. Never acquired twice on one path.
+async fn lock_body_commits() -> tokio::sync::MutexGuard<'static, ()> {
+    BODY_COMMITS.lock().await
+}
+
 /// The directory holding every post's cached Markdown, created if it is not
 /// there yet.
 async fn posts_dir(app: &tauri::AppHandle) -> AppResult<std::path::PathBuf> {

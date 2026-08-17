@@ -829,6 +829,17 @@ pub async fn restore_revision(
         None => None,
     };
 
+    // A restore replaces a live body, so it takes the same lock a save does and
+    // holds it across the row and the rename together. Otherwise a read that
+    // found the cached copy stale can put the cloud's version on disk between
+    // the two, and the post is left describing the revision it was rolled back
+    // to while holding the published text. See `lock_body_commits`.
+    //
+    // Held to the end of the function: nothing below it reaches the network, and
+    // the fingerprint it finishes with is the very thing a reader consults to
+    // decide whether this body is safe to replace.
+    let _body_guard = lock_body_commits().await;
+
     // Re-checked inside the transaction that writes. The guard above ran before
     // the snapshot and the staged body, and another window can throw the post
     // away in that time — leaving Restore-from-trash handing back a version
