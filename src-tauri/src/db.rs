@@ -329,6 +329,12 @@ impl SeriesMap {
     }
 }
 
+/// What a mirror did.
+pub struct Mirrored {
+    pub upserted: usize,
+    pub deleted: usize,
+}
+
 /// Mirror the local posts table onto the cloud's set of posts, keyed by `slug`.
 ///
 /// The cloud is authoritative: every remote post is upserted into the local
@@ -344,25 +350,6 @@ impl SeriesMap {
 /// something the person has thrown away, and the second would empty their trash
 /// on their behalf — destroying the only recoverable copy — as a side effect of
 /// pressing Refresh. It rejoins the library, and the sync, when it is restored.
-/// What a mirror did, and what it leaves for the caller to finish.
-pub struct Mirrored {
-    pub upserted: usize,
-    pub deleted: usize,
-    /// Slugs whose cached Markdown is no longer known to match the cloud's.
-    ///
-    /// A refresh writes metadata and never touches `<slug>.md` — the body lives
-    /// in R2 and is fetched per post — so when the cloud's copy has moved since
-    /// this machine last agreed with it, the cached body is simply an older
-    /// version. Nothing downstream can tell: the editor prefers the cache and
-    /// would open the stale text, and the media survey would read it as the
-    /// post's current references.
-    ///
-    /// The mirror cannot delete the file itself — `db` has no business touching
-    /// the filesystem — so it names them and `sync_posts_from_cloud` clears
-    /// them.
-    pub stale_bodies: Vec<String>,
-}
-
 pub async fn mirror_posts(
     db: &DatabaseConnection,
     remote: Vec<post::Model>,
@@ -392,12 +379,9 @@ pub async fn mirror_posts(
     // between the two, and the losses on the other side of that window are the
     // permanent kind: a trashed post overwritten or deleted outright, a
     // "Delete forever" undone by the pull that follows it.
-    let mut stale_bodies = Vec::new();
     for post in remote {
         let txn = db.begin().await?;
-        if upsert_post_from_remote(&txn, post.clone(), &series).await? {
-            stale_bodies.push(post.slug);
-        }
+        upsert_post_from_remote(&txn, post, &series).await?;
         txn.commit().await?;
     }
 
@@ -451,7 +435,7 @@ pub async fn mirror_posts(
         deleted += 1;
     }
 
-    Ok(Mirrored { upserted, deleted, stale_bodies })
+    Ok(Mirrored { upserted, deleted })
 }
 
 /// What series a refreshed post should belong to locally, as `(id, order)`.
@@ -528,7 +512,7 @@ async fn upsert_post_from_remote(
     db: &(impl ConnectionTrait + TransactionTrait<Transaction = sea_orm::DatabaseTransaction>),
     remote: post::Model,
     series: &SeriesMap,
-) -> AppResult<bool> {
+) -> AppResult<()> {
     let existing = post_by_slug(db, &remote.slug).await?;
 
     // A post in the trash is not part of the library, so the cloud has nothing
@@ -544,7 +528,7 @@ async fn upsert_post_from_remote(
         Some(local) => {
             if trash_get(db, local.id).await?.is_some() {
                 log::info!("Post `{}` is in the trash; leaving it out of the refresh", remote.slug);
-                return Ok(false);
+                return Ok(());
             }
         }
         // No local row and a tombstone means this post was deleted here for
@@ -554,7 +538,7 @@ async fn upsert_post_from_remote(
         None => {
             if tombstoned_slugs(db).await?.contains(&remote.slug) {
                 log::info!("Post `{}` was deleted here for good; not pulling it back", remote.slug);
-                return Ok(false);
+                return Ok(());
             }
         }
     }
@@ -583,7 +567,7 @@ async fn upsert_post_from_remote(
                 "Post `{}` has unpushed local edits; leaving the refresh to the person",
                 remote.slug
             );
-            return Ok(false);
+            return Ok(());
         }
     }
 
@@ -641,14 +625,14 @@ async fn upsert_post_from_remote(
     // for the first time has no cached body to be stale.
     //
     // Recorded here, in the transaction that advances the metadata, rather than
-    // left to the caller's file deletion: that deletion can fail, and by then
-    // the baseline has moved and no later refresh would notice again. The row
-    // outlives the attempt — see `post_body_stale`.
-    let stale = previous_updated_at.is_some_and(|had| had != remote_updated_at);
-    if stale {
+    // by deleting the cached file: a deletion can fail, and by then the baseline
+    // has moved and no later refresh would notice again. The row commits with
+    // the metadata that made it true, and every reader of a cached body consults
+    // it — see `post_body_stale`.
+    if previous_updated_at.is_some_and(|had| had != remote_updated_at) {
         body_stale_set(db, &saved.slug, chrono::Utc::now().timestamp()).await?;
     }
-    Ok(stale)
+    Ok(())
 }
 
 /// Refuse to write a side-table row for a post that no longer exists.
@@ -1748,13 +1732,16 @@ mod tests {
         // Somebody else published a new version.
         let mut remote = post_row("a-post", None, None);
         remote.updated_at = 700;
-        let mirrored = mirror_posts(&db, vec![remote.clone()], &[]).await.unwrap();
-        assert_eq!(mirrored.stale_bodies, ["a-post"]);
+        mirror_posts(&db, vec![remote.clone()], &[]).await.unwrap();
+        let marked: Vec<String> =
+            stale_bodies(&db).await.unwrap().into_iter().map(|r| r.slug).collect();
+        assert_eq!(marked, ["a-post"]);
 
-        // Refreshing again against the same version changes nothing, so there
-        // is nothing to clear and no reason to make the next read wait on R2.
-        let mirrored = mirror_posts(&db, vec![remote], &[]).await.unwrap();
-        assert!(mirrored.stale_bodies.is_empty());
+        // Refreshing again against the same version changes nothing, and the
+        // mark is idempotent rather than piling up.
+        body_stale_clear(&db, "a-post").await.unwrap();
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
+        assert!(stale_bodies(&db).await.unwrap().is_empty());
     }
 
     /// A post arriving for the first time has no cached body to be stale, and a
@@ -1763,15 +1750,18 @@ mod tests {
     #[tokio::test]
     async fn nothing_is_cleared_for_a_new_post_or_a_locally_edited_one() {
         let db = connect_in_memory().await.unwrap();
-        let mirrored = mirror_posts(&db, vec![post_row("fresh", None, None)], &[]).await.unwrap();
-        assert!(mirrored.stale_bodies.is_empty(), "a first arrival has no cached body");
+        mirror_posts(&db, vec![post_row("fresh", None, None)], &[]).await.unwrap();
+        assert!(stale_bodies(&db).await.unwrap().is_empty(), "a first arrival has no cached body");
 
         let edited = create::<post::Model>(&db, post_row("mine", None, None)).await.unwrap();
         sync_set_local(&db, edited.id, "my-edit".into()).await.unwrap();
         let mut remote = post_row("mine", None, None);
         remote.updated_at = 900;
-        let mirrored = mirror_posts(&db, vec![remote], &[]).await.unwrap();
-        assert!(mirrored.stale_bodies.is_empty(), "an author's own body was called stale");
+        mirror_posts(&db, vec![remote], &[]).await.unwrap();
+        assert!(
+            stale_bodies(&db).await.unwrap().is_empty(),
+            "an author's own body was called stale"
+        );
     }
 
     /// "Delete forever" has to survive the next Refresh. The cloud's copy is

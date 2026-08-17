@@ -13,7 +13,6 @@ use crate::entities::post::Model as PostModel;
 use crate::entities::post_stage;
 use crate::entities::series::Model as SeriesModel;
 use crate::error::{AppError, AppResult};
-use crate::media_keys;
 use super::*;
 
 // ── Posts: Cloudflare D1 ────────────────────────────────────────────────────────
@@ -229,50 +228,28 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize>
 /// The cloud's series table comes down alongside the posts, because a post's
 /// remote `series_id` cannot be read without it.
 #[tauri::command]
-pub async fn sync_posts_from_cloud(
-    app: tauri::AppHandle,
-    conn: State<'_, DatabaseConnection>,
-) -> AppResult<usize> {
+pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> AppResult<usize> {
     let (client, config) = cf()?;
     let remote = cloudflare::d1_list::<PostModel>(&client, &config).await?;
     let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
     let mirrored = db::mirror_posts(conn.inner(), remote, &remote_series).await?;
 
     // A post whose cloud copy moved on has a cached body from before that move,
-    // and the refresh does not fetch bodies — so the file on disk is an older
-    // version of a post the metadata now describes as current. Dropping it
-    // makes the next read fetch the real thing.
+    // and a refresh does not fetch bodies — so the file on disk is an older
+    // version of a post the metadata now describes as current.
     //
-    // Only for posts with nothing pending locally: `mirror_posts` reports these,
-    // and a post with unpushed edits is left out of the refresh entirely, so its
-    // cached body is the author's own work and must not be thrown away.
-    //
-    // The *fact* is already durable — `mirror_posts` recorded it in the same
-    // transaction as the metadata — so this deletion is genuinely best effort:
-    // one that fails leaves the row in place, and everything that reads a body
-    // keeps treating this post as unresolved until a fresh copy replaces it.
-    for slug in &mirrored.stale_bodies {
-        if !media_keys::is_safe_slug(slug) {
-            continue;
-        }
-        match posts_dir(&app).await {
-            Ok(dir) => {
-                let path = dir.join(format!("{slug}.md"));
-                match tokio::fs::remove_file(&path).await {
-                    Ok(()) => {
-                        let _ = db::body_stale_clear(conn.inner(), slug).await;
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        let _ = db::body_stale_clear(conn.inner(), slug).await;
-                    }
-                    Err(e) => {
-                        log::warn!("Could not clear the stale body {}: {e}", path.display())
-                    }
-                }
-            }
-            Err(e) => log::warn!("Could not resolve the posts dir to clear stale bodies: {e}"),
-        }
-    }
+    // No file is deleted here. `mirror_posts` writes a `post_body_stale` row in
+    // the same transaction as the metadata, and that row *is* the invalidation:
+    // every reader of a cached body consults it. Deleting the file as well would
+    // buy nothing and could take a body a save is writing at that moment — the
+    // one file a refresh has no business touching. The cached copy is replaced
+    // the next time the post is read, which fetches the cloud's current body and
+    // settles the mark.
 
+    log::info!(
+        "Refreshed {} post(s) from the cloud, removing {} that are no longer there",
+        mirrored.upserted,
+        mirrored.deleted
+    );
     Ok(mirrored.upserted)
 }

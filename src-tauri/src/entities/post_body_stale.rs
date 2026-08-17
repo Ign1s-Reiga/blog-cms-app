@@ -20,9 +20,10 @@ use serde::{Deserialize, Serialize};
 /// The old Markdown would then sit there indefinitely, with everything treating
 /// it as current and no mechanism left to notice.
 ///
-/// The row is written in the same transaction as the metadata, so the fact
-/// survives whatever happens to the file. It is cleared when the body is
-/// actually gone — or when a fresh copy is fetched to replace it.
+/// So nothing is deleted. The row is written in the same transaction as the
+/// metadata, so the fact survives whatever happens to the file, and every reader
+/// of a cached body consults it. It is cleared when a fresh copy is fetched to
+/// replace the old one, which is the moment the two agree again.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "post_body_stale")]
 pub struct Model {

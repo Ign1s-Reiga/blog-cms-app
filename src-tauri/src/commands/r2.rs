@@ -287,7 +287,23 @@ pub async fn read_post_markdown(
     //    mark means the cloud's copy moved on while this file did not, so
     //    serving it would hand back an older version of a post the app already
     //    describes as current. See `post_body_stale`.
-    let stale = db::body_is_stale(conn.inner(), &slug).await.unwrap_or(false);
+    //
+    //    Except where this machine has unpushed edits: then the cached body is
+    //    the author's own newer text, and going to R2 for the published version
+    //    would put an older copy over it. Derived rather than cleared on every
+    //    write, so no failed bookkeeping can turn the mark into a way of losing
+    //    a draft.
+    let stale = match db::post_by_slug(conn.inner(), &slug).await {
+        Ok(Some(post)) => {
+            let has_local_edits = db::sync_get(conn.inner(), post.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|row| sync_state::local_changed(&row));
+            !has_local_edits && db::body_is_stale(conn.inner(), &slug).await.unwrap_or(false)
+        }
+        _ => false,
+    };
     if !stale {
         if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
             return Ok(content);
