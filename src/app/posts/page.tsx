@@ -15,7 +15,7 @@ import { onPostsRefreshed } from '@/lib/sync';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type FilterId = 'all' | 'published' | 'edited' | 'conflict' | 'draft' | 'failed' | 'trash';
+type FilterId = 'all' | 'published' | 'edited' | 'conflict' | 'draft' | 'scheduled' | 'failed' | 'trash';
 
 type ImportStatus =
   | { kind: 'idle' }
@@ -26,9 +26,14 @@ type ImportStatus =
 // Row shape the table renders.
 type Post = {
   id: number;
+  /// Carried because a schedule is keyed by slug — ids do not survive the
+  /// crossing into D1, where the Worker reads them.
+  slug: string;
   title: string;
   tags: string[];
   status: 'published' | 'draft';
+  /// A pending publication, if this post has one.
+  schedule?: Schedule;
   /// How the local copy compares with what readers are served. Kept separate
   /// from `status` on purpose: publication and synchronisation are two facts,
   /// and a published post can be carrying edits nobody has seen.
@@ -45,10 +50,22 @@ type BackendSyncState = { post_id: number; state: SyncState };
 // Subset of the `list_posts` command payload we actually use.
 type BackendPost = {
   id: number;
+  slug: string;
   title: string;
   tags: string | null; // JSON-encoded string[]
   published: boolean;
   created_at: number; // Unix seconds
+};
+
+/// Mirrors `ScheduleView` in `src-tauri/src/commands/r2.rs`. The state is
+/// derived in Rust — including `overdue`, which nothing stores — so the desktop
+/// and anything else reading these rows agree on what one means.
+type Schedule = {
+  slug: string;
+  publish_at: number;
+  state: 'scheduled' | 'overdue' | 'published' | 'failed' | 'cancelled' | 'unknown';
+  error: string | null;
+  updated_at: number;
 };
 
 /// A post in the trash: the same row, plus when it was thrown away and whether
@@ -59,6 +76,18 @@ type TrashedPost = Post & { trashedAt: string; live: boolean };
 /// Permanent deletion is the one thing in this app that cannot be walked back,
 /// so it does not happen on a single click.
 type PendingDelete = { kind: 'one'; id: number; title: string } | { kind: 'all'; count: number };
+
+/// When a scheduled publication happens, in the reader's own timezone.
+///
+/// The author picked a wall-clock time in the editor and the backend stores it
+/// as an instant, so showing it back in UTC would name an hour nobody chose —
+/// and it sat next to a tooltip that was already local, so the row disagreed
+/// with itself.
+function formatScheduleTime(unixSeconds: number): string {
+  const at = new Date(unixSeconds * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
 
 function toPost(p: BackendPost): Post {
   let tags: string[] = [];
@@ -72,6 +101,7 @@ function toPost(p: BackendPost): Post {
   }
   return {
     id: p.id,
+    slug: p.slug,
     title: p.title,
     tags,
     status: p.published ? 'published' : 'draft',
@@ -91,6 +121,14 @@ function displayStatus(post: Post): PostStatus {
   if (post.sync === 'conflict') return 'conflict';
   if (post.sync === 'remote_ahead') return 'behind';
   if (post.status === 'published' && post.sync === 'modified') return 'edited';
+  // A publication that was due and has not happened needs somebody to look at
+  // Cloudflare, so it outranks the ordinary "waiting" reading — and a schedule
+  // that failed is reported with the same urgency as a failed push.
+  if (post.schedule?.state === 'overdue') return 'overdue';
+  if (post.schedule?.state === 'failed') return 'failed';
+  // Between "draft" and "scheduled", the second says everything the first does
+  // and adds when it stops being true.
+  if (post.status === 'draft' && post.schedule?.state === 'scheduled') return 'scheduled';
   return post.status;
 }
 
@@ -105,7 +143,7 @@ export default function PostsPage() {
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  /// A trash action that was refused or failed.
+  /// A trash or schedule action that was refused or failed.
   ///
   /// Kept apart from `loadError`, which is only ever rendered in the table's
   /// empty state — a refusal shown there would be invisible on any list with a
@@ -133,7 +171,23 @@ export default function PostsPage() {
       } catch {
         // ignore sync-state query errors
       }
-      setPosts(rows.map((p) => ({ ...toPost(p), sync: sync.get(p.id) ?? 'clean' })));
+      // Pending publications, keyed by slug — best effort, like the sync states:
+      // without them every post simply reads as it did before scheduling
+      // existed, which is a good deal better than an empty list.
+      let schedules = new Map<string, Schedule>();
+      try {
+        const pending = await invoke<Schedule[]>('list_schedules');
+        schedules = new Map(pending.map((s) => [s.slug, s]));
+      } catch {
+        // ignore schedule query errors
+      }
+      setPosts(
+        rows.map((p) => ({
+          ...toPost(p),
+          sync: sync.get(p.id) ?? 'clean',
+          schedule: schedules.get(p.slug),
+        })),
+      );
       // The trash is a separate listing, not a filter over the first one: a
       // trashed post is excluded from `list_posts` by the backend, which is what
       // keeps it out of every other screen too.
@@ -210,8 +264,17 @@ export default function PostsPage() {
         return false;
       case 'all':
         return true;
+      // Everything with a publication still to come, including the ones whose
+      // time has passed — an overdue post belongs on the screen its owner is
+      // looking at for it.
+      case 'scheduled':
+        return p.schedule?.state === 'scheduled' || p.schedule?.state === 'overdue';
+      // Both kinds of failure, because the row badges both as Failed. A
+      // publication the Worker could not carry out is the one that most needs
+      // looking at — it happened while nobody was watching — and leaving it out
+      // of this tab hides it in exactly the place somebody would come looking.
       case 'failed':
-        return p.sync === 'sync_failed';
+        return p.sync === 'sync_failed' || p.schedule?.state === 'failed';
       // A published post whose local version has not been published yet. Drafts
       // are excluded: everything about a draft is unpublished, so listing them
       // here would bury the posts where the distinction actually matters.
@@ -233,7 +296,7 @@ export default function PostsPage() {
   const visibleTrash = trashed.filter(searchMatches);
 
   const tabs: { id: FilterId; label: string; count: number }[] = (
-    ['all', 'published', 'edited', 'conflict', 'draft', 'failed', 'trash'] as const
+    ['all', 'published', 'edited', 'conflict', 'draft', 'scheduled', 'failed', 'trash'] as const
   ).map((id) => ({
     id,
     label: {
@@ -242,6 +305,7 @@ export default function PostsPage() {
       edited: 'Edited',
       conflict: 'Conflicts',
       draft: 'Drafts',
+      scheduled: 'Scheduled',
       failed: 'Failed',
       trash: 'Trash',
     }[id],
@@ -520,9 +584,21 @@ export default function PostsPage() {
                       <StatusPill status={displayStatus(post)} />
                     </div>
 
-                    <span className='hidden sm:block text-[11px] font-mono tracking-tight text-zinc-400 dark:text-zinc-600'>
-                      {post.date}
-                    </span>
+                    {/* When it was written, or — for a post with a publication
+                        still to come — when that is, which is the date somebody
+                        looking at this row actually wants. */}
+                    {post.schedule?.state === 'scheduled' || post.schedule?.state === 'overdue' ? (
+                      <span
+                        title={`Publishes ${new Date(post.schedule.publish_at * 1000).toLocaleString()}`}
+                        className='hidden sm:block text-[11px] font-mono tracking-tight text-indigo-500 dark:text-indigo-400'
+                      >
+                        → {formatScheduleTime(post.schedule.publish_at)}
+                      </span>
+                    ) : (
+                      <span className='hidden sm:block text-[11px] font-mono tracking-tight text-zinc-400 dark:text-zinc-600'>
+                        {post.date}
+                      </span>
+                    )}
 
                     <div className='hidden sm:flex items-center justify-end gap-2'>
                       <span className='text-[12px] font-mono tabular-nums text-zinc-400 dark:text-zinc-600'>

@@ -1,6 +1,7 @@
 pub mod post;
 pub mod post_body_stale;
 pub mod post_revision;
+pub mod post_schedule;
 pub mod post_stage;
 pub mod post_sync;
 pub mod post_tombstone;

@@ -5,11 +5,13 @@
 //! rather than in `local_db`.
 
 use sea_orm::DatabaseConnection;
+use sea_orm::TransactionTrait;
 use sea_orm::DatabaseConnection as Db;
 use tauri::State;
 use crate::cloudflare::{self, cf};
 use crate::db;
 use crate::entities::post::Model as PostModel;
+use crate::entities::post_schedule::Model as ScheduleModel;
 use crate::entities::post_stage;
 use crate::entities::series::Model as SeriesModel;
 use crate::error::{AppError, AppResult};
@@ -245,6 +247,23 @@ pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> AppRe
     // one file a refresh has no business touching. The cached copy is replaced
     // the next time the post is read, which fetches the cloud's current body and
     // settles the mark.
+
+    // The schedules the Worker acts on live in D1 too, and the local copy is a
+    // mirror of them: this is where the app learns that a publication it asked
+    // for has happened, or failed. Best effort — the table may not exist until
+    // the Worker's migration has been applied, and a refresh of the posts is
+    // still worth having without it.
+    match cloudflare::d1_list::<ScheduleModel>(&client, &config).await {
+        Ok(remote_schedules) => {
+            // In one transaction: the mirror is emptied before it is refilled,
+            // and a post whose schedule has momentarily vanished is a post the
+            // trash would agree to delete. See `db::mirror_schedules`.
+            let txn = conn.inner().begin().await?;
+            db::mirror_schedules(&txn, remote_schedules).await?;
+            txn.commit().await?;
+        }
+        Err(e) => log::warn!("Could not refresh the publication schedules: {e}"),
+    }
 
     log::info!(
         "Refreshed {} post(s) from the cloud, removing {} that are no longer there",

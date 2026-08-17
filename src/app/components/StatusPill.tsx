@@ -29,6 +29,18 @@ const PILLS: Record<PostStatus, { label: string; title: string; className: strin
     className:
       'bg-violet-50 text-violet-700 dark:bg-violet-500/[0.12] dark:text-violet-400 border-violet-200/80 dark:border-violet-500/20',
   },
+  scheduled: {
+    label: 'Scheduled',
+    title: 'Already uploaded and waiting for its time — Cloudflare publishes it, whether this app is running or not',
+    className:
+      'bg-indigo-50 text-indigo-700 dark:bg-indigo-500/[0.12] dark:text-indigo-400 border-indigo-200/80 dark:border-indigo-500/20',
+  },
+  overdue: {
+    label: 'Overdue',
+    title: 'Its time has passed and it is still not live — the scheduler Worker has not run it',
+    className:
+      'bg-orange-50 text-orange-700 dark:bg-orange-500/[0.12] dark:text-orange-400 border-orange-200/80 dark:border-orange-500/20',
+  },
   failed: {
     label: 'Sync failed',
     title: 'The last publish did not reach the cloud, so these edits are not live',

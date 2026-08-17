@@ -121,6 +121,10 @@ pub fn run() {
             commands::resolve_conflict,
             commands::publish_post,
             commands::unpublish_post,
+            // Scheduled publishing (executed by the Worker's cron trigger)
+            commands::schedule_post,
+            commands::cancel_schedule,
+            commands::list_schedules,
             // Sync
             commands::sync_posts,
             commands::sync_posts_from_cloud,
