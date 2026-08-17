@@ -330,13 +330,23 @@ pub async fn read_post_markdown(
     //    would put an older copy over it. Derived rather than cleared on every
     //    write, so no failed bookkeeping can turn the mark into a way of losing
     //    a draft.
-    let stale = !has_local_edits(conn.inner(), &slug).await?
-        && db::body_is_stale(conn.inner(), &slug).await?;
-    if !stale {
-        if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
-            return Ok(content);
+    //
+    //    The answer and the baseline for step 2 are taken together under the
+    //    lock. Apart, a save landing between them leaves `before` already
+    //    describing that save's own draft — and the check after the download,
+    //    finding the stamp exactly as it left it, would conclude nothing had
+    //    happened and write over the very text it was meant to protect.
+    let before = {
+        let _guard = lock_body_commits().await;
+        let stale = !has_local_edits(conn.inner(), &slug).await?
+            && db::body_is_stale(conn.inner(), &slug).await?;
+        if !stale {
+            if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
+                return Ok(content);
+            }
         }
-    }
+        body_stamp(&local_path).await
+    };
 
     // 2. Not cached locally — download from R2.
     //
@@ -347,41 +357,39 @@ pub async fn read_post_markdown(
     // cache, later reads prefer the cache, and publishing puts it over the
     // Markdown still sitting in R2. Saying "I cannot tell you" costs one error
     // message and keeps the post intact.
-    // Taken before the round trip, and compared with it afterwards: this is what
-    // makes "has anybody written this body while I was away?" answerable without
-    // trusting a write that may have failed after the one that mattered.
-    let before = body_stamp(&local_path).await;
-
     let (client, config) = cf().map_err(|_| AppError::BodyUnavailable(slug.clone()))?;
     let key = media_keys::body_key(&slug);
-    match cloudflare::download_from_r2(&client, &config, &key).await? {
+    let downloaded = cloudflare::download_from_r2(&client, &config, &key).await?;
+
+    // Whoever wrote this body while the download was in flight wins, and their
+    // text is the answer.
+    //
+    // Two questions, because either alone leaves a gap. The sync row catches a
+    // save that finished cleanly; the file's own stamp catches one whose
+    // bookkeeping did not — a fingerprint or a mark-clearing write that failed
+    // leaves text on disk newer than everything describing it, and only the file
+    // still says so.
+    //
+    // Asked for an empty result as much as a fetched one. R2 having no object is
+    // not evidence that this machine has none: a body created while the request
+    // was out would be answered with an empty string, the editor would take that
+    // as the post's loaded contents, and the next save would write nothing over
+    // a draft that was there all along.
+    let _guard = lock_body_commits().await;
+    if has_local_edits(conn.inner(), &slug).await? || body_stamp(&local_path).await != before {
+        return Ok(match tokio::fs::read_to_string(&local_path).await {
+            Ok(current) => current,
+            // Unreadable after all that: hand back what the cloud gave rather
+            // than nothing, and leave the file alone regardless.
+            Err(_) => downloaded.unwrap_or_default(),
+        });
+    }
+
+    match downloaded {
         Some(content) => {
             // Cache locally for next time (best effort). This *is* the cloud's
             // current copy, so whatever was stale about the old one is settled.
             //
-            // Under the body lock, and asked again inside it. The download above
-            // is a network round trip, and a save can land in the middle of one:
-            // the decision that sent this read to R2 was made before that draft
-            // existed, and acting on it now would write the published version
-            // over text the author has since typed. Whatever is on disk at this
-            // point belongs to whoever wrote it last.
-            // Two questions, because either one alone leaves a gap. The sync row
-            // catches a save that finished cleanly; the file's own stamp catches
-            // one whose bookkeeping did not — a fingerprint or a mark-clearing
-            // write that failed leaves the text on disk newer than everything
-            // describing it, and only the file itself still says so.
-            let _guard = lock_body_commits().await;
-            if has_local_edits(conn.inner(), &slug).await?
-                || body_stamp(&local_path).await != before
-            {
-                // Somebody wrote this body while the download was in flight, so
-                // theirs is the current one and also the answer. Handing back the
-                // download instead would show the caller the older published text
-                // — and the editor's next autosave would write that back over the
-                // draft, losing it a second time by a different route.
-                return Ok(tokio::fs::read_to_string(&local_path).await.unwrap_or(content));
-            }
-
             // Staged like every other replacement, so a reader mid-swap sees one
             // whole body or the other rather than a partial file.
             let _ = tokio::fs::create_dir_all(&dir).await;
