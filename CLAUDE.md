@@ -85,6 +85,19 @@ A desktop application built with **Tauri** and **Next.js** designed for managing
   2. Upon **R2** success, upsert the corresponding record in **D1**.
 - **Local Caching:** Use a local SQLite or `tauri-plugin-store` for offline editing states before syncing to the cloud.
 
+## Code Review
+
+Codex reviews pull requests in this repository automatically — on open, on
+"ready for review", and on each push to an open PR.
+
+**Do not post `@codex review` comments.** The automatic trigger already covers
+every case a manual call would, so asking again only duplicates a review that is
+coming anyway. Push the fix and wait for the review that the push triggers.
+
+Reply to findings in a normal PR comment: say what was changed and why, and say
+plainly when a finding is wrong and what the evidence is. A finding you disagree
+with still needs an answer.
+
 ## Common Commands
 
 ### Development
