@@ -389,6 +389,24 @@ impl BlogMcp {
         )
         .await;
 
+        // An agent replacing a body is the same operation the editor performs,
+        // so it takes the same lock — and takes it before the metadata below,
+        // because the three writes are one commit sequence: metadata, body,
+        // fingerprint. Acquiring it later would let this transaction commit
+        // while an editor save holds the lock, and the two sequences would
+        // interleave into a post carrying the editor's metadata, this body, and
+        // a fingerprint computed from neither — with the editor's save
+        // reporting success over a body that is gone.
+        //
+        // Ordered lock-then-database everywhere it is taken, so the paths that
+        // hold it cannot deadlock against each other. Nothing under it reaches
+        // the network. See `commands::lock_body_commits`.
+        let body_guard = if params.body.is_some() {
+            Some(commands::lock_body_commits().await)
+        } else {
+            None
+        };
+
         // Re-checked inside the transaction that writes. `load_post` refused a
         // trashed post several awaits ago — a body fetched from R2, a snapshot
         // taken — and an agent's edit is exactly the kind that arrives while
@@ -400,19 +418,6 @@ impl BlogMcp {
         }
         let saved = db::update::<PostModel>(&txn, post).await.map_err(internal)?;
         txn.commit().await.map_err(internal)?;
-
-        // An agent replacing a body is the same operation the editor performs,
-        // so it takes the same lock and holds it through the fingerprint below.
-        // Between renaming the file and recording that this machine wrote it,
-        // the post reads as untouched while holding text nobody else has — and
-        // a stale-body read already queued on this lock would take that answer
-        // and rename its older R2 copy straight over the agent's edit. Nothing
-        // in here reaches the network. See `commands::lock_body_commits`.
-        let body_guard = if params.body.is_some() {
-            Some(commands::lock_body_commits().await)
-        } else {
-            None
-        };
 
         if params.body.is_some() {
             let dir = self.posts_dir()?;
