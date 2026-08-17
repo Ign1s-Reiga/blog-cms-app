@@ -269,8 +269,12 @@ export default function PostsPage() {
       // looking at for it.
       case 'scheduled':
         return p.schedule?.state === 'scheduled' || p.schedule?.state === 'overdue';
+      // Both kinds of failure, because the row badges both as Failed. A
+      // publication the Worker could not carry out is the one that most needs
+      // looking at — it happened while nobody was watching — and leaving it out
+      // of this tab hides it in exactly the place somebody would come looking.
       case 'failed':
-        return p.sync === 'sync_failed';
+        return p.sync === 'sync_failed' || p.schedule?.state === 'failed';
       // A published post whose local version has not been published yet. Drafts
       // are excluded: everything about a draft is unpublished, so listing them
       // here would bury the posts where the distinction actually matters.

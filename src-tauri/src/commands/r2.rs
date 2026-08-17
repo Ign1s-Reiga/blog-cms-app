@@ -787,8 +787,25 @@ pub async fn schedule_post(
         updated_at: now,
     };
     let (client, config) = cf()?;
-    cloudflare::d1_schedule_upsert(&client, &config, row.clone()).await?;
+
+    // Local first, then the cloud. `trash_post` reads the local mirror to refuse
+    // deleting a post Cloudflare is about to publish, so a schedule that exists
+    // in D1 and not here is one the Worker will carry out with nothing standing
+    // in the way of the post being thrown away first — and offline, where a
+    // refresh cannot correct the mirror, that is not a brief window.
+    //
+    // This order fails the other way: a local row with no cloud schedule, which
+    // refuses a deletion that would in fact have been safe, and disappears at the
+    // next refresh. Cleared here as well, so it usually does not outlive the
+    // error — best effort, because the row it might leave behind is the harmless
+    // one.
     db::schedule_set(conn.inner(), row.clone()).await?;
+    if let Err(e) = cloudflare::d1_schedule_upsert(&client, &config, row.clone()).await {
+        if let Err(cleanup) = db::schedule_clear(conn.inner(), &post.slug).await {
+            log::warn!("Could not undo the local schedule for `{}`: {cleanup}", post.slug);
+        }
+        return Err(e);
+    }
 
     // The body is in R2 and the metadata is in D1; what is here and what is
     // there agree, and the only thing still to come is the flip.
