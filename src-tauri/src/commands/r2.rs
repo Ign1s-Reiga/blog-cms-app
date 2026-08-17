@@ -274,6 +274,24 @@ async fn restore_metadata(
 /// that cannot answer must stop the read — treating "I do not know" as "nothing
 /// local" is the one reading that loses the author's work. A post the local
 /// database has never heard of is a genuine no: there is no draft to protect.
+/// What a cached body looked like at a moment in time — modification time and
+/// length — for comparing against itself later.
+///
+/// `None` for a file that is not there, which is a state worth telling apart:
+/// one appearing where there was nothing is exactly as much of a write as one
+/// being replaced.
+///
+/// Deliberately a property of the file rather than of the database. Every other
+/// signal that a body has been written — the sync fingerprint, the staleness
+/// mark — is bookkeeping recorded *after* the file moves, and each of those
+/// writes can fail on its own, leaving the text on disk newer than anything that
+/// describes it. The file is the thing being protected, so it is the thing to
+/// ask.
+async fn body_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
 async fn has_local_edits(conn: &DatabaseConnection, slug: &str) -> AppResult<bool> {
     let Some(post) = db::post_by_slug(conn, slug).await? else {
         return Ok(false);
@@ -329,6 +347,11 @@ pub async fn read_post_markdown(
     // cache, later reads prefer the cache, and publishing puts it over the
     // Markdown still sitting in R2. Saying "I cannot tell you" costs one error
     // message and keeps the post intact.
+    // Taken before the round trip, and compared with it afterwards: this is what
+    // makes "has anybody written this body while I was away?" answerable without
+    // trusting a write that may have failed after the one that mattered.
+    let before = body_stamp(&local_path).await;
+
     let (client, config) = cf().map_err(|_| AppError::BodyUnavailable(slug.clone()))?;
     let key = media_keys::body_key(&slug);
     match cloudflare::download_from_r2(&client, &config, &key).await? {
@@ -342,12 +365,20 @@ pub async fn read_post_markdown(
             // existed, and acting on it now would write the published version
             // over text the author has since typed. Whatever is on disk at this
             // point belongs to whoever wrote it last.
+            // Two questions, because either one alone leaves a gap. The sync row
+            // catches a save that finished cleanly; the file's own stamp catches
+            // one whose bookkeeping did not — a fingerprint or a mark-clearing
+            // write that failed leaves the text on disk newer than everything
+            // describing it, and only the file itself still says so.
             let _guard = lock_body_commits().await;
-            if has_local_edits(conn.inner(), &slug).await? {
-                // The draft won the race, so it is also the answer. Handing back
-                // the download instead would show the caller the older published
-                // text — and the editor's next autosave would write that back
-                // over the draft, losing it a second time by a different route.
+            if has_local_edits(conn.inner(), &slug).await?
+                || body_stamp(&local_path).await != before
+            {
+                // Somebody wrote this body while the download was in flight, so
+                // theirs is the current one and also the answer. Handing back the
+                // download instead would show the caller the older published text
+                // — and the editor's next autosave would write that back over the
+                // draft, losing it a second time by a different route.
                 return Ok(tokio::fs::read_to_string(&local_path).await.unwrap_or(content));
             }
 
@@ -1089,6 +1120,40 @@ mod tests {
         // A slug the local database has never heard of is a genuine no rather
         // than an error: there is nothing here that could be lost.
         assert!(!has_local_edits(&db, "never-existed").await.unwrap());
+    }
+
+    /// The check that does not depend on any bookkeeping having succeeded: a
+    /// body that was written while a download was in flight has to be
+    /// recognisable from the file alone.
+    ///
+    /// Both transitions count as a write. One appearing where there was nothing
+    /// is a post that gained a body during the round trip, which is every bit as
+    /// much somebody else's work as one that was replaced.
+    #[tokio::test]
+    async fn a_body_written_during_a_download_is_visible_in_its_stamp() {
+        let dir = std::env::temp_dir()
+            .join(format!("blog-cms-stamp-{}", uuid::Uuid::new_v4().simple()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("a-post.md");
+
+        // Nothing there yet.
+        let absent = body_stamp(&path).await;
+        assert!(absent.is_none());
+
+        tokio::fs::write(&path, "the draft").await.unwrap();
+        let written = body_stamp(&path).await;
+        assert!(written.is_some());
+        assert_ne!(written, absent, "a body appearing is a write");
+
+        // Replaced with text of a different length.
+        tokio::fs::write(&path, "the draft, edited").await.unwrap();
+        assert_ne!(body_stamp(&path).await, written, "a body replaced is a write");
+
+        // Untouched between two looks.
+        let settled = body_stamp(&path).await;
+        assert_eq!(body_stamp(&path).await, settled);
+
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
     #[test]
