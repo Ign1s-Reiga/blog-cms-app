@@ -39,6 +39,19 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/// What an object's usage amounts to, given what the survey could and could not
+/// read.
+///
+/// `posts` missing means the object itself could not be hashed. An empty list
+/// while some post's Markdown is unreadable means nothing checked it — which is
+/// the same amount of knowledge, and must not be dressed up as "unused". Known
+/// users are still reported as such: they are true whatever else was missed.
+function withUsage(posts: UsingPost[] | undefined, blind: boolean): UsingPost[] | null {
+  if (posts === undefined) return null;
+  if (posts.length === 0 && blind) return null;
+  return posts;
+}
+
 /// How an item's usage reads on its tile. Published posts are called out on
 /// their own because those are the references readers are being served.
 function usageLabel(posts: UsingPost[] | null): string {
@@ -60,6 +73,9 @@ export default function MediaPage() {
   /// is "what uses this", the other "delete it anyway?".
   const [inspecting, setInspecting] = useState<MediaItem | null>(null);
   const [confirming, setConfirming] = useState<MediaItem | null>(null);
+  /// Posts whose Markdown is not on this machine. While there are any, nothing
+  /// here can prove an object is unused — see `withUsage`.
+  const [unreadPosts, setUnreadPosts] = useState<{ id: number; title: string }[]>([]);
 
   // Load media from R2 (cached locally by the backend). No-ops in a plain
   // browser (`pnpm dev`), where the Tauri API isn't available.
@@ -74,9 +90,18 @@ export default function MediaPage() {
       const rows = await invoke<{ key: string; name: string; size: number }[]>('list_media');
       // After `list_media`, which caches every object locally — the survey reads
       // the cache, so asking it first would report a fresh library as unused.
-      const usage = new Map<string, UsingPost[]>(
-        (await invoke<{ key: string; posts: UsingPost[] }[]>('media_usage')).map((u) => [u.key, u.posts]),
-      );
+      const report = await invoke<{
+        objects: { key: string; posts: UsingPost[] }[];
+        unread_posts: { id: number; title: string }[];
+      }>('media_usage');
+      // A post whose Markdown is not on this machine — pulled from the cloud
+      // and never opened — could reference anything, and nothing here can see
+      // it. While any exists, "no known users" is not "unused" for *any*
+      // object, so the whole library reads as unknown rather than inviting a
+      // delete it cannot justify.
+      const blind = report.unread_posts.length > 0;
+      setUnreadPosts(report.unread_posts);
+      const usage = new Map<string, UsingPost[]>(report.objects.map((u) => [u.key, u.posts]));
       const base = await appDataDir();
       const resolved = await Promise.all(
         rows.map(async (r) => ({
@@ -86,8 +111,9 @@ export default function MediaPage() {
           isVideo: VIDEO_EXT.test(r.name),
           // `?? null`, never `?? []`: an object the survey did not report on is
           // one it could not read, and saying "not used" for it is the one
-          // wrong answer here.
-          usedBy: usage.get(r.key) ?? null,
+          // wrong answer here. The same goes for an empty list while some
+          // post's body is unreadable — nothing checked it.
+          usedBy: withUsage(usage.get(r.key), blind),
         })),
       );
       setItems(resolved);
@@ -166,6 +192,19 @@ export default function MediaPage() {
             {busy ? 'Uploading…' : 'Upload'}
           </Button>
         </div>
+
+        {/* Why some tiles say "usage unknown". Without this the label looks
+            like a bug rather than a fact about what is on this machine. */}
+        {unreadPosts.length > 0 && (
+          <div className='rounded-[6px] px-3 py-2 border border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/[0.08] dark:text-amber-400 text-[12px]'>
+            <span className='font-medium'>
+              {unreadPosts.length} {unreadPosts.length === 1 ? 'post has' : 'posts have'} no local copy of{' '}
+              {unreadPosts.length === 1 ? 'its' : 'their'} text
+            </span>{' '}
+            — {unreadPosts.map((p) => p.title).join(', ')}. Their images cannot be matched from here, so nothing can be
+            called unused until they are opened once.
+          </div>
+        )}
 
         {error && (
           <div className='rounded-[6px] px-3 py-2 border border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/[0.08] dark:text-red-400 text-[12px] font-medium'>
@@ -305,7 +344,7 @@ export default function MediaPage() {
               </h2>
               <p className='mt-1.5 text-[12px] leading-[1.6] text-zinc-500 dark:text-zinc-500'>
                 {confirming.usedBy === null
-                  ? 'This object is not cached on this machine, so there was nothing to match posts against. It may well be in use. Refreshing the page caches it and answers the question.'
+                  ? 'Either this object is not cached on this machine, or some post’s text is not — so there was nothing to match against. It may well be in use. Opening those posts once, or reloading this page, answers the question.'
                   : 'Deleting it removes the object from R2. Any published post pointing at it will show a broken image to readers until it is replaced.'}
               </p>
               {confirming.usedBy !== null && (

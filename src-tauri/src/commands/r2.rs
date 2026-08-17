@@ -896,7 +896,7 @@ pub async fn list_media(app: tauri::AppHandle) -> AppResult<Vec<MediaItem>> {
 pub async fn media_usage(
     app: tauri::AppHandle,
     conn: State<'_, DatabaseConnection>,
-) -> AppResult<Vec<media_usage::MediaUsage>> {
+) -> AppResult<media_usage::UsageReport> {
     media_usage::survey(&app, conn.inner()).await
 }
 
@@ -914,9 +914,13 @@ pub async fn delete_media(
     force: bool,
 ) -> AppResult<()> {
     if !force {
-        let users = media_usage::users_of(&app, conn.inner(), &key).await?;
-        if !users.is_empty() {
-            return Err(AppError::MediaInUse { key, posts: users.len() });
+        let check = media_usage::users_of(&app, conn.inner(), &key).await?;
+        if !check.is_safe() {
+            return Err(AppError::MediaInUse {
+                key,
+                posts: check.users.len(),
+                unread_posts: check.unread_posts.len(),
+            });
         }
     }
 

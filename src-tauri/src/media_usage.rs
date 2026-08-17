@@ -72,6 +72,30 @@ pub struct MediaUsage {
     pub posts: Vec<UsingPost>,
 }
 
+/// A post the survey could not read, and therefore could not match anything
+/// against.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UnreadPost {
+    pub id: i32,
+    pub title: String,
+}
+
+/// What a survey found, and what it could not see.
+///
+/// The second half matters as much as the first. A post pulled from the cloud
+/// and never opened has its Markdown in R2 and nowhere on this machine, and
+/// `sync_posts_from_cloud` mirrors metadata only — so a library can contain
+/// posts whose references are simply unknown here. Reporting the objects alone
+/// would let every image used by such a post read as "not used", which is the
+/// one answer that invites a delete.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UsageReport {
+    pub objects: Vec<MediaUsage>,
+    /// Empty when every post's body was readable, which is the ordinary case.
+    /// While it is not, "no known users" cannot be read as "unused".
+    pub unread_posts: Vec<UnreadPost>,
+}
+
 /// Every `assets/<file>` name a body mentions.
 ///
 /// Deliberately the same loose scan `commands::r2` uses on the publish path: it
@@ -145,14 +169,20 @@ async fn library_digests(media_dir: &Path) -> HashMap<String, String> {
     digests
 }
 
-/// The digests one post's body depends on, staged and published alike.
-async fn digests_used_by(app: &tauri::AppHandle, post: &PostModel) -> AppResult<HashSet<String>> {
+/// The digests one post's body depends on, staged and published alike, or
+/// `None` when its Markdown is not on this machine to be read.
+///
+/// `None` is not the same as "no references", and collapsing the two is what
+/// would make a post pulled from the cloud and never opened look like a post
+/// that uses no images. Fetching the body instead would turn listing the media
+/// library into a download of the whole blog, so the honest move is to say the
+/// answer is unknown and let the caller carry that upwards.
+async fn digests_used_by(
+    app: &tauri::AppHandle,
+    post: &PostModel,
+) -> AppResult<Option<HashSet<String>>> {
     let Some(body) = crate::revisions::cached_body(app, &post.slug).await else {
-        // Nothing cached locally means nothing to read; the body is in R2 and
-        // fetching it here would make listing the media library a network
-        // operation. A post nobody has opened on this machine contributes no
-        // references, which the media view reports as such.
-        return Ok(HashSet::new());
+        return Ok(None);
     };
 
     let assets_dir = app
@@ -172,7 +202,7 @@ async fn digests_used_by(app: &tauri::AppHandle, post: &PostModel) -> AppResult<
             digests.insert(media_keys::content_digest(&bytes));
         }
     }
-    Ok(digests)
+    Ok(Some(digests))
 }
 
 /// One ordinary file name and nothing else — no separators, no traversal.
@@ -193,7 +223,7 @@ fn is_plain_name(name: &str) -> bool {
 pub async fn survey(
     app: &tauri::AppHandle,
     conn: &DatabaseConnection,
-) -> AppResult<Vec<MediaUsage>> {
+) -> AppResult<UsageReport> {
     let media_dir = app
         .path()
         .app_data_dir()
@@ -208,6 +238,7 @@ pub async fn survey(
     let posts = db::list::<PostModel>(conn).await?;
 
     let mut by_digest: HashMap<String, Vec<UsingPost>> = HashMap::new();
+    let mut unread_posts = Vec::new();
     for post in posts {
         let using = UsingPost {
             id: post.id,
@@ -216,20 +247,47 @@ pub async fn survey(
             trashed: trashed.contains(&post.id),
             published: post.published,
         };
-        for digest in digests_used_by(app, &post).await? {
-            by_digest.entry(digest).or_default().push(using.clone());
+        match digests_used_by(app, &post).await? {
+            Some(digests) => {
+                for digest in digests {
+                    by_digest.entry(digest).or_default().push(using.clone());
+                }
+            }
+            // Its Markdown is in R2 and nowhere here — pulled from the cloud and
+            // never opened. Whatever it references cannot be seen from this
+            // machine, so it is named rather than passed over in silence.
+            None => unread_posts.push(UnreadPost { id: post.id, title: post.title }),
         }
     }
 
-    let mut usage: Vec<MediaUsage> = library
+    let mut objects: Vec<MediaUsage> = library
         .into_iter()
         .map(|(key, digest)| MediaUsage {
             posts: by_digest.get(&digest).cloned().unwrap_or_default(),
             key,
         })
         .collect();
-    usage.sort_by(|a, b| a.key.cmp(&b.key));
-    Ok(usage)
+    objects.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(UsageReport { objects, unread_posts })
+}
+
+/// What the deletion guard needs to know about one object: who is known to use
+/// it, and whether anything could not be checked.
+///
+/// The second half is what stops an unprovable "unused" from reading as a
+/// proven one. A library with a post nobody has opened on this machine cannot
+/// say that any object is unreferenced, and the guard treats that the same way
+/// it treats a known reference: it asks first.
+pub struct DeletionCheck {
+    pub users: Vec<UsingPost>,
+    pub unread_posts: Vec<UnreadPost>,
+}
+
+impl DeletionCheck {
+    /// Can this object be deleted without asking anybody?
+    pub fn is_safe(&self) -> bool {
+        self.users.is_empty() && self.unread_posts.is_empty()
+    }
 }
 
 /// The posts referencing one object, for the check that guards a deletion.
@@ -237,13 +295,17 @@ pub async fn users_of(
     app: &tauri::AppHandle,
     conn: &DatabaseConnection,
     key: &str,
-) -> AppResult<Vec<UsingPost>> {
-    Ok(survey(app, conn)
-        .await?
-        .into_iter()
-        .find(|u| u.key == key)
-        .map(|u| u.posts)
-        .unwrap_or_default())
+) -> AppResult<DeletionCheck> {
+    let report = survey(app, conn).await?;
+    Ok(DeletionCheck {
+        users: report
+            .objects
+            .into_iter()
+            .find(|u| u.key == key)
+            .map(|u| u.posts)
+            .unwrap_or_default(),
+        unread_posts: report.unread_posts,
+    })
 }
 
 #[cfg(test)]
