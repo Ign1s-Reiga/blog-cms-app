@@ -186,13 +186,13 @@ pub enum AppError {
     /// do not. The counts are in the message so a caller that ignores the
     /// structure still says something useful.
     #[error(
-        "{key} is used by {posts} post(s), and {unread_posts} post(s) could not be \
+        "{key} is used by {posts} post(s), and {unchecked_posts} post(s) could not be \
          checked; deleting it may break them"
     )]
     MediaInUse {
         key: String,
         posts: usize,
-        unread_posts: usize,
+        unchecked_posts: usize,
     },
 
     #[error("{context}: {source}")]

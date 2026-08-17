@@ -72,12 +72,36 @@ pub struct MediaUsage {
     pub posts: Vec<UsingPost>,
 }
 
-/// A post the survey could not read, and therefore could not match anything
-/// against.
+/// Why a post could not be fully accounted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unchecked {
+    /// Its Markdown is in R2 and nowhere on this machine — pulled from the
+    /// cloud and never opened. Nothing of it could be read.
+    BodyNotCached,
+    /// It is live on the blog with local edits that have not been published, so
+    /// readers are being served a body this machine does not have. What it
+    /// references *here* is known; what it references *there* is not.
+    PendingEdits,
+    /// It references a staged asset that could not be read, so one of its
+    /// references cannot be resolved to an image.
+    AssetUnreadable,
+}
+
+/// A post the survey could not fully account for, and why.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct UnreadPost {
+pub struct UncheckedPost {
     pub id: i32,
     pub title: String,
+    pub reason: Unchecked,
+}
+
+/// What one post's body could be seen to reference, and whether that is the
+/// whole story.
+struct PostScan {
+    digests: HashSet<String>,
+    /// `None` when the post was read in full and every reference resolved.
+    unchecked: Option<Unchecked>,
 }
 
 /// What a survey found, and what it could not see.
@@ -91,9 +115,10 @@ pub struct UnreadPost {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct UsageReport {
     pub objects: Vec<MediaUsage>,
-    /// Empty when every post's body was readable, which is the ordinary case.
-    /// While it is not, "no known users" cannot be read as "unused".
-    pub unread_posts: Vec<UnreadPost>,
+    /// Empty when every post was accounted for in full, which is the ordinary
+    /// case. While it is not, "no known users" cannot be read as "unused" —
+    /// something referenced an image where nobody could look.
+    pub unchecked_posts: Vec<UncheckedPost>,
 }
 
 /// Every `assets/<file>` name a body mentions.
@@ -200,11 +225,12 @@ async fn library_digests(media_dir: &Path) -> HashMap<String, String> {
 /// answer is unknown and let the caller carry that upwards.
 async fn digests_used_by(
     app: &tauri::AppHandle,
+    conn: &DatabaseConnection,
     post: &PostModel,
     library: &HashSet<&str>,
-) -> AppResult<Option<HashSet<String>>> {
+) -> AppResult<PostScan> {
     let Some(body) = crate::revisions::cached_body(app, &post.slug).await else {
-        return Ok(None);
+        return Ok(PostScan { digests: HashSet::new(), unchecked: Some(Unchecked::BodyNotCached) });
     };
 
     let assets_dir = app
@@ -213,6 +239,7 @@ async fn digests_used_by(
         .map_err(AppError::AppDataDir)?
         .join("assets");
 
+    let mut unchecked = None;
     let mut digests = published_digests(&body, library);
     for name in asset_names(&body) {
         // The same guard the publish path uses: these names reach the
@@ -220,11 +247,32 @@ async fn digests_used_by(
         if !is_plain_name(name) {
             continue;
         }
-        if let Ok(bytes) = tokio::fs::read(assets_dir.join(name)).await {
-            digests.insert(media_keys::content_digest(&bytes));
+        match tokio::fs::read(assets_dir.join(name)).await {
+            Ok(bytes) => {
+                digests.insert(media_keys::content_digest(&bytes));
+            }
+            // The body points at a staged image that is not there. Whatever it
+            // was cannot be identified, so this post's references are known
+            // only in part — and if the missing asset came from the library,
+            // the object it came from must not be called unused on the strength
+            // of this scan.
+            Err(_) => unchecked = unchecked.or(Some(Unchecked::AssetUnreadable)),
         }
     }
-    Ok(Some(digests))
+
+    // A live post carrying unpublished edits is being *read* from a body this
+    // machine does not have. The local one is the author's draft; the one
+    // serving readers is whatever was last published, and it may still show an
+    // image the draft has since dropped. What is here is true, and it is not
+    // the whole truth.
+    if unchecked.is_none() && post.published {
+        let sync = db::sync_get(conn, post.id).await?;
+        if sync.is_some_and(|row| crate::sync_state::local_changed(&row)) {
+            unchecked = Some(Unchecked::PendingEdits);
+        }
+    }
+
+    Ok(PostScan { digests, unchecked })
 }
 
 /// One ordinary file name and nothing else — no separators, no traversal.
@@ -262,7 +310,7 @@ pub async fn survey(
     let posts = db::list::<PostModel>(conn).await?;
 
     let mut by_digest: HashMap<String, Vec<UsingPost>> = HashMap::new();
-    let mut unread_posts = Vec::new();
+    let mut unchecked_posts = Vec::new();
     for post in posts {
         let using = UsingPost {
             id: post.id,
@@ -271,16 +319,15 @@ pub async fn survey(
             trashed: trashed.contains(&post.id),
             published: post.published,
         };
-        match digests_used_by(app, &post, &known).await? {
-            Some(digests) => {
-                for digest in digests {
-                    by_digest.entry(digest).or_default().push(using.clone());
-                }
-            }
-            // Its Markdown is in R2 and nowhere here — pulled from the cloud and
-            // never opened. Whatever it references cannot be seen from this
-            // machine, so it is named rather than passed over in silence.
-            None => unread_posts.push(UnreadPost { id: post.id, title: post.title }),
+        // Whatever the scan *could* see is recorded either way: those
+        // references are true, and a post being partly unreadable is no reason
+        // to forget the images it demonstrably uses.
+        let scan = digests_used_by(app, conn, &post, &known).await?;
+        for digest in scan.digests {
+            by_digest.entry(digest).or_default().push(using.clone());
+        }
+        if let Some(reason) = scan.unchecked {
+            unchecked_posts.push(UncheckedPost { id: post.id, title: post.title, reason });
         }
     }
 
@@ -292,7 +339,7 @@ pub async fn survey(
         })
         .collect();
     objects.sort_by(|a, b| a.key.cmp(&b.key));
-    Ok(UsageReport { objects, unread_posts })
+    Ok(UsageReport { objects, unchecked_posts })
 }
 
 /// What the deletion guard needs to know about one object: who is known to use
@@ -304,7 +351,7 @@ pub async fn survey(
 /// it treats a known reference: it asks first.
 pub struct DeletionCheck {
     pub users: Vec<UsingPost>,
-    pub unread_posts: Vec<UnreadPost>,
+    pub unchecked_posts: Vec<UncheckedPost>,
     /// The object itself could not be hashed, so nothing was matched against
     /// it. Distinct from an empty `users`, which is a real answer.
     pub unknown: bool,
@@ -313,12 +360,13 @@ pub struct DeletionCheck {
 impl DeletionCheck {
     /// Can this object be deleted without asking anybody?
     ///
-    /// Only when the question was actually answered: no post references it, no
-    /// post's body was unreadable, and the object itself could be hashed.
+    /// Only when the question was actually answered: no post references it,
+    /// every post was accounted for in full, and the object itself could be
+    /// hashed.
     /// Anything else is "nobody checked", which must not be allowed to look
     /// like "nothing uses it".
     pub fn is_safe(&self) -> bool {
-        !self.unknown && self.users.is_empty() && self.unread_posts.is_empty()
+        !self.unknown && self.users.is_empty() && self.unchecked_posts.is_empty()
     }
 }
 
@@ -338,7 +386,7 @@ pub async fn users_of(
         // it exists to provide.
         unknown: found.is_none(),
         users: found.map(|u| u.posts).unwrap_or_default(),
-        unread_posts: report.unread_posts,
+        unchecked_posts: report.unchecked_posts,
     })
 }
 

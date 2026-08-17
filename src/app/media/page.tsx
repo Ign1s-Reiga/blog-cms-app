@@ -22,6 +22,21 @@ type MediaItem = {
   usedBy: UsingPost[] | null;
 };
 
+/// Mirrors `UncheckedPost` in `src-tauri/src/media_usage.rs`: a post the survey
+/// could not fully account for, and why.
+type UncheckedPost = {
+  id: number;
+  title: string;
+  reason: 'body_not_cached' | 'pending_edits' | 'asset_unreadable';
+};
+
+/// Said plainly, because each reason has a different way out.
+const UNCHECKED_REASON: Record<UncheckedPost['reason'], string> = {
+  body_not_cached: 'its text is not on this machine; open it once to bring it down',
+  pending_edits: 'it is live with unpublished edits, so readers see a version this machine does not have',
+  asset_unreadable: 'it points at a staged image that is missing, so one of its references cannot be identified',
+};
+
 /// Mirrors `UsingPost` in `src-tauri/src/media_usage.rs`.
 type UsingPost = {
   id: number;
@@ -75,7 +90,7 @@ export default function MediaPage() {
   const [confirming, setConfirming] = useState<MediaItem | null>(null);
   /// Posts whose Markdown is not on this machine. While there are any, nothing
   /// here can prove an object is unused — see `withUsage`.
-  const [unreadPosts, setUnreadPosts] = useState<{ id: number; title: string }[]>([]);
+  const [uncheckedPosts, setUncheckedPosts] = useState<UncheckedPost[]>([]);
 
   // Load media from R2 (cached locally by the backend). No-ops in a plain
   // browser (`pnpm dev`), where the Tauri API isn't available.
@@ -92,15 +107,15 @@ export default function MediaPage() {
       // the cache, so asking it first would report a fresh library as unused.
       const report = await invoke<{
         objects: { key: string; posts: UsingPost[] }[];
-        unread_posts: { id: number; title: string }[];
+        unchecked_posts: UncheckedPost[];
       }>('media_usage');
       // A post whose Markdown is not on this machine — pulled from the cloud
       // and never opened — could reference anything, and nothing here can see
       // it. While any exists, "no known users" is not "unused" for *any*
       // object, so the whole library reads as unknown rather than inviting a
       // delete it cannot justify.
-      const blind = report.unread_posts.length > 0;
-      setUnreadPosts(report.unread_posts);
+      const blind = report.unchecked_posts.length > 0;
+      setUncheckedPosts(report.unchecked_posts);
       const usage = new Map<string, UsingPost[]>(report.objects.map((u) => [u.key, u.posts]));
       const base = await appDataDir();
       const resolved = await Promise.all(
@@ -195,14 +210,20 @@ export default function MediaPage() {
 
         {/* Why some tiles say "usage unknown". Without this the label looks
             like a bug rather than a fact about what is on this machine. */}
-        {unreadPosts.length > 0 && (
+        {uncheckedPosts.length > 0 && (
           <div className='rounded-[6px] px-3 py-2 border border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/[0.08] dark:text-amber-400 text-[12px]'>
             <span className='font-medium'>
-              {unreadPosts.length} {unreadPosts.length === 1 ? 'post has' : 'posts have'} no local copy of{' '}
-              {unreadPosts.length === 1 ? 'its' : 'their'} text
+              {uncheckedPosts.length} {uncheckedPosts.length === 1 ? 'post could' : 'posts could'} not be checked in
+              full
             </span>{' '}
-            — {unreadPosts.map((p) => p.title).join(', ')}. Their images cannot be matched from here, so nothing can be
-            called unused until they are opened once.
+            — nothing can be called unused until {uncheckedPosts.length === 1 ? 'it is' : 'they are'} settled.
+            <ul className='mt-1.5 space-y-0.5'>
+              {uncheckedPosts.map((p) => (
+                <li key={p.id}>
+                  <span className='font-medium'>{p.title}</span> — {UNCHECKED_REASON[p.reason]}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 

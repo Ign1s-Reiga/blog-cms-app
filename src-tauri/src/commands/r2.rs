@@ -919,7 +919,7 @@ pub async fn delete_media(
             return Err(AppError::MediaInUse {
                 key,
                 posts: check.users.len(),
-                unread_posts: check.unread_posts.len(),
+                unchecked_posts: check.unchecked_posts.len(),
             });
         }
     }
