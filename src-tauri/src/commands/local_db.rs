@@ -860,7 +860,17 @@ pub async fn restore_revision(
 
     let body = match staged {
         Some((staged, body)) => {
+            // Cleared before the rename, and allowed to fail the restore. The
+            // other order leaves a database outage between the two with new text
+            // on disk, the mark still standing and no fingerprint — which a later
+            // read resolves by fetching the published copy over it. See the same
+            // ordering in `commands::r2::save`.
+            let was_stale = db::body_is_stale(conn.inner(), &restored.slug).await?;
+            db::body_stale_clear(conn.inner(), &restored.slug).await?;
             if let Err(e) = staged.commit(&dir.join(format!("{}.md", restored.slug))).await {
+                if was_stale {
+                    let _ = db::body_stale_set(conn.inner(), &restored.slug, now_ts()).await;
+                }
                 // The row is already back at the old version and its body is
                 // not, so the row has to go forward again rather than sit there
                 // describing text that was never written. Best effort: the
@@ -870,11 +880,6 @@ pub async fn restore_revision(
                 }
                 return Err(e);
             }
-            // The cached body is this machine's own writing now, so whatever a refresh
-            // said about it being behind the cloud no longer applies. Leaving the mark
-            // would send the next read to R2 for the older published copy and put it
-            // over this text — see `post_body_stale`.
-            let _ = db::body_stale_clear(conn.inner(), &restored.slug).await;
             body
         }
         // Nothing replaced the file, so what is on disk is what the fingerprint

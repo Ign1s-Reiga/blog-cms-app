@@ -569,19 +569,43 @@ async fn save(
         revisions::snapshot_or_log(&app, conn, &before.post, origin).await;
     }
 
+    // The cached body is about to become this machine's own writing, so whatever
+    // a refresh said about it being behind the cloud stops being true — see
+    // `post_body_stale`.
+    //
+    // Cleared *before* the rename, and allowed to fail the save. Ordered the
+    // other way, a database that goes down between the rename and here leaves
+    // new text on disk with the mark still standing and the fingerprint below
+    // never written: a later read then finds a post that reads as clean and
+    // stale, and fetches the older published copy over the draft. Nothing later
+    // can notice, because the stamp a read takes describes the draft it is about
+    // to destroy.
+    //
+    // This way round, the same outage stops the save before the file moves and
+    // the text is still in the editor. The cost is the opposite failure — a
+    // cleared mark with the rename then failing, which serves a stale body until
+    // the next write — and that one loses nothing.
+    let was_stale = db::body_is_stale(conn, &saved.slug).await?;
+    db::body_stale_clear(conn, &saved.slug).await?;
+
     // 4. Swap the new body in. Only a rename is left, so the window in which the
     //    database and the file disagree is as small as it can be — and if even
     //    that fails, the metadata goes back rather than outliving its body.
     if let Err(e) = staged.commit(&dir.join(format!("{}.md", saved.slug))).await {
         restore_metadata(conn, previous, &saved).await;
+        // The body it described never arrived, so the cloud's copy is the newer
+        // one again — but only for a post that was already behind it. Setting the
+        // mark on one that was not would send its next read to R2 for a body it
+        // already has. Best effort: the rename failure is what is worth
+        // reporting, and a mark that does not come back costs a stale read
+        // rather than any text.
+        if was_stale {
+            if let Err(mark) = db::body_stale_set(conn, &saved.slug, now).await {
+                log::warn!("Could not restore the staleness mark for `{}`: {mark}", saved.slug);
+            }
+        }
         return Err(e);
     }
-
-    // The cached body is this machine's own writing now, so whatever a refresh
-    // said about it being behind the cloud no longer applies. Leaving the mark
-    // would send the next read to R2 for the older published copy and put it
-    // over this text — see `post_body_stale`.
-    let _ = db::body_stale_clear(conn, &saved.slug).await;
 
     // 5. Fingerprint what is now on this machine, so the difference between
     //    "published" and "published, and then edited" is recorded rather than

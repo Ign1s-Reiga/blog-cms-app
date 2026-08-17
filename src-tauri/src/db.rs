@@ -929,6 +929,12 @@ pub async fn body_is_stale(db: &impl ConnectionTrait, slug: &str) -> AppResult<b
 }
 
 /// Every slug whose cached body is known to be out of date.
+///
+/// Nothing in the app asks this: a reader asks about the one post in front of it
+/// via [`body_is_stale`]. It is the tests' way of seeing the whole table, which
+/// is what tells a mark that was written from one that was written *and* left
+/// behind.
+#[cfg(test)]
 pub async fn stale_bodies(
     db: &impl ConnectionTrait,
 ) -> AppResult<Vec<post_body_stale::Model>> {
