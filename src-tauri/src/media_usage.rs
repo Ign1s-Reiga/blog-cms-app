@@ -7,11 +7,17 @@
 //!
 //! ## Why this cannot be a text search
 //!
-//! A post never mentions a library key. Inserting a library image *copies* it
-//! into the post's own staging area under a fresh name
+//! A post written through the app never mentions a library key. Inserting a
+//! library image *copies* it into the post's own staging area under a fresh name
 //! (`stage_media_from_library` → `assets/<uuid>.<ext>`), and publishing copies it
 //! again into `posts/<slug>/<sha256>.<ext>` and writes that absolute URL into the
-//! Markdown. Searching bodies for `media/<uuid>.avif` finds nothing, ever.
+//! Markdown. Searching bodies for `media/<uuid>.avif` finds nothing in any of
+//! those.
+//!
+//! It is not impossible, though — a hand-written body, or an MCP client holding
+//! the bucket's public URL, can name a library object outright — so the key form
+//! is matched as well. Cheap to check, and the cost of missing one is an image
+//! deleted out from under a published post.
 //!
 //! What survives both copies is the bytes. Body images are already
 //! content-addressed — that is what makes publishing idempotent — so the sha256
@@ -125,17 +131,18 @@ pub struct UsageReport {
     pub unchecked_posts: Vec<UncheckedPost>,
 }
 
-/// Every `assets/<file>` name a body mentions.
+/// Every name a body mentions after `prefix`, stopping at whatever ends a URL
+/// in Markdown.
 ///
 /// Deliberately the same loose scan `commands::r2` uses on the publish path: it
 /// is looking at the same references, and a stricter parser here would report a
 /// post as unaffected by a deletion that the publish path would then go looking
 /// for.
-fn asset_names(body: &str) -> Vec<&str> {
+fn names_after<'a>(body: &'a str, prefix: &str) -> Vec<&'a str> {
     let mut names = Vec::new();
     let mut rest = body;
-    while let Some(pos) = rest.find("assets/") {
-        let after = &rest[pos + "assets/".len()..];
+    while let Some(pos) = rest.find(prefix) {
+        let after = &rest[pos + prefix.len()..];
         let end = after
             .find(|c: char| c == ')' || c == ']' || c == '"' || c == '\'' || c.is_whitespace())
             .unwrap_or(after.len());
@@ -146,6 +153,29 @@ fn asset_names(body: &str) -> Vec<&str> {
         rest = &after[end..];
     }
     names
+}
+
+/// Every `assets/<file>` name a body mentions — an image staged locally and not
+/// yet published.
+fn asset_names(body: &str) -> Vec<&str> {
+    names_after(body, "assets/")
+}
+
+/// Every `media/<file>` name a body mentions — a library object named outright.
+///
+/// The digest scan cannot see these. A library key holds a uuid, not a content
+/// hash, so there is nothing in one for it to match — and a body that points at
+/// `<public base>/media/<uuid>.png` is referencing the very object the media
+/// page is deciding whether to delete. Unmatched, it reads as used by nobody,
+/// and the delete takes the image out from under a published post.
+///
+/// Publishing normally rewrites images into content-addressed copies, so this is
+/// the unusual shape rather than the common one: a body written by hand, or by
+/// an MCP client that has the bucket's public URL and the key. Unusual is not a
+/// reason to miss it — this scan is the whole of what stands between a live post
+/// and a deletion.
+fn library_names(body: &str) -> Vec<&str> {
+    names_after(body, "media/")
 }
 
 /// Which of the library's digests appear in this body's published image URLs.
@@ -232,6 +262,7 @@ async fn digests_used_by(
     conn: &DatabaseConnection,
     post: &PostModel,
     library: &HashSet<&str>,
+    by_key: &HashMap<String, String>,
 ) -> AppResult<PostScan> {
     let Some(body) = crate::revisions::cached_body(app, &post.slug).await else {
         return Ok(PostScan { digests: HashSet::new(), unchecked: Some(Unchecked::BodyNotCached) });
@@ -250,6 +281,15 @@ async fn digests_used_by(
         .join("assets");
 
     let mut digests = published_digests(&body, library);
+
+    // Library objects the body names outright, resolved through the key they
+    // are stored under rather than through a hash the key does not carry.
+    for name in library_names(&body) {
+        if let Some(digest) = by_key.get(&format!("media/{name}")) {
+            digests.insert(digest.clone());
+        }
+    }
+
     for name in asset_names(&body) {
         // The same guard the publish path uses: these names reach the
         // filesystem, and a body is not necessarily something a human typed.
@@ -331,7 +371,7 @@ pub async fn survey(
         // Whatever the scan *could* see is recorded either way: those
         // references are true, and a post being partly unreadable is no reason
         // to forget the images it demonstrably uses.
-        let scan = digests_used_by(app, conn, &post, &known).await?;
+        let scan = digests_used_by(app, conn, &post, &known, &library).await?;
         for digest in scan.digests {
             by_digest.entry(digest).or_default().push(using.clone());
         }
@@ -437,6 +477,34 @@ mod tests {
                 HashSet::from([digest.clone()])
             );
         }
+    }
+
+    /// A body that names a library object outright, which the digest scan is
+    /// structurally unable to see: the key holds a uuid, and there is no hash in
+    /// it to match. Missing one means deleting an image a published post points
+    /// at.
+    #[test]
+    fn a_library_key_named_outright_is_found() {
+        let body = "\
+            ![one](https://cdn.example.com/media/7d0a1b2c.png)\n\
+            ![two](https://cdn.example.com/media/9e8f7a6b.avif \"titled\")\n\
+            <img src='https://cdn.example.com/media/deadbeef.webp'>\n";
+
+        let mut found = library_names(body);
+        found.sort();
+        assert_eq!(found, ["7d0a1b2c.png", "9e8f7a6b.avif", "deadbeef.webp"]);
+    }
+
+    /// The published form still resolves through the digest, and a post's own
+    /// content-addressed copy is not mistaken for a library key even when the
+    /// key pattern puts it under `media/`.
+    #[test]
+    fn a_published_copy_is_not_read_as_a_library_key() {
+        let body = "![x](https://cdn.example.com/media/my-post/9c1e.avif)";
+        // Named, but as a path that no flat library key can equal — so it
+        // resolves by content through `published_digests`, not by key.
+        assert_eq!(library_names(body), ["my-post/9c1e.avif"]);
+        assert!(!library_names(body).contains(&"9c1e.avif"));
     }
 
     /// Ordinary prose does not contain 64-character hex runs, and near misses
