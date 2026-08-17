@@ -13,7 +13,7 @@ use sea_orm::{DatabaseConnection, TransactionTrait};
 use crate::cloudflare::{self, cf};
 use crate::db;
 use crate::entities::post::Model as PostModel;
-use crate::entities::{post_revision, post_stage};
+use crate::entities::{post_revision, post_schedule, post_stage};
 use crate::error::{AppError, AppResult};
 use crate::imaging::{self, StagedImage};
 use crate::media_keys;
@@ -637,62 +637,7 @@ async fn save(
         return Ok(saved);
     }
 
-    let assets_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(AppError::AppDataDir)?
-        .join("assets");
-
-    let synced = async {
-        // Re-checked here, immediately before the first cloud write. The guard
-        // at the top of this function ran several awaits ago — long enough to
-        // stage a body, commit metadata and take a snapshot — and the post can
-        // be thrown away in that window. What must not happen is publishing a
-        // deleted post; the local half above is recoverable, this is not.
-        //
-        // Against `saved`, not `previous`: a brand-new post has no previous
-        // state, and its row exists from the moment the metadata commits — so
-        // it can be listed and trashed while the images are still uploading,
-        // which is the longest part of a publish.
-        refuse_if_trashed(conn, &saved).await?;
-
-        let (client, config) = cf()?;
-
-        // Referenced local images → R2 under `posts/<slug>/<sha256>.<ext>`, and
-        // the body's local `assets/<uuid>.<ext>` reference is rewritten to that
-        // object's public URL. The published Markdown is then self-contained:
-        // the blog renders it as-is with no rewriting step.
-        //
-        // Images go up before the body, so the body never lands referencing an
-        // object that isn't there yet.
-        let public_base = config.r2_public_url.trim_end_matches('/');
-        if public_base.is_empty() {
-            return Err(AppError::NoPublicUrl);
-        }
-
-        let mut published = body.clone();
-        for r in extract_asset_refs(&body) {
-            let Some((file_name, bytes)) = read_staged_asset(&assets_dir, &r).await else {
-                continue;
-            };
-            let ext = file_name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-            let key = media_keys::media_key(&config.media_key_pattern, &saved.slug, &bytes, &ext);
-            cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, content_type_for(&ext))
-                .await?;
-            published = published.replace(&r, &media_keys::public_url(public_base, &key));
-        }
-
-        // Body → R2.
-        cloudflare::upload_to_r2(&client, &config, &media_keys::body_key(&saved.slug), &published)
-            .await?;
-        // Metadata → D1, with the series reference translated into the cloud's
-        // ids — a local `series_id` would file the post under an unrelated
-        // remote series.
-        let outbound = post_for_cloud(conn, &client, &config, saved.clone()).await?;
-        cloudflare::d1_post_upsert(&client, &config, outbound).await?;
-        Ok::<(), AppError>(())
-    }
-    .await;
+    let synced = push_to_cloud(&app, conn, &saved, &body).await;
 
     let stage = if synced.is_ok() { post_stage::PUBLISHED } else { post_stage::SYNC_FAILED };
     db::stage_set(
@@ -720,6 +665,250 @@ async fn save(
         Ok(()) => Ok(saved),
         Err(e) => Err(AppError::PublishSyncFailed(Box::new(e))),
     }
+}
+
+/// Put a post's content where readers get it: images and body into R2, metadata
+/// into D1.
+///
+/// Shared by publishing and by scheduling, which need exactly the same upload
+/// and differ only in the `published` flag on the row that goes with it. A
+/// scheduled post's body is uploaded when it is *scheduled*, not when it goes
+/// live — the blog serves published rows only, so a body sitting in R2 under an
+/// unpublished post is invisible, and it means the Worker that runs the
+/// publication needs nothing but one D1 statement.
+///
+/// The referenced local images go up first, so the body never lands pointing at
+/// an object that is not there yet. Each is rewritten to its public URL, which
+/// makes the published Markdown self-contained: the blog renders it as-is, with
+/// no rewriting step of its own.
+async fn push_to_cloud(
+    app: &tauri::AppHandle,
+    conn: &DatabaseConnection,
+    post: &PostModel,
+    body: &str,
+) -> AppResult<()> {
+    // Checked here, at the last moment before anything reaches the cloud. Both
+    // callers arrive after several awaits — a publish has staged a body and
+    // taken a snapshot, a schedule has read the Markdown — and a post can be
+    // thrown away in that window. Publishing a deleted post is the one thing
+    // that cannot be taken back locally.
+    refuse_if_trashed(conn, post).await?;
+
+    let assets_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(AppError::AppDataDir)?
+        .join("assets");
+
+    let (client, config) = cf()?;
+
+    let public_base = config.r2_public_url.trim_end_matches('/');
+    if public_base.is_empty() {
+        return Err(AppError::NoPublicUrl);
+    }
+
+    let mut published = body.to_string();
+    for r in extract_asset_refs(body) {
+        let Some((file_name, bytes)) = read_staged_asset(&assets_dir, &r).await else {
+            continue;
+        };
+        let ext = file_name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        let key = media_keys::media_key(&config.media_key_pattern, &post.slug, &bytes, &ext);
+        cloudflare::upload_bytes_to_r2(&client, &config, &key, bytes, content_type_for(&ext))
+            .await?;
+        published = published.replace(&r, &media_keys::public_url(public_base, &key));
+    }
+
+    cloudflare::upload_to_r2(&client, &config, &media_keys::body_key(&post.slug), &published)
+        .await?;
+    // Metadata → D1, with the series reference translated into the cloud's ids —
+    // a local `series_id` would file the post under an unrelated remote series.
+    let outbound = post_for_cloud(conn, &client, &config, post.clone()).await?;
+    cloudflare::d1_post_upsert(&client, &config, outbound).await
+}
+
+// ─── Scheduled publishing ─────────────────────────────────────────────────────
+
+/// Ask for a post to go live at a given time.
+///
+/// The publication itself is carried out by a Cloudflare Worker on a cron
+/// trigger, because the acceptance criterion is that it happens whether or not
+/// this app is running — and a timer inside a desktop app cannot promise that.
+/// See `worker/README.md`.
+///
+/// What happens here is everything *except* the flip:
+///
+/// 1. the body and its images go to R2, and the metadata to D1 with
+///    `published` still false. The blog serves published rows only, so this is
+///    invisible to readers; it also means the Worker needs no R2 access and no
+///    knowledge of how a post is assembled.
+/// 2. a `post_schedule` row goes to D1, which is what the Worker reads.
+/// 3. the same row is mirrored locally, so the app can show the schedule
+///    offline.
+///
+/// Uploading now rather than later is the whole design. A Worker that had to
+/// assemble the post at publication time would need the R2 credentials, the
+/// image rewriting rules and the local asset cache — none of which exist in
+/// Cloudflare — and would fail at the one moment nobody is watching.
+#[tauri::command]
+pub async fn schedule_post(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+    publish_at: i64,
+) -> AppResult<crate::entities::post_schedule::Model> {
+    let post = db::get::<PostModel>(conn.inner(), post_id)
+        .await?
+        .ok_or(AppError::PostNotFound(post_id))?;
+
+    // A live post has nothing to schedule: it is already what a schedule would
+    // make it. Publishing an edit to it is the Publish button.
+    if post.published {
+        return Err(AppError::AlreadyPublished(post.slug));
+    }
+    // And a post in the trash has been deleted as far as this app is concerned.
+    // Scheduling it would put it on the blog from inside the bin — the same
+    // mistake `trash_post` refuses from the other direction.
+    refuse_if_trashed(conn.inner(), &post).await?;
+
+    let now = now_ts();
+    if publish_at <= now {
+        return Err(AppError::ScheduleInThePast(publish_at));
+    }
+
+    let body = read_post_markdown(app.clone(), conn.clone(), post.slug.clone()).await?;
+    push_to_cloud(&app, conn.inner(), &post, &body).await?;
+
+    let row = crate::entities::post_schedule::Model {
+        slug: post.slug.clone(),
+        publish_at,
+        state: post_schedule::PENDING.to_string(),
+        error: None,
+        updated_at: now,
+    };
+    let (client, config) = cf()?;
+    cloudflare::d1_schedule_upsert(&client, &config, row.clone()).await?;
+    db::schedule_set(conn.inner(), row.clone()).await?;
+
+    // The body is in R2 and the metadata is in D1; what is here and what is
+    // there agree, and the only thing still to come is the flip.
+    //
+    // Unless the text moved while it was going up. Everything above this takes a
+    // network round trip, and a save landing inside one leaves this machine
+    // holding something the cloud has not seen — recording it as synced would
+    // hide that, and would mark a draft as safe to replace with the copy that
+    // was uploaded instead of it. The schedule still stands; what is scheduled
+    // is simply the version that was sent, and the newer text reads as the
+    // unpushed edit it is.
+    let uploaded = {
+        let _guard = lock_body_commits().await;
+        if revisions::cached_body(&app, &post.slug).await.as_deref() == Some(body.as_str()) {
+            db::sync_mark_synced(
+                conn.inner(),
+                post.id,
+                sync_state::content_hash(&post, &body),
+                Some(post.updated_at),
+                now,
+            )
+            .await?;
+            true
+        } else {
+            false
+        }
+    };
+    if !uploaded {
+        log::info!(
+            "`{}` was edited while it was being scheduled; the version that went up is the one              scheduled, and the newer text stays an unpushed edit",
+            post.slug
+        );
+    }
+
+    Ok(row)
+}
+
+/// Call off a pending publication.
+///
+/// The row is kept and marked `cancelled` rather than deleted, so the app can
+/// say what became of a schedule somebody set — and so a Worker mid-run finds a
+/// row that says "do not publish this" rather than no row at all, which it
+/// could not tell from a schedule that had never existed.
+///
+/// The cancellation is conditional on the schedule still being pending **in D1**,
+/// not on what the local mirror last saw. Those differ exactly when it matters:
+/// a Worker run may have claimed the schedule seconds ago, and a cancellation
+/// that overwrote that claim would leave a row reading `cancelled` for a post
+/// that went live anyway. When that happens the local mirror is brought up to
+/// date and the attempt is reported rather than pretended.
+#[tauri::command]
+pub async fn cancel_schedule(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+) -> AppResult<crate::entities::post_schedule::Model> {
+    let post = db::get::<PostModel>(conn.inner(), post_id)
+        .await?
+        .ok_or(AppError::PostNotFound(post_id))?;
+    let existing = db::schedule_get(conn.inner(), &post.slug)
+        .await?
+        .ok_or_else(|| AppError::NotScheduled(post.slug.clone()))?;
+
+    let now = now_ts();
+    let (client, config) = cf()?;
+    if !cloudflare::d1_schedule_cancel(&client, &config, &post.slug, now).await? {
+        // Whatever the cloud now says is the truth; take a copy of it so the
+        // screen showing "scheduled" stops saying so.
+        if let Ok(Some(remote)) = cloudflare::d1_get::<crate::entities::post_schedule::Model>(
+            &client,
+            &config,
+            post.slug.clone(),
+        )
+        .await
+        {
+            db::schedule_set(conn.inner(), remote).await?;
+        }
+        return Err(AppError::ScheduleNotPending(post.slug));
+    }
+
+    let row = crate::entities::post_schedule::Model {
+        state: post_schedule::CANCELLED.to_string(),
+        error: None,
+        updated_at: now,
+        ..existing
+    };
+    db::schedule_set(conn.inner(), row.clone()).await?;
+    Ok(row)
+}
+
+/// One schedule as the desktop reads it: the stored row, plus the state it
+/// actually displays as — see [`post_schedule::Model::display_state`].
+#[derive(serde::Serialize)]
+pub struct ScheduleView {
+    pub slug: String,
+    pub publish_at: i64,
+    /// `scheduled` | `overdue` | `published` | `failed` | `cancelled` |
+    /// `unknown`.
+    pub state: &'static str,
+    pub error: Option<String>,
+    pub updated_at: i64,
+}
+
+/// Every schedule this machine knows about, soonest first.
+///
+/// Read from the local mirror, so it works offline; `sync_posts_from_cloud`
+/// brings it up to date with what the Worker has actually done.
+#[tauri::command]
+pub async fn list_schedules(conn: State<'_, DatabaseConnection>) -> AppResult<Vec<ScheduleView>> {
+    let now = now_ts();
+    Ok(db::schedules_all(conn.inner())
+        .await?
+        .into_iter()
+        .map(|row| ScheduleView {
+            state: row.display_state(now),
+            slug: row.slug,
+            publish_at: row.publish_at,
+            error: row.error,
+            updated_at: row.updated_at,
+        })
+        .collect())
 }
 
 // ─── Conflict resolution ──────────────────────────────────────────────────────

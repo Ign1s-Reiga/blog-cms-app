@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::entities::record::{Id, Record};
-use crate::entities::{post, series};
+use crate::entities::{post, post_schedule, series};
 use crate::error::{AppError, AppResult};
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -257,6 +257,11 @@ struct D1QueryResult {
 struct D1Meta {
     #[serde(default)]
     last_row_id: i64,
+    /// Rows the statement actually altered. The only way to find out whether a
+    /// conditional update matched anything — which is how a cancellation asks
+    /// "was this still mine to cancel?".
+    #[serde(default)]
+    changes: i64,
 }
 
 #[derive(Deserialize)]
@@ -356,6 +361,11 @@ fn last_row_id(env: &D1Envelope) -> i64 {
     env.result.first().map(|r| r.meta.last_row_id).unwrap_or_default()
 }
 
+/// How many rows a statement changed.
+fn rows_changed(env: &D1Envelope) -> i64 {
+    env.result.first().map(|r| r.meta.changes).unwrap_or_default()
+}
+
 // ─── D1 CRUD ──────────────────────────────────────────────────────────────────
 //
 // One implementation per operation, shared by every entity implementing
@@ -415,6 +425,61 @@ pub async fn d1_delete<M: Record>(
 /// Insert a post into D1, or update the existing row with the same `slug`
 /// (local wins). Used by the sync action to push local posts to the cloud
 /// without needing the D1 row id.
+/// Write a post's schedule to D1, replacing any existing one for that slug.
+///
+/// This is the row the Worker's cron reads, so it is the schedule — the local
+/// copy is a mirror of it. Upserted rather than inserted because rescheduling
+/// and cancelling are the same operation with a different `publish_at` or
+/// `state`, and a post has at most one pending publication.
+pub async fn d1_schedule_upsert(
+    client: &Client,
+    config: &CloudflareConfig,
+    model: post_schedule::Model,
+) -> AppResult<()> {
+    let stmt = post_schedule::Entity::insert(model.into_insert()).on_conflict(
+        OnConflict::column(post_schedule::Column::Slug)
+            .update_columns([
+                post_schedule::Column::PublishAt,
+                post_schedule::Column::State,
+                post_schedule::Column::Error,
+                post_schedule::Column::UpdatedAt,
+            ])
+            .to_owned(),
+    );
+    d1_run(client, config, stmt).await.map(|_| ())
+}
+
+/// Call off a pending publication, if it is still pending.
+///
+/// Conditional on purpose, and the condition is the whole point. A Worker run
+/// claims a schedule by moving it to `publishing` before it acts; an
+/// unconditional cancellation landing at that moment would leave a row marked
+/// `cancelled` for a post that went live seconds later — and the Worker's own
+/// write-back, which is equally guarded, would find nothing to update and say
+/// nothing about it.
+///
+/// Returns `false` when there was nothing to cancel: already claimed, already
+/// published, or already settled some other way.
+pub async fn d1_schedule_cancel(
+    client: &Client,
+    config: &CloudflareConfig,
+    slug: &str,
+    now: i64,
+) -> AppResult<bool> {
+    let stmt = post_schedule::Entity::update_many()
+        .col_expr(
+            post_schedule::Column::State,
+            Expr::value(post_schedule::CANCELLED),
+        )
+        .col_expr(post_schedule::Column::Error, Expr::value(Value::String(None)))
+        .col_expr(post_schedule::Column::UpdatedAt, Expr::value(now))
+        .filter(post_schedule::Column::Slug.eq(slug))
+        .filter(post_schedule::Column::State.eq(post_schedule::PENDING));
+
+    let env = d1_run(client, config, stmt).await?;
+    Ok(rows_changed(&env) > 0)
+}
+
 pub async fn d1_post_upsert(
     client: &Client,
     config: &CloudflareConfig,

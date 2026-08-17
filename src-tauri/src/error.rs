@@ -241,6 +241,28 @@ pub enum AppError {
     #[error("Post {0} is not in conflict")]
     NotConflicted(i32),
 
+    // ─── Scheduled publishing ─────────────────────────────────────────────────
+    #[error("Post `{0}` is already published, so there is nothing to schedule")]
+    AlreadyPublished(String),
+
+    #[error("A publication cannot be scheduled for a time that has already passed")]
+    ScheduleInThePast(i64),
+
+    #[error("Post `{0}` has no schedule")]
+    NotScheduled(String),
+
+    #[error(
+        "Post `{0}` is no longer waiting to be published — it is being published now, \
+         or already has been. Refresh to see where it stands."
+    )]
+    ScheduleNotPending(String),
+
+    #[error(
+        "Post `{0}` is scheduled to be published. Cancel the schedule first — \
+         it runs in Cloudflare, so deleting the post here would not stop it."
+    )]
+    ScheduledPostCannotBeTrashed(String),
+
     // ─── Revisions ────────────────────────────────────────────────────────────
     /// A snapshot that is no longer in the table — most likely pruned by
     /// [`crate::db::REVISIONS_PER_POST`] while its row sat on screen.

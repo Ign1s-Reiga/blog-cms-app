@@ -403,9 +403,21 @@ pub async fn trash_post(
 
     // Refuse a post that is not there rather than writing a trash row pointing
     // at nothing, which would be invisible in every listing including the trash.
-    db::get::<PostModel>(&txn, id)
+    let post = db::get::<PostModel>(&txn, id)
         .await?
         .ok_or(AppError::PostNotFound(id))?;
+
+    // A pending publication is carried out in Cloudflare, not here, so trashing
+    // the post would not stop it: the Worker would put a post on the blog that
+    // this machine has thrown away. Cancelling it needs the network, and a
+    // delete button that silently required a connection — and silently failed
+    // without one — is worse than one that says what it needs first.
+    if db::schedule_get(&txn, &post.slug)
+        .await?
+        .is_some_and(|s| s.is_in_flight())
+    {
+        return Err(AppError::ScheduledPostCannotBeTrashed(post.slug));
+    }
 
     let trashed = db::trash_set(&txn, id, now_ts()).await?;
     txn.commit().await?;
@@ -565,6 +577,11 @@ async fn purge(
         // fetch the deleted post's from R2, which is still there — the cloud's
         // copy is untouched by design.
         db::body_stale_clear(&txn, &post.slug).await?;
+        // Same reasoning, same key. The schedule is settled by now — a post
+        // with one still in flight cannot be trashed, let alone deleted — so
+        // this is the spent record of a publication, and leaving it would show
+        // it against whatever post takes the slug next.
+        db::schedule_clear(&txn, &post.slug).await?;
         db::delete::<PostModel>(&txn, post.id).await?;
         // The one thing this deletion leaves behind, and the reason it can be
         // called permanent: the cloud's copy is untouched by design, so without

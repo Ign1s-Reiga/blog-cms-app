@@ -13,8 +13,8 @@ use tauri::Manager;
 
 use crate::entities::record::{Id, Record};
 use crate::entities::{
-    post, post_body_stale, post_revision, post_stage, post_sync, post_tombstone, post_trash,
-    series,
+    post, post_body_stale, post_revision, post_schedule, post_stage, post_sync, post_tombstone,
+    post_trash, series,
 };
 use crate::error::{AppError, AppResult};
 
@@ -92,6 +92,18 @@ async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
     db.execute(&sync_tbl)
         .await
         .map_err(|e| AppError::db_init("Failed to create `post_sync` table", e))?;
+
+    // The local mirror of what is scheduled in the cloud. Unlike the tables
+    // around it this one *does* have a D1 counterpart — the Worker reads it
+    // there — and the copy here is what lets the app show a schedule offline.
+    let schedule_tbl = {
+        let mut tbl = schema.create_table_from_entity(post_schedule::Entity);
+        tbl.if_not_exists();
+        tbl
+    };
+    db.execute(&schedule_tbl)
+        .await
+        .map_err(|e| AppError::db_init("Failed to create `post_schedule` table", e))?;
 
     // Local-only as well: whose cached Markdown a refresh has outdated.
     let mut stale_tbl = schema.create_table_from_entity(post_body_stale::Entity);
@@ -905,6 +917,69 @@ pub async fn sync_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()
     Ok(())
 }
 
+// ─── Schedules (mirrored from D1) ─────────────────────────────────────────────
+
+/// Every schedule this machine knows about, soonest first.
+pub async fn schedules_all(
+    db: &impl ConnectionTrait,
+) -> AppResult<Vec<post_schedule::Model>> {
+    Ok(post_schedule::Entity::find()
+        .order_by_asc(post_schedule::Column::PublishAt)
+        .all(db)
+        .await?)
+}
+
+pub async fn schedule_get(
+    db: &impl ConnectionTrait,
+    slug: &str,
+) -> AppResult<Option<post_schedule::Model>> {
+    Ok(post_schedule::Entity::find_by_id(slug.to_string()).one(db).await?)
+}
+
+/// Write a schedule row, replacing any existing one for that slug.
+pub async fn schedule_set(
+    db: &impl ConnectionTrait,
+    model: post_schedule::Model,
+) -> AppResult<post_schedule::Model> {
+    let exists = schedule_get(db, &model.slug).await?.is_some();
+    Ok(if exists {
+        model.into_update().update(db).await?
+    } else {
+        model.into_insert().insert(db).await?
+    })
+}
+
+/// Replace the local mirror with what the cloud holds.
+///
+/// Wholesale rather than row by row, because the cloud is authoritative here:
+/// the Worker is the only thing that moves a schedule from `pending` to
+/// `published` or `failed`, and a row that has disappeared there has been dealt
+/// with. Keeping a local row the cloud no longer has would show a publication
+/// still pending that nothing will ever carry out.
+///
+/// **Must be given a transaction.** It empties the table before it refills it,
+/// and the gap in between is a local mirror that says no publication is pending
+/// for any post. `trash_post` reads that mirror to refuse deleting a post the
+/// cloud is about to publish, so a failure partway through would leave the app
+/// briefly willing to throw away a post the Worker then puts on the blog.
+pub async fn mirror_schedules(
+    db: &impl ConnectionTrait,
+    remote: Vec<post_schedule::Model>,
+) -> AppResult<usize> {
+    post_schedule::Entity::delete_many().exec(db).await?;
+    let count = remote.len();
+    for row in remote {
+        row.into_insert().insert(db).await?;
+    }
+    Ok(count)
+}
+
+/// Forget a post's schedule locally. Clearing an absent row is not an error.
+pub async fn schedule_clear(db: &impl ConnectionTrait, slug: &str) -> AppResult<()> {
+    post_schedule::Entity::delete_by_id(slug.to_string()).exec(db).await?;
+    Ok(())
+}
+
 // ─── Stale cached bodies (local only) ─────────────────────────────────────────
 
 /// Record that a post's cached Markdown is older than the cloud's — see
@@ -1610,6 +1685,54 @@ mod tests {
             crate::sync_state::SyncState::Conflict,
             "the other machine's change was about to be overwritten silently"
         );
+    }
+
+    fn schedule_row(slug: &str, publish_at: i64, state: &str) -> post_schedule::Model {
+        post_schedule::Model {
+            slug: slug.to_string(),
+            publish_at,
+            state: state.to_string(),
+            error: None,
+            updated_at: 0,
+        }
+    }
+
+    /// The cloud is authoritative about schedules: the Worker is the only thing
+    /// that moves one to `published` or `failed`, so a row that has gone there
+    /// has been dealt with. Keeping a local row the cloud no longer has would
+    /// show a publication still pending that nothing will ever carry out.
+    #[tokio::test]
+    async fn a_refresh_replaces_the_local_schedules_wholesale() {
+        let db = connect_in_memory().await.unwrap();
+        schedule_set(&db, schedule_row("stale", 100, post_schedule::PENDING)).await.unwrap();
+        schedule_set(&db, schedule_row("kept", 200, post_schedule::PENDING)).await.unwrap();
+
+        // The cloud has moved one on and knows nothing about the other.
+        let count = mirror_schedules(
+            &db,
+            vec![schedule_row("kept", 200, post_schedule::PUBLISHED)],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert!(schedule_get(&db, "stale").await.unwrap().is_none());
+        assert_eq!(
+            schedule_get(&db, "kept").await.unwrap().unwrap().state,
+            post_schedule::PUBLISHED
+        );
+    }
+
+    /// Rescheduling is the same row with a different time, not a second one.
+    #[tokio::test]
+    async fn setting_a_schedule_twice_replaces_it() {
+        let db = connect_in_memory().await.unwrap();
+        schedule_set(&db, schedule_row("a-post", 100, post_schedule::PENDING)).await.unwrap();
+        schedule_set(&db, schedule_row("a-post", 900, post_schedule::PENDING)).await.unwrap();
+
+        let all = schedules_all(&db).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].publish_at, 900);
     }
 
     /// A trashed post is deleted as far as every listing is concerned, while

@@ -5,6 +5,7 @@ import { createPortal, flushSync } from 'react-dom';
 import {
   ArrowLeft,
   Bold,
+  CalendarClock,
   Columns2,
   Eye,
   History,
@@ -173,6 +174,40 @@ type LocalSaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } 
 /// enough that ordinary typing is one write rather than one per word.
 const AUTOSAVE_DELAY_MS = 1500;
 
+/// Mirrors `ScheduleView` in `src-tauri/src/commands/r2.rs`.
+type Schedule = {
+  slug: string;
+  publish_at: number;
+  state: 'scheduled' | 'overdue' | 'published' | 'failed' | 'cancelled' | 'unknown';
+  error: string | null;
+  updated_at: number;
+};
+
+/// This post's pending publication, if it has one. Read from the whole-library
+/// query for the same reason the sync state is: a blog's worth of schedules is a
+/// handful of rows, and a second command for one of them would be surface
+/// without benefit.
+async function readSchedule(
+  invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
+  slug: string,
+): Promise<Schedule | null> {
+  try {
+    const rows = await invoke<Schedule[]>('list_schedules');
+    return rows.find((s) => s.slug === slug) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/// A `datetime-local` value for the browser's own idea of local time.
+///
+/// `toISOString` would be an hour or thirteen wrong depending on where the
+/// author is: it converts to UTC, and this input is read as wall-clock time.
+function localInputValue(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 /// The editor's content, as compared against what is already stored.
 type Content = { title: string; tags: string; body: string };
 
@@ -235,6 +270,13 @@ export function PostEditor() {
   /// Bumped whenever a load finishes, purely to re-run the debounce effect —
   /// see the `finally` in `loadFromBackend`.
   const [loadEpoch, setLoadEpoch] = useState(0);
+  /// The post's slug, which is what a schedule is keyed by. Only known once the
+  /// post has been saved at least once.
+  const [slug, setSlug] = useState<string | null>(null);
+  const [schedule, setSchedule] = useState<Schedule | null>(null);
+  /// Whether the "publish later" controls are open, and what has been picked.
+  const [scheduling, setScheduling] = useState(false);
+  const [scheduleAt, setScheduleAt] = useState('');
 
   /// Pull one post's metadata, body and sync state out of the backend into the
   /// editor. Used on mount and again after resolving a conflict, where keeping
@@ -276,9 +318,12 @@ export function PostEditor() {
         // it straight back — and, for a published post, report unpublished
         // edits nobody made.
         persisted.current = { title: post.title, tags: parseTags(post.tags), body: md };
+        setSlug(post.slug);
         loaded = true;
         const state = await readSyncState(invoke, id);
         if (keepGoing()) setSync(state);
+        const schedule = await readSchedule(invoke, post.slug);
+        if (keepGoing()) setSchedule(schedule);
       } catch (err) {
         setLocalSave({
           kind: 'failed',
@@ -511,6 +556,59 @@ export function PostEditor() {
       flush();
     };
   }, [persistLocally]);
+
+  // ── Scheduling ──────────────────────────────────────────────────────────────
+
+  /// Hand the post to Cloudflare to publish at the chosen time.
+  ///
+  /// Everything is uploaded now — see the `schedule_post` command — so the post
+  /// goes live whether or not this app is running when its time comes. Any
+  /// pending local edits are saved first, because what is scheduled is what is
+  /// uploaded, and uploading a version the author has since changed would
+  /// publish something nobody chose.
+  ///
+  /// Through `flushPending`, so a local save that did not land stops this
+  /// outright. Autosave reports its failures and carries on, which is right for
+  /// a timer and wrong here: the difference is a version going live at an hour
+  /// when nobody is watching, and the error message would already be gone.
+  const submitSchedule = async () => {
+    if (postId === null || scheduleAt === '') return;
+    const at = Math.floor(new Date(scheduleAt).getTime() / 1000);
+    if (Number.isNaN(at)) return;
+
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
+    if (!isTauri()) return;
+    setSaveState({ kind: 'saving', publish: false });
+    try {
+      await flushPending();
+      await enqueueWrite(() => invoke('schedule_post', { postId, publishAt: at }));
+      if (slug !== null) setSchedule(await readSchedule(invoke, slug));
+      setScheduling(false);
+      setSaveState({ kind: 'idle' });
+      setSync(await readSyncState(invoke, postId));
+    } catch (err) {
+      setSaveState({ kind: 'error', message: String(err) });
+      setTimeout(() => setSaveState({ kind: 'idle' }), 6000);
+    }
+  };
+
+  /// Call off a pending publication. The post stays exactly where it is — an
+  /// unpublished draft whose body happens to already be in R2, invisible to
+  /// readers until something publishes it.
+  const cancelSchedule = async () => {
+    if (postId === null) return;
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
+    if (!isTauri()) return;
+    setSaveState({ kind: 'saving', publish: false });
+    try {
+      await enqueueWrite(() => invoke('cancel_schedule', { postId }));
+      if (slug !== null) setSchedule(await readSchedule(invoke, slug));
+      setSaveState({ kind: 'idle' });
+    } catch (err) {
+      setSaveState({ kind: 'error', message: String(err) });
+      setTimeout(() => setSaveState({ kind: 'idle' }), 6000);
+    }
+  };
 
   // Save the post: `publish=false` keeps it a local draft; `publish=true` also
   // pushes the body to R2 and metadata to D1 (see the `save_post` command).
@@ -1237,6 +1335,84 @@ export function PostEditor() {
           >
             {saveState.kind === 'saving' && !saveState.publish ? 'Saving…' : 'Save Draft'}
           </Button>
+
+          {/* Publishing later. Offered only for a saved, unpublished post: a
+              live post has nothing to schedule, and a post with no row yet has
+              no slug for the schedule to name. */}
+          {postId !== null && !live && (
+            <div className='relative'>
+              {schedule?.state === 'scheduled' || schedule?.state === 'overdue' ? (
+                <Button
+                  variant='outline'
+                  size='sm'
+                  onClick={() => void cancelSchedule()}
+                  disabled={saveState.kind === 'saving'}
+                  title={`Cloudflare publishes this at ${new Date(schedule.publish_at * 1000).toLocaleString()}. Cancelling leaves it an unpublished draft.`}
+                  className='h-[28px] px-2 gap-1.5 rounded-[5px] text-[12px] font-semibold text-indigo-600 dark:text-indigo-400'
+                >
+                  <CalendarClock size={13} strokeWidth={2} />
+                  {schedule.state === 'overdue' ? 'Overdue — cancel' : 'Cancel schedule'}
+                </Button>
+              ) : (
+                <Button
+                  variant='outline'
+                  size='sm'
+                  onClick={() => {
+                    // Default to an hour from now: far enough ahead to be a real
+                    // choice, near enough to be edited rather than retyped.
+                    const inAnHour = new Date(Date.now() + 60 * 60 * 1000);
+                    setScheduleAt(localInputValue(inAnHour));
+                    setScheduling((open) => !open);
+                  }}
+                  disabled={saveState.kind === 'saving'}
+                  className='h-[28px] px-2 gap-1.5 rounded-[5px] text-[12px] font-semibold text-zinc-600 dark:text-zinc-400'
+                >
+                  <CalendarClock size={13} strokeWidth={2} />
+                  Schedule
+                </Button>
+              )}
+
+              {scheduling && (
+                <div className='absolute right-0 top-[34px] z-50 w-[300px] rounded-[8px] border border-zinc-200 bg-white p-3 shadow-xl shadow-black/[0.06] dark:border-white/10 dark:bg-zinc-900 dark:shadow-black/40'>
+                  <label
+                    htmlFor='schedule-at'
+                    className='block text-[12px] font-semibold text-zinc-700 dark:text-zinc-300'
+                  >
+                    Publish at
+                  </label>
+                  <input
+                    id='schedule-at'
+                    type='datetime-local'
+                    value={scheduleAt}
+                    onChange={(e) => setScheduleAt(e.target.value)}
+                    className='mt-1.5 w-full rounded-[5px] border border-zinc-200 bg-white px-2 py-1.5 text-[12px] text-zinc-800 outline-none focus:border-zinc-400 dark:border-white/10 dark:bg-zinc-950 dark:text-zinc-200 dark:focus:border-white/30'
+                  />
+                  <p className='mt-2 text-[11px] leading-[1.5] text-zinc-500 dark:text-zinc-500'>
+                    The post is uploaded now and goes live at this time, published by Cloudflare — so it happens whether
+                    or not this app is running. Readers see nothing until then.
+                  </p>
+                  <div className='mt-3 flex items-center justify-end gap-2'>
+                    <Button
+                      variant='ghost'
+                      size='sm'
+                      onClick={() => setScheduling(false)}
+                      className='h-[26px] px-2 rounded-[5px] text-[12px] font-semibold text-zinc-500'
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size='sm'
+                      onClick={() => void submitSchedule()}
+                      disabled={scheduleAt === '' || saveState.kind === 'saving'}
+                      className='h-[26px] px-3 rounded-[5px] text-[12px] font-semibold'
+                    >
+                      Schedule
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           <Button
             size='sm'
