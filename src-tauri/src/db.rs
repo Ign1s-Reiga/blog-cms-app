@@ -13,7 +13,8 @@ use tauri::Manager;
 
 use crate::entities::record::{Id, Record};
 use crate::entities::{
-    post, post_revision, post_stage, post_sync, post_tombstone, post_trash, series,
+    post, post_body_stale, post_revision, post_stage, post_sync, post_tombstone, post_trash,
+    series,
 };
 use crate::error::{AppError, AppResult};
 
@@ -91,6 +92,13 @@ async fn ensure_schema(db: &DatabaseConnection) -> AppResult<()> {
     db.execute(&sync_tbl)
         .await
         .map_err(|e| AppError::db_init("Failed to create `post_sync` table", e))?;
+
+    // Local-only as well: whose cached Markdown a refresh has outdated.
+    let mut stale_tbl = schema.create_table_from_entity(post_body_stale::Entity);
+    stale_tbl.if_not_exists();
+    db.execute(&stale_tbl)
+        .await
+        .map_err(|e| AppError::db_init("Failed to create `post_body_stale` table", e))?;
 
     // Local-only as well: which slugs have been deleted here for good. See
     // `post_tombstone` for why "forever" needs writing down.
@@ -629,10 +637,18 @@ async fn upsert_post_from_remote(
 
     // Whether the body cached for this post can still be trusted. The refresh
     // never fetches it, so a cloud copy that has moved since the version this
-    // machine held means the cached Markdown is an older one — see
-    // `Mirrored::stale_bodies`. A post arriving for the first time has no
-    // cached body to be stale.
-    Ok(previous_updated_at.is_some_and(|had| had != remote_updated_at))
+    // machine held means the cached Markdown is an older one. A post arriving
+    // for the first time has no cached body to be stale.
+    //
+    // Recorded here, in the transaction that advances the metadata, rather than
+    // left to the caller's file deletion: that deletion can fail, and by then
+    // the baseline has moved and no later refresh would notice again. The row
+    // outlives the attempt — see `post_body_stale`.
+    let stale = previous_updated_at.is_some_and(|had| had != remote_updated_at);
+    if stale {
+        body_stale_set(db, &saved.slug, chrono::Utc::now().timestamp()).await?;
+    }
+    Ok(stale)
 }
 
 /// Refuse to write a side-table row for a post that no longer exists.
@@ -902,6 +918,42 @@ pub async fn sync_mark_synced(
 /// Forget a post's sync record. Clearing an absent row is not an error.
 pub async fn sync_clear(db: &impl ConnectionTrait, post_id: i32) -> AppResult<()> {
     post_sync::Entity::delete_by_id(post_id).exec(db).await?;
+    Ok(())
+}
+
+// ─── Stale cached bodies (local only) ─────────────────────────────────────────
+
+/// Record that a post's cached Markdown is older than the cloud's — see
+/// [`post_body_stale`].
+pub async fn body_stale_set(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    since: i64,
+) -> AppResult<()> {
+    if post_body_stale::Entity::find_by_id(slug.to_string()).one(db).await?.is_some() {
+        return Ok(());
+    }
+    post_body_stale::ActiveModel { slug: Set(slug.to_string()), since: Set(since) }
+        .insert(db)
+        .await?;
+    Ok(())
+}
+
+/// Is this post's cached body known to be out of date?
+pub async fn body_is_stale(db: &impl ConnectionTrait, slug: &str) -> AppResult<bool> {
+    Ok(post_body_stale::Entity::find_by_id(slug.to_string()).one(db).await?.is_some())
+}
+
+/// Every slug whose cached body is known to be out of date.
+pub async fn stale_bodies(
+    db: &impl ConnectionTrait,
+) -> AppResult<Vec<post_body_stale::Model>> {
+    Ok(post_body_stale::Entity::find().all(db).await?)
+}
+
+/// The cached body is gone or has been replaced, so the mark goes with it.
+pub async fn body_stale_clear(db: &impl ConnectionTrait, slug: &str) -> AppResult<()> {
+    post_body_stale::Entity::delete_by_id(slug.to_string()).exec(db).await?;
     Ok(())
 }
 

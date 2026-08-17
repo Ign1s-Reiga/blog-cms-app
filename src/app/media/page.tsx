@@ -28,7 +28,7 @@ type MediaItem = {
 type UncheckedPost = {
   id: number;
   title: string;
-  reason: 'body_not_cached' | 'pending_edits' | 'asset_unreadable';
+  reason: 'body_not_cached' | 'pending_edits' | 'asset_unreadable' | 'body_stale';
 };
 
 /// Said plainly, because each reason has a different way out.
@@ -36,6 +36,7 @@ const UNCHECKED_REASON: Record<UncheckedPost['reason'], string> = {
   body_not_cached: 'its text is not on this machine; open it once to bring it down',
   pending_edits: 'it is live with unpublished edits, so readers see a version this machine does not have',
   asset_unreadable: 'it points at a staged image that is missing, so one of its references cannot be identified',
+  body_stale: 'its text here is older than the published version; open it once to bring the current one down',
 };
 
 /// Mirrors `UsingPost` in `src-tauri/src/media_usage.rs`.

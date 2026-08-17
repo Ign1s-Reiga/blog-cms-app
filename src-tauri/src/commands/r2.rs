@@ -265,7 +265,11 @@ async fn restore_metadata(
 /// Keyed by slug (not id) so it works for posts sourced from D1, whose ids don't
 /// match the local cache.
 #[tauri::command]
-pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> AppResult<String> {
+pub async fn read_post_markdown(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    slug: String,
+) -> AppResult<String> {
     // The slug builds a local file path and an R2 key, so reject anything that
     // isn't a strict slug (guards against path traversal / injection).
     if !media_keys::is_safe_slug(&slug) {
@@ -279,9 +283,15 @@ pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> AppResul
         .join("posts");
     let local_path = dir.join(format!("{slug}.md"));
 
-    // 1. Local cache hit.
-    if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
-        return Ok(content);
+    // 1. Local cache hit — unless a refresh has marked it out of date. That
+    //    mark means the cloud's copy moved on while this file did not, so
+    //    serving it would hand back an older version of a post the app already
+    //    describes as current. See `post_body_stale`.
+    let stale = db::body_is_stale(conn.inner(), &slug).await.unwrap_or(false);
+    if !stale {
+        if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
+            return Ok(content);
+        }
     }
 
     // 2. Not cached locally — download from R2.
@@ -297,9 +307,12 @@ pub async fn read_post_markdown(app: tauri::AppHandle, slug: String) -> AppResul
     let key = media_keys::body_key(&slug);
     match cloudflare::download_from_r2(&client, &config, &key).await? {
         Some(content) => {
-            // Cache locally for next time (best effort).
+            // Cache locally for next time (best effort). This *is* the cloud's
+            // current copy, so whatever was stale about the old one is settled.
             let _ = tokio::fs::create_dir_all(&dir).await;
-            let _ = tokio::fs::write(&local_path, &content).await;
+            if tokio::fs::write(&local_path, &content).await.is_ok() {
+                let _ = db::body_stale_clear(conn.inner(), &slug).await;
+            }
             Ok(content)
         }
         None => Ok(String::new()),

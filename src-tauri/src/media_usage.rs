@@ -86,6 +86,10 @@ pub enum Unchecked {
     /// It references a staged asset that could not be read, so one of its
     /// references cannot be resolved to an image.
     AssetUnreadable,
+    /// Its cached Markdown is older than the cloud's — a refresh moved the
+    /// metadata on and the body did not follow. What the cached text references
+    /// is not what the post references now.
+    BodyStale,
 }
 
 /// A post the survey could not fully account for, and why.
@@ -233,13 +237,18 @@ async fn digests_used_by(
         return Ok(PostScan { digests: HashSet::new(), unchecked: Some(Unchecked::BodyNotCached) });
     };
 
+    // The body is here, and known to be behind the cloud's. Whatever it
+    // references was true of an older version of this post.
+    let mut unchecked = db::body_is_stale(conn, &post.slug)
+        .await?
+        .then_some(Unchecked::BodyStale);
+
     let assets_dir = app
         .path()
         .app_data_dir()
         .map_err(AppError::AppDataDir)?
         .join("assets");
 
-    let mut unchecked = None;
     let mut digests = published_digests(&body, library);
     for name in asset_names(&body) {
         // The same guard the publish path uses: these names reach the

@@ -247,8 +247,10 @@ pub async fn sync_posts_from_cloud(
     // and a post with unpushed edits is left out of the refresh entirely, so its
     // cached body is the author's own work and must not be thrown away.
     //
-    // Best effort. Failing to clear a cache is not worth failing a refresh over,
-    // and the next one will try again.
+    // The *fact* is already durable — `mirror_posts` recorded it in the same
+    // transaction as the metadata — so this deletion is genuinely best effort:
+    // one that fails leaves the row in place, and everything that reads a body
+    // keeps treating this post as unresolved until a fresh copy replaces it.
     for slug in &mirrored.stale_bodies {
         if !media_keys::is_safe_slug(slug) {
             continue;
@@ -256,9 +258,15 @@ pub async fn sync_posts_from_cloud(
         match posts_dir(&app).await {
             Ok(dir) => {
                 let path = dir.join(format!("{slug}.md"));
-                if let Err(e) = tokio::fs::remove_file(&path).await {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        log::warn!("Could not clear the stale body {}: {e}", path.display());
+                match tokio::fs::remove_file(&path).await {
+                    Ok(()) => {
+                        let _ = db::body_stale_clear(conn.inner(), slug).await;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        let _ = db::body_stale_clear(conn.inner(), slug).await;
+                    }
+                    Err(e) => {
+                        log::warn!("Could not clear the stale body {}: {e}", path.display())
                     }
                 }
             }

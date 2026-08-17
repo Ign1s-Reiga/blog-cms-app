@@ -282,7 +282,7 @@ impl BlogMcp {
         let (stage, sync) = self.state_of(post.id).await;
         // Goes through the command so a post whose body only exists in R2 is
         // downloaded and cached, exactly as it would be for the editor.
-        let body = commands::read_post_markdown(self.app.clone(), post.slug.clone())
+        let body = commands::read_post_markdown(self.app.clone(), self.conn(), post.slug.clone())
             .await
             .map_err(internal)?;
         Ok(Json(to_out(post, stage, sync, Some(body))))
@@ -368,7 +368,7 @@ impl BlogMcp {
         // Nothing here has been written yet, so failing is simply a no-op.
         let body = match &params.body {
             Some(body) => body.clone(),
-            None => commands::read_post_markdown(self.app.clone(), slug.clone())
+            None => commands::read_post_markdown(self.app.clone(), self.conn(), slug.clone())
                 .await
                 .map_err(internal)?,
         };
