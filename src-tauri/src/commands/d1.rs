@@ -13,6 +13,7 @@ use crate::entities::post::Model as PostModel;
 use crate::entities::post_stage;
 use crate::entities::series::Model as SeriesModel;
 use crate::error::{AppError, AppResult};
+use crate::media_keys;
 use super::*;
 
 // ── Posts: Cloudflare D1 ────────────────────────────────────────────────────────
@@ -228,10 +229,42 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize>
 /// The cloud's series table comes down alongside the posts, because a post's
 /// remote `series_id` cannot be read without it.
 #[tauri::command]
-pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> AppResult<usize> {
+pub async fn sync_posts_from_cloud(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+) -> AppResult<usize> {
     let (client, config) = cf()?;
     let remote = cloudflare::d1_list::<PostModel>(&client, &config).await?;
     let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
-    let (upserted, _deleted) = db::mirror_posts(conn.inner(), remote, &remote_series).await?;
-    Ok(upserted)
+    let mirrored = db::mirror_posts(conn.inner(), remote, &remote_series).await?;
+
+    // A post whose cloud copy moved on has a cached body from before that move,
+    // and the refresh does not fetch bodies — so the file on disk is an older
+    // version of a post the metadata now describes as current. Dropping it
+    // makes the next read fetch the real thing.
+    //
+    // Only for posts with nothing pending locally: `mirror_posts` reports these,
+    // and a post with unpushed edits is left out of the refresh entirely, so its
+    // cached body is the author's own work and must not be thrown away.
+    //
+    // Best effort. Failing to clear a cache is not worth failing a refresh over,
+    // and the next one will try again.
+    for slug in &mirrored.stale_bodies {
+        if !media_keys::is_safe_slug(slug) {
+            continue;
+        }
+        match posts_dir(&app).await {
+            Ok(dir) => {
+                let path = dir.join(format!("{slug}.md"));
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        log::warn!("Could not clear the stale body {}: {e}", path.display());
+                    }
+                }
+            }
+            Err(e) => log::warn!("Could not resolve the posts dir to clear stale bodies: {e}"),
+        }
+    }
+
+    Ok(mirrored.upserted)
 }
