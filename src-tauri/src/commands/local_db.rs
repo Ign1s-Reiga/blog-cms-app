@@ -559,6 +559,12 @@ async fn purge(
         db::sync_clear(&txn, post.id).await?;
         db::revisions_clear(&txn, post.id).await?;
         db::trash_clear(&txn, post.id).await?;
+        // Keyed by slug rather than id, and a slug outlives the post: nothing
+        // stops a later post being given the same title. Left behind, the mark
+        // would tell that post's first read to ignore its own cached body and
+        // fetch the deleted post's from R2, which is still there — the cloud's
+        // copy is untouched by design.
+        db::body_stale_clear(&txn, &post.slug).await?;
         db::delete::<PostModel>(&txn, post.id).await?;
         // The one thing this deletion leaves behind, and the reason it can be
         // called permanent: the cloud's copy is untouched by design, so without
