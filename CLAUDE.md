@@ -94,9 +94,17 @@ Codex reviews pull requests in this repository automatically — on open, on
 every case a manual call would, so asking again only duplicates a review that is
 coming anyway. Push the fix and wait for the review that the push triggers.
 
-Reply to findings in a normal PR comment: say what was changed and why, and say
-plainly when a finding is wrong and what the evidence is. A finding you disagree
-with still needs an answer.
+**Do not comment on pull requests at all.** The repository owner writes every
+comment on a PR, including the replies to review findings. This is not about
+who is right — it is that the PR conversation is theirs, and an agent posting
+into it puts words in the discussion they are meant to be holding.
+
+Answer findings in the work instead. Fix what is real, and put the reasoning in
+the commit message: what was wrong, why the fix is the right shape, and — when a
+finding does not hold — what the evidence is that it does not. The commit is a
+better home for it anyway, since it stays attached to the change after the PR is
+closed. Report the same summary to the person you are working with, and let them
+decide what goes on the PR.
 
 ## Common Commands
 
