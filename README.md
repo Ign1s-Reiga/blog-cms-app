@@ -10,9 +10,11 @@ schedule — and the app tracks, per post, how the local copy compares with what
 served.
 
 > **Status — v1.6.0.** Posts, media, publishing, scheduling, revisions, trash, sync-conflict
-> resolution, an MCP endpoint, and in-app updates all work end to end. Installers are built for
-> **Windows** only, and the Analytics route is still a placeholder — the dashboard carries an R2/D1
-> usage card instead. See [Roadmap](#roadmap).
+> resolution, an MCP endpoint, and in-app updates all work end to end. The Analytics route is still a
+> placeholder — the dashboard carries an R2/D1 usage card instead. See [Roadmap](#roadmap).
+>
+> **Windows is the target platform.** It is what the release workflow builds installers for and the
+> only platform with a keychain backend; the app is not currently developed against macOS or Linux.
 
 ---
 
@@ -34,7 +36,8 @@ served.
   Scheduled, Failed, and Trash.
 - **Trash** — deleting is a local soft delete. A published post that is trashed **stays live**;
   emptying the trash is the only path that is final.
-- **Import** an existing `.md` file as a draft, front-matter and all.
+- **Import** an existing `.md` file as a draft. YAML front matter is **stripped**, not read: the
+  title comes from the file name and tags start empty, so metadata is re-entered in the app.
 - **Series** for grouping related posts — modelled and synced, though there is no management screen
   yet (see [Roadmap](#roadmap)).
 
@@ -151,9 +154,8 @@ blog-cms-app/
 - **Node.js 20.9+** (CI builds on 26) and **[pnpm](https://pnpm.io)** 11
 - **Rust 1.88+** — install via [rustup](https://rustup.rs). Raised above Tauri's own floor by
   `rmcp`.
-- Tauri OS dependencies — see the
-  [Tauri prerequisites guide](https://tauri.app/start/prerequisites/) (on Windows: **WebView2** and
-  the MSVC build tools)
+- **WebView2** and the **MSVC build tools** — see the
+  [Tauri prerequisites guide](https://tauri.app/start/prerequisites/)
 - **Access to GitHub Packages.** `@ign1s-reiga/marked-presets` is published there rather than to
   npm, so `pnpm install` needs a token with `read:packages`:
 
@@ -283,9 +285,23 @@ everything a reader would notice (title, excerpt, tags, published flag, body):
 | **Conflict**    | Both sides changed. Nothing is applied until you say which wins.    |
 | **SyncFailed**  | The last push failed, so the local edits are not live.              |
 
-Pushing a post uploads its body and any staged images to R2, rewrites the image URLs to absolute ones
-under the public origin, then upserts the metadata row in D1 — R2 first, so a failure never leaves D1
-pointing at an object that is not there. Pulling mirrors D1 back down over the local cache.
+Three actions reach the cloud, and they do different amounts of work:
+
+| Action                                | What it sends                                                 |
+| ------------------------------------- | ------------------------------------------------------------- |
+| **Publish** (editor) and **Schedule** | Staged images and the body to R2, then the metadata row to D1 |
+| **Push to cloud** (header)            | Metadata only, for the whole library — upsert by slug         |
+| **Publish** / **Unpublish** (list)    | Flips `published` in D1; no body is uploaded                  |
+| **Refresh**                           | Mirrors D1 back down over the local cache                     |
+
+Saving a draft stays entirely local. Publishing sends the images first — each rewritten to its
+absolute URL under the public origin, which is what makes the Markdown the blog serves
+self-contained — then the body, then the D1 row: R2 first, so a failure never leaves D1 pointing at
+an object that is not there.
+
+**Push to cloud is metadata only.** It is how a title, tag or series change reaches the blog without
+re-uploading anything, but a post whose _body_ has been edited needs a publish before readers see the
+new text.
 
 ## Scheduled publishing
 
@@ -294,9 +310,18 @@ a Cloudflare Worker on a cron trigger carries it out. Everything that can fail �
 rewriting, the upload — happens while somebody is watching; what is left for the unattended moment is
 a single `UPDATE`.
 
-Scheduling therefore needs the Worker deployed and its migration applied. Without it, a scheduled
-post simply stays a draft and shows as **overdue** in the posts list. Setup is in
-[worker/README.md](worker/README.md).
+Scheduling therefore needs the Worker deployed and its migration applied, and the two are missed
+differently:
+
+- **No `post_schedule` table** (the migration was never applied) — scheduling **fails**. The app
+  cannot record the schedule, so it undoes the local half and reports the error; the post stays a
+  draft with no schedule against it. Its body is already in R2 by then, which is harmless: the blog
+  serves published rows only.
+- **Table present, Worker not running** — the schedule is recorded but nothing acts on it, and the
+  post shows as **overdue** in the posts list once its time passes. That state is not stored
+  anywhere; it is what "the cron has not run" looks like from the outside.
+
+Setup is in [worker/README.md](worker/README.md).
 
 ## MCP server
 
@@ -317,7 +342,8 @@ approve or reject in the same card.
 The endpoint binds `127.0.0.1` (port **4127** by default, path `/mcp`) and requires
 `Authorization: Bearer <token>`. Loopback keeps it off the network; the token keeps other local
 software from using it just by knowing the port. The token is generated on first use and kept in the
-OS keychain. Point a client at:
+OS keychain — or, where no keychain backend accepts it, written to `mcp.json` in plain text, the same
+split the Cloudflare token falls back on. Point a client at:
 
 ```text
 http://127.0.0.1:4127/mcp
@@ -394,7 +420,6 @@ They are placed under `src/app/components/ui/`.
 ## Roadmap
 
 - [ ] Analytics route — post performance and traffic (the dashboard has R2/D1 usage today)
-- [ ] macOS and Linux installers, and a keychain backend for both
 - [ ] Series management UI (the backend commands exist; the screens do not)
 - [ ] Media library beyond images — video and other assets
 
