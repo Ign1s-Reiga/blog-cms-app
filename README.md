@@ -144,7 +144,7 @@ blog-cms-app/
 ├── worker/                      # Cloudflare Worker: scheduled publishing
 │   ├── src/index.ts
 │   ├── migrations/
-│   ├── wrangler.jsonc
+│   ├── wrangler.toml
 │   └── README.md
 └── .github/workflows/           # ci.yml, release.yml
 ```

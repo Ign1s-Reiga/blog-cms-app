@@ -1,0 +1,23 @@
+name = "blog-cms-scheduler"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+# Every five minutes. The desktop app only ever schedules to the minute, so
+# this is the resolution the feature actually offers — worth saying out loud
+# rather than implying a precision the cron does not have.
+[triggers]
+crons = ["*/5 * * * *"]
+
+# The same database the blog and the CMS use. Fill in `database_name` and
+# `database_id` from `wrangler d1 list` before deploying; they identify one
+# specific account's database and are deliberately not committed with values.
+[[d1_databases]]
+binding = "DB"
+database_name = "<your-d1-database>"
+database_id = "<your-d1-database-id>"
+migrations_dir = "migrations"
+
+# A scheduled publication that fails leaves a row saying so, but the run that
+# produced it is only visible here.
+[observability]
+enabled = true

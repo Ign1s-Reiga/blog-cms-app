@@ -29,14 +29,14 @@ blog serves published rows only, so it is invisible to readers until the flip.
 
 Both steps need the Cloudflare account that owns the blog's D1 database.
 
-1. **Point the config at your database.** In `wrangler.jsonc`, replace
+1. **Point the config at your database.** In `wrangler.toml`, replace
    `<your-d1-database>` and `<your-d1-database-id>` with the values from
    `pnpm exec wrangler d1 list`.
 
 2. **Create the table.**
 
    ```sh
-   pnpm exec wrangler d1 migrations apply <your-d1-database> --remote -c worker/wrangler.jsonc
+   pnpm exec wrangler d1 migrations apply <your-d1-database> --remote -c worker/wrangler.toml
    ```
 
    Until this has run, the desktop app's Refresh logs a warning about schedules
@@ -47,7 +47,7 @@ Both steps need the Cloudflare account that owns the blog's D1 database.
 3. **Deploy.**
 
    ```sh
-   pnpm exec wrangler deploy -c worker/wrangler.jsonc
+   pnpm exec wrangler deploy -c worker/wrangler.toml
    ```
 
 4. **Check it.** The Worker has no HTTP API — a `workers.dev` URL is reachable
@@ -56,11 +56,11 @@ Both steps need the Cloudflare account that owns the blog's D1 database.
    instead:
 
    ```sh
-   pnpm exec wrangler dev -c worker/wrangler.jsonc --test-scheduled
+   pnpm exec wrangler dev -c worker/wrangler.toml --test-scheduled
    curl 'http://localhost:8787/__scheduled'
    ```
 
-   For the deployed copy, `pnpm exec wrangler tail -c worker/wrangler.jsonc`
+   For the deployed copy, `pnpm exec wrangler tail -c worker/wrangler.toml`
    prints each run's summary as it happens.
 
 ## States
