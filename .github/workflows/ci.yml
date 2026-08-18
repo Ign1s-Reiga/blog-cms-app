@@ -66,7 +66,7 @@ jobs:
         run: pnpm run build
 
   backend:
-    name: Check Rust backend
+    name: Test Rust backend
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -109,8 +109,13 @@ jobs:
       - name: Build static export
         run: pnpm run build
 
-      - name: cargo check
-        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+      # `cargo test` compiles and links every target before running anything, so
+      # it covers what `cargo check` did and then some: check stops at type
+      # analysis and never reaches code generation, so a monomorphisation or
+      # linker error could pass here and fail only when the installers were
+      # built — or at a release tag.
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
   # `paths:` only exists on the workflow trigger, not per job, so filtering
   # there would skip the lint and check jobs too. This computes the answer for
@@ -145,10 +150,21 @@ jobs:
           # The frontend is embedded in the installer, so a .tsx change does
           # alter the shipped binary — but `Lint & build frontend` already
           # compiles it, and what this job uniquely proves is NSIS/MSI
-          # packaging, which turns on the Rust crate, the Tauri config, and the
-          # dependency set. `ci.yml` is included so a change to this job is
-          # still exercised by it.
-          if echo "$changed" | grep -qE '^(src-tauri/|package\.json$|pnpm-lock\.yaml$|\.github/workflows/ci\.yml$)'; then
+          # packaging: the bundle configuration, the icons, the embedded
+          # manifest and capabilities, and the dependency set. `ci.yml` is
+          # included so a change to this job is still exercised by it.
+          #
+          # `src-tauri/src/` and `src-tauri/tests/` are deliberately absent.
+          # Rust source cannot reach the packaging step, and `Test Rust backend`
+          # now compiles and links every target, so the code generation this
+          # used to be relied on for is covered there in a third of the time.
+          # What is left uncovered is a failure that appears only under the
+          # release profile, which the release workflow would still catch at the
+          # tag — the same place this job exists to move failures away from —
+          # so it is a real if narrow gap, accepted because it is rare and
+          # because rebuilding installers for every source edit was not paying
+          # for itself.
+          if echo "$changed" | grep -qE '^(src-tauri/(tauri\.conf\.json|Cargo\.(toml|lock)|build\.rs|(icons|capabilities|gen|manifests)/)|package\.json$|pnpm-lock\.yaml$|\.github/workflows/ci\.yml$)'; then
             echo "bundle=true" >> "$GITHUB_OUTPUT"
             echo "-> installers affected; building."
           else
