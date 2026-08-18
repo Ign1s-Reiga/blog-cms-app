@@ -321,7 +321,9 @@ differently:
 - **No `post_schedule` table** (the migration was never applied) — scheduling **fails**. The app
   cannot record the schedule, so it undoes the local half and reports the error; the post stays a
   draft with no schedule against it. Its body is already in R2 by then, which is harmless: the blog
-  serves published rows only.
+  serves published rows only. That undo is best effort, so if the local write fails too the schedule
+  survives on this machine and does show as overdue — rare, and covered in
+  [worker/README.md](worker/README.md).
 - **Table present, Worker not running** — the schedule is recorded but nothing acts on it, and the
   post shows as **overdue** in the posts list once its time passes. That state is not stored
   anywhere; it is what "the cron has not run" looks like from the outside.

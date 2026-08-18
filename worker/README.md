@@ -81,9 +81,15 @@ state is not stored anywhere, because nothing is running to store it: it is what
 "the cron has not run" looks like from the outside, and the cause is this Worker
 not being deployed — or deployed and not firing.
 
-A missing migration cannot produce it. Without the table there is no `pending`
-row to go overdue: `schedule_post` fails at the point of writing it, undoes the
-local half, and reports the error, so the post stays a draft that was never
-scheduled. The two failures look nothing alike from the app, which is the useful
-part — an error at scheduling time means the table, and silence past the hour
-means the cron.
+A missing migration will not produce it, short of a second failure. Without the
+table there is no `pending` row to go overdue: `schedule_post` fails at the point
+of writing it, undoes the local half, and reports the error, so the post stays a
+draft that was never scheduled. The two failures look nothing alike from the app,
+which is the useful part — an error at scheduling time means the table, and
+silence past the hour means the cron.
+
+The undo is best effort, though, and that is the exception. The local row is
+written first, and if clearing it fails as well the row survives — reading as
+overdue once its time passes, with no refresh able to correct it while the table
+is still missing. That takes a local SQLite write failing on top of the missing
+table, so it is rare rather than impossible.
