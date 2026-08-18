@@ -247,10 +247,15 @@ One further table, `post_schedule`, **is** owned here — its migration ships wi
 | `posts/<slug>/<sha256>.<ext>`  | An image used in a body. Free to re-shape.               |
 | `media/<uuid>.<ext>`           | The reusable media library.                              |
 
-The last two patterns are configurable in `Settings → Media`. Body images are **content-addressed**,
-which is what makes publishing idempotent: re-publishing an unchanged post rewrites the same key
-with the same bytes. The thumbnail's name is fixed because the blog derives it from the slug alone —
-change that pattern and thumbnails 404 silently.
+The **thumbnail** and **body image** patterns are configurable in `Settings → Media`. The body key
+and the `media/` library prefix are not — the blog fetches the body by name, and the library prefix
+is built into the code that lists and deletes from it.
+
+Body images are **content-addressed**, which is what makes publishing idempotent: re-publishing an
+unchanged post rewrites the same key with the same bytes. The thumbnail pattern is settable but not
+free: the blog derives that key from the slug alone, so it must match `thumbnailKey` there. Change
+one side without the other and thumbnails 404 silently, because a missing object is not an error
+anybody sees.
 
 ## Local data
 
