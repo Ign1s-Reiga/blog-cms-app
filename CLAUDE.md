@@ -87,12 +87,17 @@ A desktop application built with **Tauri** and **Next.js** designed for managing
 
 ## Code Review
 
-Codex reviews pull requests in this repository automatically — on open, on
-"ready for review", and on each push to an open PR.
+Codex reviews pull requests in this repository automatically — on open and on
+"ready for review". **A push to an open PR does not trigger a review**, so a
+follow-up commit answering review findings is not reviewed by the act of pushing
+it. Only an `@codex review` comment or another ready-for-review transition asks
+for a second pass.
 
-**Do not post `@codex review` comments.** The automatic trigger already covers
-every case a manual call would, so asking again only duplicates a review that is
-coming anyway. Push the fix and wait for the review that the push triggers.
+**Do not post `@codex review` comments** — not because a review is coming anyway,
+but for the reason below: the PR conversation belongs to the repository owner.
+Push the fix, then say plainly that the new commit is unreviewed and that
+triggering another pass is theirs to do. Waiting silently for a review that a
+push will not summon is the failure this paragraph exists to prevent.
 
 **Do not comment on pull requests at all.** The repository owner writes every
 comment on a PR, including the replies to review findings. This is not about
