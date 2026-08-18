@@ -555,6 +555,15 @@ export default function PostsPage() {
                     tabIndex={0}
                     onClick={() => router.push(`/posts/edit?id=${post.id}`)}
                     onKeyDown={(e) => {
+                      // A key pressed on one of the row's own buttons belongs to
+                      // that button. Without this the row swallows it: the
+                      // `preventDefault` below stops the button activating at
+                      // all, and the row navigates instead — so unpublish and
+                      // trash were reachable by mouse but not by keyboard.
+                      // `stopPropagation` on their click handlers cannot help,
+                      // because the click they stop is the one that never
+                      // happens.
+                      if (e.target !== e.currentTarget) return;
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
                         router.push(`/posts/edit?id=${post.id}`);
@@ -611,8 +620,19 @@ export default function PostsPage() {
                       follows: publishing it again puts it back, so nothing here
                       is spent. It is not a deletion, and the label says so
                       rather than leaving the icon to carry it: the local copy,
-                      its history and its body all stay exactly where they are. */}
-                      {post.status === 'published' && (
+                      its history and its body all stay exactly where they are.
+
+                      Withheld from a post whose cloud copy is ahead or in
+                      conflict. `unpublish_post` writes this machine's whole row
+                      to D1 — title, excerpt, tags, series — so on those two it
+                      would not just take the post down, it would settle the
+                      disagreement in local's favour on the way past, which is
+                      the one thing the conflict state exists to stop happening
+                      by accident. Resolve it in the editor first; the button
+                      comes back. */}
+                      {post.status === 'published' &&
+                        post.sync !== 'conflict' &&
+                        post.sync !== 'remote_ahead' && (
                         <button
                           type='button'
                           aria-label={`Unpublish ${post.title}`}
