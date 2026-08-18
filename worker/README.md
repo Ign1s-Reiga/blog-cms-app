@@ -29,23 +29,25 @@ blog serves published rows only, so it is invisible to readers until the flip.
 
 Both steps need the Cloudflare account that owns the blog's D1 database.
 
-1. **Point the config at your database.** In `wrangler.jsonc`, replace
+1. **Point the config at your database.** In `wrangler.toml`, replace
    `<your-d1-database>` and `<your-d1-database-id>` with the values from
    `pnpm exec wrangler d1 list`.
 
 2. **Create the table.**
 
    ```sh
-   pnpm exec wrangler d1 migrations apply <your-d1-database> --remote -c worker/wrangler.jsonc
+   pnpm exec wrangler d1 migrations apply <your-d1-database> --remote -c worker/wrangler.toml
    ```
 
    Until this has run, the desktop app's Refresh logs a warning about schedules
-   and carries on — nothing else depends on the table existing.
+   and carries on. Scheduling itself does not: `schedule_post` writes to this
+   table, so without it every attempt to schedule a post fails with an error.
+   Nothing else depends on the table existing.
 
 3. **Deploy.**
 
    ```sh
-   pnpm exec wrangler deploy -c worker/wrangler.jsonc
+   pnpm exec wrangler deploy -c worker/wrangler.toml
    ```
 
 4. **Check it.** The Worker has no HTTP API — a `workers.dev` URL is reachable
@@ -54,11 +56,11 @@ Both steps need the Cloudflare account that owns the blog's D1 database.
    instead:
 
    ```sh
-   pnpm exec wrangler dev -c worker/wrangler.jsonc --test-scheduled
+   pnpm exec wrangler dev -c worker/wrangler.toml --test-scheduled
    curl 'http://localhost:8787/__scheduled'
    ```
 
-   For the deployed copy, `pnpm exec wrangler tail -c worker/wrangler.jsonc`
+   For the deployed copy, `pnpm exec wrangler tail -c worker/wrangler.toml`
    prints each run's summary as it happens.
 
 ## States
@@ -76,5 +78,12 @@ blog for good.
 
 The desktop app shows a `pending` row whose time has passed as **overdue**. That
 state is not stored anywhere, because nothing is running to store it: it is what
-"the cron has not run" looks like from the outside, and the usual causes are this
-Worker not being deployed or its migration never having been applied.
+"the cron has not run" looks like from the outside, and the cause is this Worker
+not being deployed — or deployed and not firing.
+
+A missing migration cannot produce it. Without the table there is no `pending`
+row to go overdue: `schedule_post` fails at the point of writing it, undoes the
+local half, and reports the error, so the post stays a draft that was never
+scheduled. The two failures look nothing alike from the app, which is the useful
+part — an error at scheduling time means the table, and silence past the hour
+means the cron.
