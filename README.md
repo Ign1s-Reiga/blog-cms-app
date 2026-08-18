@@ -290,7 +290,7 @@ everything a reader would notice (title, excerpt, tags, published flag, body):
 | **Conflict**    | Both sides changed. Nothing is applied until you say which wins.    |
 | **SyncFailed**  | The last push failed, so the local edits are not live.              |
 
-Three actions reach the cloud, and they do different amounts of work:
+Four actions reach the cloud, and they do different amounts of work:
 
 | Action                                | What it sends                                                 |
 | ------------------------------------- | ------------------------------------------------------------- |
