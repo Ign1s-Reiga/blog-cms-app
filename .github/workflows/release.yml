@@ -62,6 +62,54 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # The changelog, written once and used twice.
+      #
+      # `latest.json`'s `notes` field is not separately configurable: tauri-action
+      # copies `releaseBody` into it verbatim. So the placeholder that used to sit
+      # there reached further than the release page — `Settings → Software update`
+      # renders these notes under a "Release notes" heading, and what it showed
+      # somebody deciding whether to install was "See the assets below to download
+      # and install this version", which is neither a change list nor advice they
+      # can act on from inside the app.
+      #
+      # This is the same content the "Generate release notes" button produces, so
+      # the draft arrives with it already filled in rather than waiting for
+      # somebody to press that. Editing the body after this point does *not* reach
+      # `latest.json` — the asset is uploaded during the build (see README).
+      - name: Generate the changelog
+        id: notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          fallback="See the assets below to download and install this version."
+
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            # Read-only: this endpoint returns the notes for a tag, it does not
+            # create or modify a release.
+            body=$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="${{ github.ref_name }}" --jq '.body' || true)
+          else
+            # A manual run builds from a branch with no tag to compare against,
+            # so there is no range to generate a changelog from.
+            body=""
+          fi
+
+          # An empty body would publish a release, and an updater manifest, with
+          # nothing written in either. Better the old placeholder than that.
+          if [ -z "$body" ]; then
+            echo "No generated notes; using the placeholder."
+            body="$fallback"
+          fi
+
+          # A unique delimiter: the body is Markdown from PR titles and could
+          # otherwise contain the terminator and truncate itself.
+          {
+            echo "body<<CHANGELOG_EOF_b7f21a"
+            echo "$body"
+            echo "CHANGELOG_EOF_b7f21a"
+          } >> "$GITHUB_OUTPUT"
+
       # tauri-action runs `beforeBuildCommand` (pnpm run build -> ../out),
       # bundles the app, and uploads the installers to the release.
       #
@@ -78,7 +126,7 @@ jobs:
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'app-v__VERSION__' }}
           releaseName: "v__VERSION__"
-          releaseBody: "See the assets below to download and install this version."
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           uploadUpdaterJson: true
