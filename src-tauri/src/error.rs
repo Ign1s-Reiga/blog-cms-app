@@ -238,6 +238,9 @@ pub enum AppError {
     #[error("Post `{0}` no longer exists in the cloud, so there is no cloud version to keep")]
     RemotePostGone(String),
 
+    #[error("Post `{0}` is not in Cloudflare D1, so there was no cloud row to update")]
+    RemotePostMissing(String),
+
     #[error("Post {0} is not in conflict")]
     NotConflicted(i32),
 
