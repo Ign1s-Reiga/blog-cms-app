@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, Import, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
+import { CheckCircle2, EyeOff, Import, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { StatusDot, type PostStatus } from '@/components/StatusDot';
@@ -143,7 +143,7 @@ export default function PostsPage() {
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  /// A trash or schedule action that was refused or failed.
+  /// A trash, unpublish or schedule action that was refused or failed.
   ///
   /// Kept apart from `loadError`, which is only ever rendered in the table's
   /// empty state — a refusal shown there would be invisible on any list with a
@@ -233,10 +233,11 @@ export default function PostsPage() {
     }
   };
 
-  /// Run a trash command and re-read both listings. They move together — a
-  /// restore takes a post out of one and puts it in the other — so re-reading
-  /// one of them would leave the tab counts disagreeing with the rows.
-  const runTrashCommand = async (command: string, args?: Record<string, unknown>) => {
+  /// Run a command that moves a post between listings, and re-read both. They
+  /// move together — a restore takes a post out of one and puts it in the other
+  /// — so re-reading one of them would leave the tab counts disagreeing with the
+  /// rows. Unpublishing does the same to the Published and Drafts counts.
+  const runPostCommand = async (command: string, args?: Record<string, unknown>) => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setActionError(null);
@@ -253,8 +254,8 @@ export default function PostsPage() {
     const pending = pendingDelete;
     setPendingDelete(null);
     await (pending.kind === 'one'
-      ? runTrashCommand('delete_post_permanently', { id: pending.id })
-      : runTrashCommand('empty_trash'));
+      ? runPostCommand('delete_post_permanently', { id: pending.id })
+      : runPostCommand('empty_trash'));
   };
 
   const matches = (p: Post, f: FilterId) => {
@@ -493,7 +494,7 @@ export default function PostsPage() {
                     <Button
                       variant='outline'
                       size='sm'
-                      onClick={() => void runTrashCommand('restore_post', { id: post.id })}
+                      onClick={() => void runPostCommand('restore_post', { id: post.id })}
                       className='h-[26px] px-2 gap-1.5 rounded-[5px] text-[12px] font-semibold text-zinc-600 dark:text-zinc-400'
                     >
                       <RotateCcw size={12} strokeWidth={2} />
@@ -554,6 +555,15 @@ export default function PostsPage() {
                     tabIndex={0}
                     onClick={() => router.push(`/posts/edit?id=${post.id}`)}
                     onKeyDown={(e) => {
+                      // A key pressed on one of the row's own buttons belongs to
+                      // that button. Without this the row swallows it: the
+                      // `preventDefault` below stops the button activating at
+                      // all, and the row navigates instead — so unpublish and
+                      // trash were reachable by mouse but not by keyboard.
+                      // `stopPropagation` on their click handlers cannot help,
+                      // because the click they stop is the one that never
+                      // happens.
+                      if (e.target !== e.currentTarget) return;
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
                         router.push(`/posts/edit?id=${post.id}`);
@@ -604,6 +614,38 @@ export default function PostsPage() {
                       <span className='text-[12px] font-mono tabular-nums text-zinc-400 dark:text-zinc-600'>
                         {post.views !== undefined ? post.views.toLocaleString() : '—'}
                       </span>
+                      {/* Taking a post off the blog. Offered only where it means
+                      something — an unpublished post has nothing to withdraw —
+                      and without a confirmation, by the same rule the trash
+                      follows: publishing it again puts it back, so nothing here
+                      is spent. It is not a deletion, and the label says so
+                      rather than leaving the icon to carry it: the local copy,
+                      its history and its body all stay exactly where they are.
+
+                      Withheld from a post whose cloud copy is ahead or in
+                      conflict. `unpublish_post` writes this machine's whole row
+                      to D1 — title, excerpt, tags, series — so on those two it
+                      would not just take the post down, it would settle the
+                      disagreement in local's favour on the way past, which is
+                      the one thing the conflict state exists to stop happening
+                      by accident. Resolve it in the editor first; the button
+                      comes back. */}
+                      {post.status === 'published' &&
+                        post.sync !== 'conflict' &&
+                        post.sync !== 'remote_ahead' && (
+                        <button
+                          type='button'
+                          aria-label={`Unpublish ${post.title}`}
+                          title='Unpublish — takes it off the blog; the local copy stays'
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void runPostCommand('unpublish_post', { postId: post.id });
+                          }}
+                          className='shrink-0 p-1 rounded-[4px] text-zinc-300 dark:text-zinc-700 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-500/[0.1] transition-colors'
+                        >
+                          <EyeOff size={13} strokeWidth={2} />
+                        </button>
+                      )}
                       {/* Deleting moves the post to the trash and nothing else, so
                       it needs no confirmation of its own — the step that cannot
                       be undone is in there, behind one. */}
@@ -613,9 +655,9 @@ export default function PostsPage() {
                         title='Move to trash'
                         onClick={(e) => {
                           e.stopPropagation();
-                          void runTrashCommand('trash_post', { id: post.id });
+                          void runPostCommand('trash_post', { id: post.id });
                         }}
-                        className='shrink-0 p-1 rounded-[4px] text-zinc-300 dark:text-zinc-700 opacity-0 group-hover:opacity-100 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/[0.1] transition-colors'
+                        className='shrink-0 p-1 rounded-[4px] text-zinc-300 dark:text-zinc-700 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/[0.1] transition-colors'
                       >
                         <Trash2 size={13} strokeWidth={2} />
                       </button>
