@@ -1043,6 +1043,23 @@ pub async fn resolve_conflict(
             )
             .await;
 
+            // What this arm is about to overwrite, kept so a failed rename can
+            // be undone below.
+            let previous = PreviousState::read(conn.inner(), post.id).await?;
+
+            // The same lock every other body writer takes, and for the same
+            // reason — this arm was the one path that skipped it. Ordered
+            // lock-then-database so the holders cannot deadlock, and held
+            // through the rename that matches the metadata.
+            //
+            // Without it an editor autosave can commit its row, land its body
+            // and record its fingerprint in the gap between the commit and the
+            // rename below. The rename then puts the cloud's older text over
+            // that draft, and `sync_agree` at the end of this arm records the
+            // two sides as in agreement — so the overwritten work is not merely
+            // lost, it is marked clean, and nothing downstream can notice.
+            let body_guard = lock_body_commits().await;
+
             // The trash check that counts: inside the transaction that writes.
             // The one at the top of this command ran before a D1 listing and an
             // R2 download, which is plenty of time for another window to throw
@@ -1055,9 +1072,17 @@ pub async fn resolve_conflict(
             }
             let saved = db::update::<PostModel>(&txn, model).await?;
             txn.commit().await?;
-            staged
-                .commit(&dir.join(format!("{}.md", saved.slug)))
-                .await?;
+
+            // The metadata is committed and the body is not yet in place, which
+            // is the window `save` spends `PreviousState` on. Failing here
+            // without undoing it leaves the cloud's title, tags and published
+            // flag describing the local body — and with the stale mark, stage
+            // and fingerprint below all skipped, nothing records that the two
+            // halves came from different versions.
+            if let Err(e) = staged.commit(&dir.join(format!("{}.md", saved.slug))).await {
+                restore_metadata(conn.inner(), Some(previous), &saved).await;
+                return Err(e);
+            }
 
             // This body came from R2 a moment ago, so it is the cloud's current
             // copy by construction and any staleness is settled.
@@ -1084,6 +1109,10 @@ pub async fn resolve_conflict(
                 now,
             )
             .await?;
+
+            // The row, the file and the fingerprint all describe the cloud's
+            // version from here on, so the next writer may have the lock.
+            drop(body_guard);
 
             Ok(saved)
         }
