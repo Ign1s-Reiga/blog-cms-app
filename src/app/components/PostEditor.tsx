@@ -251,6 +251,11 @@ export function PostEditor() {
   /// the editor believes the right thing is on disk, nothing corrects it, and
   /// every later read gets the emptied cache.
   const loadingRef = useRef(false);
+  /// The same fact as `loadingRef`, kept as state so the Save and Publish
+  /// buttons can show that they are unavailable. The ref stays the authority
+  /// for the guards — it is written synchronously, and a render behind is
+  /// exactly the window this is guarding.
+  const [loadingBody, setLoadingBody] = useState(false);
   /// The pending debounce, so a manual save can cancel it rather than have it
   /// fire again straight afterwards.
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -291,6 +296,7 @@ export function PostEditor() {
       // before the body does, and an autosave in between would write the empty
       // body over the post. See `loadingRef`.
       loadingRef.current = true;
+      setLoadingBody(true);
       // The gate lifts only once a *complete* load has established the
       // baseline. A read that fails partway — an uncached body whose R2 fetch
       // cannot reach the network — leaves the editor showing a real title over
@@ -333,6 +339,7 @@ export function PostEditor() {
       } finally {
         if (loaded) {
           loadingRef.current = false;
+          setLoadingBody(false);
           // The debounce effect reads a ref, so it needs telling that the
           // answer has changed — otherwise an edit made *during* the load would
           // sit unscheduled until the next keystroke.
@@ -614,6 +621,15 @@ export function PostEditor() {
   // pushes the body to R2 and metadata to D1 (see the `save_post` command).
   const handleSave = async (publish: boolean) => {
     if (saveState.kind === 'saving') return;
+    // Nothing may be written while the body is still on its way in. Until the
+    // load completes the editor holds a real title over an empty body, and
+    // saving from there writes that emptiness over the post — locally, and for
+    // a publish into R2 as well. Autosave has been fenced off from this window
+    // since it was written (see `loadingRef`); the buttons were not, and they
+    // stay enabled throughout because `saveState` is idle. The ref is read
+    // rather than the state beside it because it is written synchronously, and
+    // one render's lag is the whole of the window being guarded.
+    if (loadingRef.current) return;
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     // Take the write from autosave: a pending debounce firing straight after
@@ -1330,7 +1346,8 @@ export function PostEditor() {
             variant='outline'
             size='sm'
             onClick={() => handleSave(false)}
-            disabled={saveState.kind === 'saving'}
+            disabled={saveState.kind === 'saving' || loadingBody}
+            title={loadingBody ? 'Waiting for this post to finish loading' : undefined}
             className='h-[28px] px-3 rounded-[5px] text-[12px] font-semibold text-zinc-600 dark:text-zinc-400'
           >
             {saveState.kind === 'saving' && !saveState.publish ? 'Saving…' : 'Save Draft'}
@@ -1417,7 +1434,8 @@ export function PostEditor() {
           <Button
             size='sm'
             onClick={() => handleSave(true)}
-            disabled={saveState.kind === 'saving'}
+            disabled={saveState.kind === 'saving' || loadingBody}
+            title={loadingBody ? 'Waiting for this post to finish loading' : undefined}
             className='h-[28px] px-3 rounded-[5px] text-[12px] font-semibold shadow-[0_1px_2px_rgba(0,0,0,0.12)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.18)] dark:hover:shadow-[0_2px_8px_rgba(0,0,0,0.5)]'
           >
             {saveState.kind === 'saving' && saveState.publish ? 'Publishing…' : 'Publish'}
