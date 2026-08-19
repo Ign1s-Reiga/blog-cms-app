@@ -1055,8 +1055,6 @@ export function PostEditor() {
       if (images.length === 0) return;
       const el = textareaRef.current;
       if (!el) return;
-      const value = el.value;
-      const at = el.selectionStart;
 
       const refs: string[] = [];
       for (const path of images) {
@@ -1069,6 +1067,18 @@ export function PostEditor() {
         }
       }
       if (refs.length === 0) return;
+
+      // Read after the staging above, not before it. Copying a phone-sized photo
+      // takes long enough to type a sentence into, and the textarea is not
+      // disabled while it happens — so a snapshot taken beforehand is a document
+      // that has since moved on, and rebuilding from it threw away every
+      // character typed in between and moved the caret to match. `insertBlock`,
+      // which the media picker uses, already reads its value after awaiting.
+      //
+      // The insertion point is the caret as it stands now, for the same reason:
+      // the one captured earlier belongs to a document this one no longer is.
+      const value = el.value;
+      const at = el.selectionStart;
 
       // Sit the image(s) on their own block, adding blank lines only as needed.
       const before = value.slice(0, at);
