@@ -11,6 +11,9 @@ type Phase = 'checking' | 'authed' | 'unauthed';
 // In a plain browser (`pnpm dev`) there's no backend, so it shows the app.
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [phase, setPhase] = useState<Phase>('checking');
+  /// A first pull that failed after signing in — almost always the credentials,
+  /// since nothing has checked them before this point.
+  const [pullError, setPullError] = useState<string | null>(null);
 
   const check = useCallback(async () => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
@@ -58,12 +61,50 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           onAuthed={() => {
             setPhase('authed');
             // Pull the freshly connected account's posts into the local cache.
-            void pullFromCloud();
+            //
+            // Caught rather than left to float. `LoginScreen` accepts a token
+            // without checking it — "a bad token surfaces as a clear error when
+            // the app talks to R2/D1" — and this is the first thing that talks
+            // to D1, so it is where that error was supposed to surface. Bare, it
+            // became an unhandled rejection instead: the modal closed, the
+            // dashboard read the empty local cache and said "No posts yet", and
+            // nothing anywhere said the credentials were wrong.
+            //
+            // Reported where the sync buttons report theirs rather than as its
+            // own screen, because the app behind it is usable — everything local
+            // works, and the failure is about reaching Cloudflare.
+            void pullFromCloud().catch((err: unknown) => {
+                setPullError(String(err));
+            });
           }}
         />
       </>
     );
   }
 
-  return <>{children}</>;
+  return (
+    <>
+      {pullError !== null && (
+        <div
+          role='alert'
+          className='fixed bottom-4 right-4 z-50 max-w-[420px] rounded-[6px] border border-red-200 dark:border-red-500/[0.3] bg-red-50 dark:bg-red-500/[0.08] px-3 py-2'
+        >
+          <p className='text-[12px] font-semibold text-red-700 dark:text-red-400'>
+            Could not read this account&apos;s posts
+          </p>
+          <p className='mt-0.5 text-[11px] leading-[1.5] text-red-600 dark:text-red-400/90'>
+            {pullError}
+          </p>
+          <button
+            type='button'
+            onClick={() => setPullError(null)}
+            className='mt-1.5 text-[11px] font-semibold text-red-700 dark:text-red-400 underline underline-offset-2'
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {children}
+    </>
+  );
 }

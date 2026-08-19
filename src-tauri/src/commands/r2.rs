@@ -1043,6 +1043,23 @@ pub async fn resolve_conflict(
             )
             .await;
 
+            // What this arm is about to overwrite, kept so a failed rename can
+            // be undone below.
+            let previous = PreviousState::read(conn.inner(), post.id).await?;
+
+            // The same lock every other body writer takes, and for the same
+            // reason — this arm was the one path that skipped it. Ordered
+            // lock-then-database so the holders cannot deadlock, and held
+            // through the rename that matches the metadata.
+            //
+            // Without it an editor autosave can commit its row, land its body
+            // and record its fingerprint in the gap between the commit and the
+            // rename below. The rename then puts the cloud's older text over
+            // that draft, and `sync_agree` at the end of this arm records the
+            // two sides as in agreement — so the overwritten work is not merely
+            // lost, it is marked clean, and nothing downstream can notice.
+            let body_guard = lock_body_commits().await;
+
             // The trash check that counts: inside the transaction that writes.
             // The one at the top of this command ran before a D1 listing and an
             // R2 download, which is plenty of time for another window to throw
@@ -1055,9 +1072,17 @@ pub async fn resolve_conflict(
             }
             let saved = db::update::<PostModel>(&txn, model).await?;
             txn.commit().await?;
-            staged
-                .commit(&dir.join(format!("{}.md", saved.slug)))
-                .await?;
+
+            // The metadata is committed and the body is not yet in place, which
+            // is the window `save` spends `PreviousState` on. Failing here
+            // without undoing it leaves the cloud's title, tags and published
+            // flag describing the local body — and with the stale mark, stage
+            // and fingerprint below all skipped, nothing records that the two
+            // halves came from different versions.
+            if let Err(e) = staged.commit(&dir.join(format!("{}.md", saved.slug))).await {
+                restore_metadata(conn.inner(), Some(previous), &saved).await;
+                return Err(e);
+            }
 
             // This body came from R2 a moment ago, so it is the cloud's current
             // copy by construction and any staleness is settled.
@@ -1084,6 +1109,10 @@ pub async fn resolve_conflict(
                 now,
             )
             .await?;
+
+            // The row, the file and the fingerprint all describe the cloud's
+            // version from here on, so the next writer may have the lock.
+            drop(body_guard);
 
             Ok(saved)
         }
@@ -1242,9 +1271,25 @@ pub async fn list_media(app: tauri::AppHandle) -> AppResult<Vec<MediaItem>> {
 
     let mut items = Vec::new();
     for obj in objects {
+        // The same guard `delete_media` and `stage_media_from_library` put on
+        // this join, which this listing was the one place to skip. The name
+        // comes from an R2 key, and R2 keys may contain `..` and `/` — the
+        // bucket is written by the blog and by anything else holding the token,
+        // so a key is not something this app decided the shape of. Joined
+        // unchecked, `media/../../../evil.js` writes outside the cache
+        // directory.
+        //
+        // A nested key like `media/2026/pic.png` is refused by the same test.
+        // That one is harmless but not cacheable, and it used to fail silently
+        // inside `let _`, so every listing downloaded it again to no effect.
         let file_name = match obj.key.strip_prefix("media/") {
-            Some(name) if !name.is_empty() => name.to_string(),
-            _ => continue, // skip a folder marker, if any
+            Some(name) if is_safe_file_name(name) => name.to_string(),
+            // Also the folder marker (`media/` itself), which is empty and so
+            // not a plain file name either.
+            _ => {
+                log::warn!("Skipping media object with an unusable key: {}", obj.key);
+                continue;
+            }
         };
         // Ensure a local cached copy exists for display.
         let local = dir.join(&file_name);

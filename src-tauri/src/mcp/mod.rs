@@ -147,14 +147,40 @@ fn ensure_token(app: &tauri::AppHandle) -> AppResult<String> {
 
 /// Throw away the current token and issue a new one, invalidating every client
 /// config that carried the old one.
+///
+/// The old shape of this was delete-then-`ensure_token`, and the delete was
+/// allowed to fail quietly. `ensure_token` begins by *reading*, and `load_token`
+/// reads the keychain before the file — so a credential store that refused the
+/// delete but still answered reads handed the old token straight back as the new
+/// one. The server restarted, the Settings screen showed a token, and the
+/// leaked value everybody was rotating away from went on working.
 fn rotate_token(app: &tauri::AppHandle) -> AppResult<String> {
-    if let Some(entry) = keyring_entry() {
-        let _ = entry.delete_credential();
+    let token = uuid::Uuid::new_v4().simple().to_string();
+
+    // Overwritten rather than deleted first: `set_password` replaces the entry,
+    // so the old value cannot outlive a delete that did not happen.
+    let in_keychain = keyring_set(&token);
+    if !in_keychain {
+        // The file has to carry it instead — and anything still in the keychain
+        // would win over the file when it is next read, so it has to go.
+        if let Some(entry) = keyring_entry() {
+            let _ = entry.delete_credential();
+        }
     }
+
     let mut stored = load_stored(app);
-    stored.token = None;
+    stored.token = (!in_keychain).then(|| token.clone());
     save_stored(app, &stored)?;
-    ensure_token(app)
+
+    // What the next reader will actually get. Which store answered, and why the
+    // other one did not, does not matter here: rotation is a promise that the
+    // old token stops working, and it cannot be kept halfway. If the effective
+    // token is not the one just issued, say so rather than return a new-looking
+    // string that changes nothing.
+    match load_token(app) {
+        Some(effective) if effective == token => Ok(token),
+        _ => Err(AppError::McpTokenRotationFailed),
+    }
 }
 
 // ─── Running server ───────────────────────────────────────────────────────────
@@ -163,6 +189,10 @@ struct Running {
     port: u16,
     /// Dropping or firing this ends `axum::serve`'s graceful shutdown future.
     shutdown: tokio::sync::oneshot::Sender<()>,
+    /// The task holding the listener. Kept so [`stop`] can wait for it to
+    /// finish: firing `shutdown` only *asks*, and the socket stays bound until
+    /// the task polls that future and returns.
+    task: tauri::async_runtime::JoinHandle<()>,
 }
 
 /// Managed state holding the listener, if one is up.
@@ -250,7 +280,7 @@ pub async fn start(app: &tauri::AppHandle, port: u16) -> AppResult<u16> {
         .port();
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    tauri::async_runtime::spawn(async move {
+    let task = tauri::async_runtime::spawn(async move {
         let served = axum::serve(listener, router)
             .with_graceful_shutdown(async {
                 let _ = rx.await;
@@ -261,19 +291,35 @@ pub async fn start(app: &tauri::AppHandle, port: u16) -> AppResult<u16> {
         }
     });
 
-    *app.state::<McpServer>().lock() = Some(Running { port: bound, shutdown: tx });
+    *app.state::<McpServer>().lock() = Some(Running { port: bound, shutdown: tx, task });
     log::info!("MCP server listening on http://127.0.0.1:{bound}{ENDPOINT_PATH}");
     Ok(bound)
 }
 
-/// Shut the endpoint down. `false` when nothing was running.
-pub fn stop(app: &tauri::AppHandle) -> bool {
+/// Shut the endpoint down and wait for the port to be free again. `false` when
+/// nothing was running.
+///
+/// The waiting is the point. Both callers restart immediately, usually on the
+/// same port, and firing the shutdown signal only asks the serve task to finish
+/// — the `TcpListener` is dropped when that task next polls and returns, which
+/// has not happened yet when a synchronous `stop` hands back control. `start`
+/// would then bind a port still held by the server it just stopped and fail with
+/// `AddrInUse`, leaving `enabled: true` persisted and nothing listening: the
+/// Settings screen says the endpoint is on and no client can reach it. Whether
+/// that happened came down to which task the runtime polled first.
+pub async fn stop(app: &tauri::AppHandle) -> bool {
+    // Taken out of the lock in its own statement: the guard is a std mutex and
+    // must not be held across the await below.
     let running = app.state::<McpServer>().lock().take();
     match running {
         Some(r) => {
             // The receiver is gone only if the task already exited, which is the
             // same end state, so a failed send is not an error.
             let _ = r.shutdown.send(());
+            // Returns once `axum::serve` has, which is when the listener drops.
+            if let Err(e) = r.task.await {
+                log::warn!("MCP server task did not shut down cleanly: {e}");
+            }
             log::info!("MCP server stopped");
             true
         }
@@ -354,7 +400,7 @@ pub async fn mcp_configure(
     save_stored(&app, &stored)?;
 
     // Always stop first: this is also how a port change takes effect.
-    stop(&app);
+    stop(&app).await;
     if enabled {
         start(&app, port).await?;
     }
@@ -368,7 +414,7 @@ pub async fn mcp_regenerate_token(app: tauri::AppHandle) -> AppResult<McpStatus>
 
     // The running service captured the old token, so it has to be rebuilt.
     let stored = load_stored(&app);
-    if stop(&app) {
+    if stop(&app).await {
         start(&app, stored.port.unwrap_or(DEFAULT_PORT)).await?;
     }
     mcp_status(app)
