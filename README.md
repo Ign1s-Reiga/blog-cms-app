@@ -187,7 +187,7 @@ Every Tauri command — the whole data layer — is unavailable there, so the sc
 The app opens on a sign-in screen asking for your Cloudflare **account ID**, **API token**, **R2
 bucket**, **D1 database ID**, and the bucket's **public URL**. The token goes to the OS keychain
 (Windows Credential Manager); the rest is written to `credentials.json` in the app data directory.
-If the credential store cannot be reached, the token falls back to that file too.
+If the credential store refuses the token, it goes into that file instead.
 
 Nothing needs to be set in your shell — but if the credential store is empty at startup, the app
 falls back to environment variables, which is convenient on a dev machine:

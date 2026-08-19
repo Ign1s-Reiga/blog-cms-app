@@ -8,8 +8,11 @@
 //!   - the **non-secret** fields (account id, R2 bucket, D1 database id) are
 //!     mirrored to `<app_data>/credentials.json`.
 //!
-//! When no keychain store is available, the token falls back to the JSON file
-//! so the app still works — see [`init_keystore`].
+//! A keychain that refuses the token gets the JSON file instead, so the app
+//! still works — see [`init_keystore`]. That fallback is about *saving*: the
+//! file deliberately omits a token the keychain accepted, so one already in a
+//! store that later cannot be opened is not recoverable from disk, and the app
+//! asks for credentials again.
 //!
 //! The session is "authenticated" when credentials are configured; token
 //! validity surfaces when the app talks to R2/D1.
@@ -45,8 +48,11 @@ pub fn get_creds() -> Option<CloudflareConfig> {
 
 /// Wire up the OS keychain backend. Call once at startup, before loading creds.
 ///
-/// The store is the Windows Credential Manager. If it cannot be opened, keychain
-/// reads and writes fail and the token falls back to the JSON file.
+/// The store is the Windows Credential Manager. If it cannot be opened, reads
+/// and writes both fail — but only the write has somewhere else to go: the token
+/// is saved to the JSON file instead. A token stored successfully on an earlier
+/// run is in the keychain alone, so the same failure at read time leaves nothing
+/// to load.
 pub fn init_keystore() {
     #[cfg(windows)]
     match windows_native_keyring_store::Store::new() {
