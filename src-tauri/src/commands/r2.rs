@@ -1271,9 +1271,25 @@ pub async fn list_media(app: tauri::AppHandle) -> AppResult<Vec<MediaItem>> {
 
     let mut items = Vec::new();
     for obj in objects {
+        // The same guard `delete_media` and `stage_media_from_library` put on
+        // this join, which this listing was the one place to skip. The name
+        // comes from an R2 key, and R2 keys may contain `..` and `/` — the
+        // bucket is written by the blog and by anything else holding the token,
+        // so a key is not something this app decided the shape of. Joined
+        // unchecked, `media/../../../evil.js` writes outside the cache
+        // directory.
+        //
+        // A nested key like `media/2026/pic.png` is refused by the same test.
+        // That one is harmless but not cacheable, and it used to fail silently
+        // inside `let _`, so every listing downloaded it again to no effect.
         let file_name = match obj.key.strip_prefix("media/") {
-            Some(name) if !name.is_empty() => name.to_string(),
-            _ => continue, // skip a folder marker, if any
+            Some(name) if is_safe_file_name(name) => name.to_string(),
+            // Also the folder marker (`media/` itself), which is empty and so
+            // not a plain file name either.
+            _ => {
+                log::warn!("Skipping media object with an unusable key: {}", obj.key);
+                continue;
+            }
         };
         // Ensure a local cached copy exists for display.
         let local = dir.join(&file_name);
