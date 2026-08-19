@@ -157,6 +157,17 @@ async fn set_stage_and_sync(conn: &Db, post_id: i32, publish: bool) -> AppResult
     )
     .await?;
 
+    // Same reasoning as the push in `sync_posts`: the cloud's row now carries
+    // this post's `updated_at`, and a baseline left behind it turns our own
+    // write into a remote change the next refresh has to ask about.
+    if synced.is_ok() {
+        if let Err(e) =
+            db::sync_accept_remote_baseline(conn, post_id, Some(post.updated_at)).await
+        {
+            log::warn!("Could not record the pushed version for post {post_id}: {e}");
+        }
+    }
+
     match synced {
         Ok(()) => Ok(post),
         Err(e) => Err(AppError::CloudSyncFailed(Box::new(e))),
@@ -196,10 +207,33 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize>
             continue;
         }
         let published = post.published;
+        // The version this push is about to give the cloud. `d1_post_upsert`
+        // writes the model's own `updated_at`, so once it lands this is what the
+        // remote row says — read before the model is moved into the call.
+        let pushed_updated_at = post.updated_at;
         series.apply_outbound(&mut post);
         let stage = match cloudflare::d1_post_upsert(&client, &config, post).await {
             Ok(()) => {
                 synced += 1;
+                // Record the version we just wrote as the one this machine has
+                // seen. Without it the baseline stays at whatever the last
+                // refresh observed, and the *next* refresh finds the remote row
+                // newer than that — our own push — and reads it as somebody
+                // else's change. A post only this machine has ever touched then
+                // reports a conflict against itself, and the app refuses to act
+                // on it until a side is picked.
+                //
+                // Not `sync_mark_synced`: this pushes metadata alone. The body in
+                // R2 is still the last published one, so the two sides are not
+                // holding the same content and must not be recorded as if they
+                // were — a post with unpublished text stays `modified`, which is
+                // the truth about what readers are being served.
+                if let Err(e) =
+                    db::sync_accept_remote_baseline(conn.inner(), post_id, Some(pushed_updated_at))
+                        .await
+                {
+                    log::warn!("Could not record the pushed version for post {post_id}: {e}");
+                }
                 if published { post_stage::PUBLISHED } else { post_stage::DRAFT }
             }
             Err(_) => {
