@@ -2193,3 +2193,60 @@ mod refresh_deletion_tests {
         assert_eq!(result.deleted, 1);
     }
 }
+
+#[cfg(test)]
+mod push_baseline_tests {
+    use super::*;
+    use crate::sync_state::{SyncState, derive};
+
+    fn a_post(slug: &str) -> post::Model {
+        post::Model {
+            id: 0,
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            excerpt: None,
+            tags: None,
+            published: true,
+            published_at: None,
+            series_id: None,
+            series_order: None,
+            created_at: 0,
+            updated_at: 500,
+        }
+    }
+
+    /// Set up a post that was pushed at version 100, edited here since, and then
+    /// pushed again at version 500 — `advance` being whether that second push
+    /// recorded the version it wrote, which is what the fix does.
+    async fn after_a_push(advance: bool) -> SyncState {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, a_post("mine-alone")).await.unwrap();
+
+        sync_agree(&db, post.id, "v1".to_string(), Some(100), 100).await.unwrap();
+        sync_set_local(&db, post.id, "v2".to_string()).await.unwrap();
+        if advance {
+            sync_accept_remote_baseline(&db, post.id, Some(500)).await.unwrap();
+        }
+
+        // The refresh that follows sees the row this machine just wrote.
+        sync_observe_remote(&db, post.id, 500).await.unwrap();
+
+        let sync = sync_get(&db, post.id).await.unwrap();
+        derive(None, sync.as_ref())
+    }
+
+    /// A post nobody else has touched must not come back from a refresh asking
+    /// which side to keep. The cloud's version moved because *this machine*
+    /// moved it, and recording that is what tells the two apart.
+    #[tokio::test]
+    async fn a_push_does_not_leave_the_post_in_conflict_with_itself() {
+        assert_eq!(after_a_push(true).await, SyncState::Modified);
+    }
+
+    /// The same sequence without recording the pushed version — the bug, kept
+    /// here so the test above cannot pass by accident.
+    #[tokio::test]
+    async fn without_recording_the_pushed_version_it_conflicts_with_itself() {
+        assert_eq!(after_a_push(false).await, SyncState::Conflict);
+    }
+}
