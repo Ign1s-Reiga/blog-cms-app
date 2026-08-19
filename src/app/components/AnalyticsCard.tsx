@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Lock, RefreshCw, TriangleAlert } from 'lucide-react';
 import { SectionHeader } from '@/components/SectionHeader';
 import { cn } from '@/lib/utils';
@@ -117,17 +117,31 @@ export function AnalyticsCard() {
   const [error, setError] = useState<AnalyticsError | null>(null);
   const [loading, setLoading] = useState(true);
 
+  /// Which request the card is currently showing the result of.
+  ///
+  /// Nothing cancels an in-flight query, and "Try again" stays clickable while
+  /// one is running — so a request that hangs and fails a minute later would
+  /// otherwise land on top of a later one that succeeded, replacing a correct
+  /// chart with an error about a request nobody is waiting for any more. Only
+  /// the newest attempt is allowed to write.
+  const attempt = useRef(0);
+
   const load = useCallback(async () => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
       return;
     }
+    const mine = ++attempt.current;
+    const current = () => mine === attempt.current;
     setLoading(true);
     try {
-      setData(await invoke<Analytics>('fetch_analytics', { days: 7 }));
+      const fetched = await invoke<Analytics>('fetch_analytics', { days: 7 });
+      if (!current()) return;
+      setData(fetched);
       setError(null);
     } catch (err) {
+      if (!current()) return;
       // The Rust command's error type serialises to { kind, message }; anything
       // else is unexpected and reported as a query failure.
       const e = err as Partial<AnalyticsError>;
@@ -138,7 +152,9 @@ export function AnalyticsCard() {
       );
       setData(null);
     } finally {
-      setLoading(false);
+      // A superseded attempt must not clear the flag either: the request that
+      // replaced it is still running, and the overlay belongs to that one.
+      if (current()) setLoading(false);
     }
   }, []);
 
