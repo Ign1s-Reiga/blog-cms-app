@@ -370,6 +370,16 @@ In the app, `Settings → Software update` shows the running version and drives 
 install → restart; the sidebar surfaces a notice when a check finds a newer version. Checks run once
 per launch and are cached for the session.
 
+**The changelog is written once.** The workflow generates it from the merged pull requests — the same
+content the "Generate release notes" button produces — and it becomes both the draft's body and the
+`notes` field in `latest.json`, which is what `Settings → Software update` displays under "Release
+notes". The two therefore agree by construction, and the draft needs no notes written by hand.
+
+Editing the draft's body afterwards does **not** reach `latest.json`: the manifest was uploaded
+during the build, and nothing rewrites it. So an edit made before publishing leaves the updater
+showing the generated version. If that matters for a particular release, edit the `latest.json` asset
+to match, or re-run the workflow.
+
 **One-time setup.** The workflow signs updates with a minisign key that must not live in the repo.
 Generate one and add it to the repository secrets:
 
