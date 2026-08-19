@@ -13,8 +13,8 @@ served.
 > resolution, an MCP endpoint, and in-app updates all work end to end. The Analytics route is still a
 > placeholder — the dashboard carries an R2/D1 usage card instead. See [Roadmap](#roadmap).
 >
-> **Windows is the target platform.** It is what the release workflow builds installers for and the
-> only platform with a keychain backend; the app is not currently developed against macOS or Linux.
+> **Windows only.** That is what the app targets, what the release workflow builds installers for,
+> and what the credential storage is written against.
 
 ---
 
@@ -187,7 +187,7 @@ Every Tauri command — the whole data layer — is unavailable there, so the sc
 The app opens on a sign-in screen asking for your Cloudflare **account ID**, **API token**, **R2
 bucket**, **D1 database ID**, and the bucket's **public URL**. The token goes to the OS keychain
 (Windows Credential Manager); the rest is written to `credentials.json` in the app data directory.
-On platforms with no keychain backend configured, the token falls back to that file too.
+If the credential store refuses the token, it goes into that file instead.
 
 Nothing needs to be set in your shell — but if the credential store is empty at startup, the app
 falls back to environment variables, which is convenient on a dev machine:
