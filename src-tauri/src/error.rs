@@ -241,6 +241,11 @@ pub enum AppError {
     #[error("Post `{0}` is not in Cloudflare D1, so there was no cloud row to update")]
     RemotePostMissing(String),
 
+    #[error(
+        "The MCP token could not be replaced — the old one may still work.          Check that the OS credential store is available, then try again"
+    )]
+    McpTokenRotationFailed,
+
     #[error("Post {0} is not in conflict")]
     NotConflicted(i32),
 
