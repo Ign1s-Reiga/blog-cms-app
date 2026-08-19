@@ -186,9 +186,31 @@ struct R2ListResponse {
     errors: Vec<D1Error>,
     #[serde(default)]
     result: Vec<R2Object>,
+    /// Where the listing stopped. Absent on responses that carry the whole set.
+    #[serde(default)]
+    result_info: R2ListInfo,
+}
+
+/// The paging half of an R2 listing.
+#[derive(Deserialize, Default)]
+struct R2ListInfo {
+    /// Opaque marker to resume from, sent back as `cursor`.
+    #[serde(default)]
+    cursor: Option<String>,
+    /// Whether R2 stopped early because the page filled up.
+    #[serde(default)]
+    is_truncated: bool,
 }
 
 /// List objects in R2 whose key starts with `prefix` (e.g. `"media/"`).
+///
+/// Follows the cursor to the end. R2 returns at most a thousand keys per call
+/// and says so in `result_info`, which this used to drop on the floor — a
+/// library past that size listed its first page and reported it as the whole
+/// bucket. Nothing failed: images simply stopped appearing in the media screen,
+/// `list_media` over MCP described a partial library as complete, and
+/// `media_usage` decided what was safe to delete from a view missing the very
+/// posts that might have been using it.
 pub async fn list_r2(
     client: &Client,
     config: &CloudflareConfig,
@@ -199,32 +221,63 @@ pub async fn list_r2(
         config.account_id, config.r2_bucket
     );
 
-    let response = client
-        .get(&url)
-        .query(&[("prefix", prefix)])
-        .header("Authorization", format!("Bearer {}", config.api_token))
-        .send()
-        .await?;
+    let mut objects: Vec<R2Object> = Vec::new();
+    let mut cursor: Option<String> = None;
 
-    if !response.status().is_success() {
-        return Err(status_error("R2", "list", response).await);
-    }
-    let text = response.text().await.unwrap_or_default();
+    loop {
+        let mut request = client
+            .get(&url)
+            .query(&[("prefix", prefix)])
+            .header("Authorization", format!("Bearer {}", config.api_token));
+        if let Some(from) = &cursor {
+            request = request.query(&[("cursor", from.as_str())]);
+        }
 
-    let parsed: R2ListResponse =
-        serde_json::from_str(&text).map_err(|e| AppError::json("R2 list parse error", e))?;
-    if !parsed.success {
-        return Err(AppError::CloudflareApi {
-            service: "R2",
-            op: "list",
-            message: parsed
-                .errors
-                .first()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| "unknown R2 error".to_string()),
-        });
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(status_error("R2", "list", response).await);
+        }
+        let text = response.text().await.unwrap_or_default();
+
+        let parsed: R2ListResponse =
+            serde_json::from_str(&text).map_err(|e| AppError::json("R2 list parse error", e))?;
+        if !parsed.success {
+            return Err(AppError::CloudflareApi {
+                service: "R2",
+                op: "list",
+                message: parsed
+                    .errors
+                    .first()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| "unknown R2 error".to_string()),
+            });
+        }
+
+        objects.extend(parsed.result);
+
+        if !parsed.result_info.is_truncated {
+            break;
+        }
+        let next = parsed.result_info.cursor.filter(|c| !c.is_empty());
+        match next {
+            // A cursor that has not moved would fetch the same page forever.
+            // Stopping short is a partial answer, which is what this function
+            // was already giving; looping is not an answer at all.
+            Some(from) if Some(&from) == cursor.as_ref() => {
+                log::warn!("R2 listing of `{prefix}` returned the same cursor twice; stopping");
+                break;
+            }
+            Some(from) => cursor = Some(from),
+            // Truncated with nowhere to resume from. Nothing further to ask for,
+            // but the caller is about to act on a partial listing, so say so.
+            None => {
+                log::warn!("R2 listing of `{prefix}` is truncated but carries no cursor");
+                break;
+            }
+        }
     }
-    Ok(parsed.result)
+
+    Ok(objects)
 }
 
 // ─── D1 ───────────────────────────────────────────────────────────────────────
@@ -626,6 +679,33 @@ mod tests {
             !set_clause.contains("\"slug\""),
             "slug is the key, so it should not be assigned: {sql}"
         );
+    }
+
+    /// A truncated page carries the marker to resume from. Parsed here because
+    /// dropping these two fields is what made a large library list its first
+    /// thousand objects and call that the bucket.
+    #[test]
+    fn a_truncated_listing_parses_its_cursor() {
+        let body = r#"{
+            "success": true,
+            "errors": [],
+            "result": [{"key": "media/a.avif", "size": 12}],
+            "result_info": {"cursor": "next-page", "is_truncated": true, "per_page": 1000}
+        }"#;
+        let parsed: R2ListResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.result.len(), 1);
+        assert!(parsed.result_info.is_truncated);
+        assert_eq!(parsed.result_info.cursor.as_deref(), Some("next-page"));
+    }
+
+    /// A complete listing has no `result_info` at all, and must not be mistaken
+    /// for a truncated one.
+    #[test]
+    fn a_complete_listing_has_no_cursor() {
+        let body = r#"{"success": true, "errors": [], "result": []}"#;
+        let parsed: R2ListResponse = serde_json::from_str(body).unwrap();
+        assert!(!parsed.result_info.is_truncated);
+        assert_eq!(parsed.result_info.cursor, None);
     }
 
     /// The columns a caller expects to travel with a publish or unpublish.
