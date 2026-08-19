@@ -634,7 +634,12 @@ export function PostEditor() {
       // Reading the state here would send `id: null` for a post that exists,
       // and make a second one.
       const saved = await enqueueWrite(() =>
-        invoke<{ id: number; published: boolean }>('save_post', {
+        // The slug comes back with the row and is taken from it. A post created
+        // by this very save has none on screen yet, and scheduling is keyed by
+        // slug — so without this, scheduling a just-saved post succeeded while
+        // the button went on offering to schedule it, with no way to cancel
+        // until the editor was closed and reopened.
+        invoke<{ id: number; slug: string; published: boolean }>('save_post', {
           id: postIdRef.current,
           ...content,
           published: publish,
@@ -643,6 +648,7 @@ export function PostEditor() {
       persisted.current = content;
       setPostId(saved.id);
       postIdRef.current = saved.id;
+      setSlug(saved.slug);
       // Point the URL at the saved post so a refresh / next save targets it.
       window.history.replaceState(null, '', `/posts/edit?id=${saved.id}`);
       // Re-read rather than assume: a publish that reached the cloud clears the
