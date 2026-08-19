@@ -329,6 +329,13 @@ impl BlogMcp {
         // below records the post as it stood rather than half of this edit.
         let original = post.clone();
 
+        // Which columns this edit is actually asking to change. Captured before
+        // the parameters are consumed, and applied to a row re-read inside the
+        // transaction — committing the model loaded above would carry every
+        // *other* column back to how it looked before the awaits in between.
+        let sets_title = params.title.is_some();
+        let sets_tags = params.tags.is_some();
+
         if let Some(title) = params.title {
             let title = title.trim().to_string();
             if title.is_empty() {
@@ -355,7 +362,8 @@ impl BlogMcp {
         // cloud (bypassing the approval gate) or, passed `false`, quietly clear
         // `published` on a live post. Writing the local half here keeps a
         // published post's flag intact while its edits wait for approval.
-        let was_published = post.published;
+        // Read from the row this edit actually lands on, not from the copy
+        // loaded before the awaits below — see the merge in the transaction.
         let slug = post.slug.clone();
 
         // The body this post will have once the edit lands: the replacement when
@@ -416,7 +424,31 @@ impl BlogMcp {
         if db::trash_get(&txn, post.id).await.map_err(internal)?.is_some() {
             return Err(invalid(format!("Post {} is in the trash", post.id)));
         }
-        let saved = db::update::<PostModel>(&txn, post).await.map_err(internal)?;
+        // The row as it stands *now*, not as it stood before the body was
+        // resolved and the snapshot taken. Those awaits can take as long as an
+        // R2 download, and `into_update` writes every non-key column, so
+        // committing the earlier copy would put back whatever changed meanwhile
+        // — including `published`, which the owner may have set by pressing
+        // Publish while this edit was in flight. The post would go on being
+        // served while the app called it a draft that had never been published.
+        let current = db::get::<PostModel>(&txn, post.id)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| invalid(format!("Post {} no longer exists", post.id)))?;
+        // From the fresh row for the same reason: the stage written at the end
+        // of this function turns on it.
+        let was_published = current.published;
+
+        let mut merged = current;
+        if sets_title {
+            merged.title = post.title.clone();
+        }
+        if sets_tags {
+            merged.tags = post.tags.clone();
+        }
+        merged.updated_at = post.updated_at;
+
+        let saved = db::update::<PostModel>(&txn, merged).await.map_err(internal)?;
         txn.commit().await.map_err(internal)?;
 
         if params.body.is_some() {
