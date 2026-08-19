@@ -189,6 +189,10 @@ struct Running {
     port: u16,
     /// Dropping or firing this ends `axum::serve`'s graceful shutdown future.
     shutdown: tokio::sync::oneshot::Sender<()>,
+    /// The task holding the listener. Kept so [`stop`] can wait for it to
+    /// finish: firing `shutdown` only *asks*, and the socket stays bound until
+    /// the task polls that future and returns.
+    task: tauri::async_runtime::JoinHandle<()>,
 }
 
 /// Managed state holding the listener, if one is up.
@@ -276,7 +280,7 @@ pub async fn start(app: &tauri::AppHandle, port: u16) -> AppResult<u16> {
         .port();
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    tauri::async_runtime::spawn(async move {
+    let task = tauri::async_runtime::spawn(async move {
         let served = axum::serve(listener, router)
             .with_graceful_shutdown(async {
                 let _ = rx.await;
@@ -287,19 +291,35 @@ pub async fn start(app: &tauri::AppHandle, port: u16) -> AppResult<u16> {
         }
     });
 
-    *app.state::<McpServer>().lock() = Some(Running { port: bound, shutdown: tx });
+    *app.state::<McpServer>().lock() = Some(Running { port: bound, shutdown: tx, task });
     log::info!("MCP server listening on http://127.0.0.1:{bound}{ENDPOINT_PATH}");
     Ok(bound)
 }
 
-/// Shut the endpoint down. `false` when nothing was running.
-pub fn stop(app: &tauri::AppHandle) -> bool {
+/// Shut the endpoint down and wait for the port to be free again. `false` when
+/// nothing was running.
+///
+/// The waiting is the point. Both callers restart immediately, usually on the
+/// same port, and firing the shutdown signal only asks the serve task to finish
+/// — the `TcpListener` is dropped when that task next polls and returns, which
+/// has not happened yet when a synchronous `stop` hands back control. `start`
+/// would then bind a port still held by the server it just stopped and fail with
+/// `AddrInUse`, leaving `enabled: true` persisted and nothing listening: the
+/// Settings screen says the endpoint is on and no client can reach it. Whether
+/// that happened came down to which task the runtime polled first.
+pub async fn stop(app: &tauri::AppHandle) -> bool {
+    // Taken out of the lock in its own statement: the guard is a std mutex and
+    // must not be held across the await below.
     let running = app.state::<McpServer>().lock().take();
     match running {
         Some(r) => {
             // The receiver is gone only if the task already exited, which is the
             // same end state, so a failed send is not an error.
             let _ = r.shutdown.send(());
+            // Returns once `axum::serve` has, which is when the listener drops.
+            if let Err(e) = r.task.await {
+                log::warn!("MCP server task did not shut down cleanly: {e}");
+            }
             log::info!("MCP server stopped");
             true
         }
@@ -380,7 +400,7 @@ pub async fn mcp_configure(
     save_stored(&app, &stored)?;
 
     // Always stop first: this is also how a port change takes effect.
-    stop(&app);
+    stop(&app).await;
     if enabled {
         start(&app, port).await?;
     }
@@ -394,7 +414,7 @@ pub async fn mcp_regenerate_token(app: tauri::AppHandle) -> AppResult<McpStatus>
 
     // The running service captured the old token, so it has to be rebuilt.
     let stored = load_stored(&app);
-    if stop(&app) {
+    if stop(&app).await {
         start(&app, stored.port.unwrap_or(DEFAULT_PORT)).await?;
     }
     mcp_status(app)
