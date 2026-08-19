@@ -1,8 +1,8 @@
 use reqwest::Client;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ColumnTrait, DbBackend, EntityTrait, Insert, QueryFilter, QueryOrder, QueryTrait, Value,
-    Values,
+    ColumnTrait, DbBackend, EntityTrait, Insert, QueryFilter, QueryOrder, QueryTrait, UpdateMany,
+    Value, Values,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -503,14 +503,14 @@ pub async fn d1_post_upsert(
     d1_run(client, config, stmt).await.map(|_| ())
 }
 
-pub async fn d1_post_update(
-    client: &Client,
-    config: &CloudflareConfig,
-    model: post::Model,
-) -> AppResult<()> {
-    // UpdateOne isn't a `QueryTrait`, so build an UPDATE … WHERE id = ? explicitly.
-    let stmt = post::Entity::update_many()
-        .col_expr(post::Column::Slug, Expr::value(model.slug))
+/// The UPDATE behind [`d1_post_update`]. Split out so a test can read the SQL
+/// without a Cloudflare account to send it to — the predicate is the whole point
+/// of this function, and it is invisible from the outside.
+///
+/// The slug is the key, so it is not among the columns written.
+fn post_update_stmt(model: post::Model) -> UpdateMany<post::Entity> {
+    // UpdateOne isn't a `QueryTrait`, so build an UPDATE … WHERE explicitly.
+    post::Entity::update_many()
         .col_expr(post::Column::Title, Expr::value(model.title))
         .col_expr(post::Column::Excerpt, Expr::value(model.excerpt))
         .col_expr(post::Column::Tags, Expr::value(model.tags))
@@ -520,8 +520,38 @@ pub async fn d1_post_update(
         .col_expr(post::Column::SeriesOrder, Expr::value(model.series_order))
         .col_expr(post::Column::CreatedAt, Expr::value(model.created_at))
         .col_expr(post::Column::UpdatedAt, Expr::value(model.updated_at))
-        .filter(post::Column::Id.eq(model.id));
-    d1_run(client, config, stmt).await.map(|_| ())
+        .filter(post::Column::Slug.eq(model.slug))
+}
+
+/// Update a post in D1, finding it **by slug**.
+///
+/// Not by id, though the model carries one. The two databases hand out ids
+/// independently and nothing ever copies one across: [`d1_post_upsert`] inserts
+/// with the id unset and settles collisions on the slug, so D1 numbers its own
+/// rows, and a post pulled the other way is inserted locally with whatever
+/// SQLite assigns (`db::upsert_post_from_remote`). A local id is therefore not a
+/// name for anything up there. Used as one it addresses whichever post happens
+/// to hold that number in D1 — a *different* article, rewritten with this one's
+/// title and tags and taken off the blog — or no row at all.
+///
+/// The slug is the name both sides agree on: unique in each, what the R2 keys
+/// are built from, fixed when the post is created and preserved by every save
+/// afterwards, so it still names the same post later.
+pub async fn d1_post_update(
+    client: &Client,
+    config: &CloudflareConfig,
+    model: post::Model,
+) -> AppResult<()> {
+    let slug = model.slug.clone();
+    let env = d1_run(client, config, post_update_stmt(model)).await?;
+    // Nothing with that slug is up there. Reported rather than returned as
+    // success, because the caller has already written the local row to match a
+    // cloud change that did not happen — and quiet agreement between the two is
+    // how a post comes to read as a draft here while readers are still served it.
+    if rows_changed(&env) == 0 {
+        return Err(AppError::RemotePostMissing(slug));
+    }
+    Ok(())
 }
 
 // ── Series ─────────────────────────────────────────────────────────────────────
@@ -546,4 +576,64 @@ pub async fn d1_series_update(
 pub fn cf() -> AppResult<(Client, CloudflareConfig)> {
     let config = crate::auth::get_creds().ok_or(AppError::NotConfigured)?;
     Ok((Client::new(), config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_post() -> post::Model {
+        post::Model {
+            // Deliberately not 1: a local id that means nothing in D1 is the
+            // whole hazard, and a value that could coincide with the first row
+            // there would hide it.
+            id: 4321,
+            slug: "hello-world".to_string(),
+            title: "Hello".to_string(),
+            excerpt: None,
+            tags: None,
+            published: false,
+            published_at: None,
+            series_id: None,
+            series_order: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The post being updated is found by slug, never by id.
+    ///
+    /// Ids are assigned separately by the two databases, so an UPDATE keyed on a
+    /// local one addresses a different article in D1 or nothing at all. That is
+    /// not visible from the call site — the model carries both fields and the
+    /// wrong one compiles — so the predicate is asserted here.
+    #[test]
+    fn post_update_is_keyed_by_slug() {
+        let sql = post_update_stmt(sample_post()).build(DbBackend::Sqlite).sql;
+        let (set_clause, where_clause) = sql.split_once("WHERE").expect("update must be filtered");
+
+        assert!(
+            where_clause.contains("slug"),
+            "expected the row to be found by slug, got: {sql}"
+        );
+        assert!(
+            !where_clause.contains("\"id\""),
+            "the id must not narrow the update: {sql}"
+        );
+        // The key is not also cargo: writing it would be a no-op at best, and at
+        // worst would look like a rename this statement cannot perform.
+        assert!(
+            !set_clause.contains("\"slug\""),
+            "slug is the key, so it should not be assigned: {sql}"
+        );
+    }
+
+    /// The columns a caller expects to travel with a publish or unpublish.
+    #[test]
+    fn post_update_writes_the_readers_facing_columns() {
+        let sql = post_update_stmt(sample_post()).build(DbBackend::Sqlite).sql;
+        for column in ["title", "excerpt", "tags", "published", "published_at"] {
+            assert!(sql.contains(column), "expected `{column}` in: {sql}");
+        }
+    }
 }
