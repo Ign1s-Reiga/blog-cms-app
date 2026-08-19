@@ -42,8 +42,8 @@ schemars = "1"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
-# OS keychain backend for the Cloudflare API token. Windows Credential Manager
-# on Windows; other platforms fall back to the credentials file for now.
+# OS keychain backend for the Cloudflare API token: the Windows Credential
+# Manager. A store that cannot be reached falls back to the credentials file.
 #
 # `webview2-com` reaches the WebView2 settings behind the main window (see
 # `webview.rs`). Tauri re-exports these interfaces, so the version must track

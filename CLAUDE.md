@@ -120,7 +120,7 @@ decide what goes on the PR.
 
 ### Build
 
-- `pnpm tauri build`: Generate production-ready installers (MSI, AppImage, DMG, etc.).
+- `pnpm tauri build`: Generate production-ready Windows installers (NSIS `.exe` and MSI).
 
 ### Quality Control
 
