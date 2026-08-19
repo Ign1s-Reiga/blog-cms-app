@@ -9,7 +9,7 @@ network round-trip in the writing loop. Going to the cloud is an explicit act �
 schedule — and the app tracks, per post, how the local copy compares with what readers are being
 served.
 
-> **Status — v1.6.0.** Posts, media, publishing, scheduling, revisions, trash, sync-conflict
+> **Status — v1.6.1.** Posts, media, publishing, scheduling, revisions, trash, sync-conflict
 > resolution, an MCP endpoint, and in-app updates all work end to end. The Analytics route is still a
 > placeholder — the dashboard carries an R2/D1 usage card instead. See [Roadmap](#roadmap).
 >
