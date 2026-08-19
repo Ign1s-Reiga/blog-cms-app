@@ -427,12 +427,24 @@ pub async fn mirror_posts(
             txn.rollback().await?;
             continue;
         }
-        let never_pushed = sync_get(&txn, local.id)
+        // Work the cloud has never been given. Two posts lose the same way here
+        // and only one of them used to be spared: the one that has never been
+        // pushed at all, and the one that was pushed once and edited since. The
+        // second still has a synced hash, so a test for its absence called the
+        // post accounted-for and deleted it — the row, its stage, its sync
+        // record and every revision of it, with no trash row and no undo. What
+        // it actually had was a draft this machine was the only copy of.
+        //
+        // `local_changed` answers for both, since a post that has never been
+        // pushed has no synced hash to match its local one. It is also the same
+        // question the upsert branch asks before declining to overwrite a post,
+        // which is where the two branches had drifted apart.
+        let has_unpushed_work = sync_get(&txn, local.id)
             .await?
-            .is_some_and(|sync| sync.synced_hash.is_none());
-        if never_pushed {
+            .is_some_and(|sync| crate::sync_state::local_changed(&sync));
+        if has_unpushed_work {
             log::info!(
-                "Post `{}` is absent from the cloud because it has never been pushed; keeping it",
+                "Post `{}` is absent from the cloud but carries work that was never pushed; keeping it",
                 local.slug
             );
             txn.rollback().await?;
@@ -2108,5 +2120,76 @@ mod tests {
         // A remote series with no local counterpart maps nowhere.
         assert_eq!(map.to_local(7), None);
         assert_eq!(map.to_remote(999), None);
+    }
+}
+
+#[cfg(test)]
+mod refresh_deletion_tests {
+    use super::*;
+
+    fn a_post(slug: &str) -> post::Model {
+        post::Model {
+            id: 0,
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            excerpt: None,
+            tags: None,
+            published: true,
+            published_at: None,
+            series_id: None,
+            series_order: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The loss this guards against: a post that was published, then edited
+    /// here, then removed from D1 somewhere else. The local edits exist nowhere
+    /// but this machine, and a refresh used to delete the post along with its
+    /// revision history because it *had* been pushed once.
+    #[tokio::test]
+    async fn a_refresh_keeps_a_post_whose_local_edits_were_never_pushed() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, a_post("edited-here")).await.unwrap();
+
+        // Pushed once — both sides agreed on `published`.
+        sync_agree(&db, post.id, "published".to_string(), Some(100), 100).await.unwrap();
+        // Then edited locally, which is all autosave writes.
+        sync_set_local(&db, post.id, "edited".to_string()).await.unwrap();
+
+        // The cloud no longer has it.
+        mirror_posts(&db, vec![], &[]).await.unwrap();
+
+        assert!(
+            post_by_slug(&db, "edited-here").await.unwrap().is_some(),
+            "the refresh deleted a post carrying edits that exist nowhere else"
+        );
+    }
+
+    /// The case that has always worked, kept honest: never pushed at all.
+    #[tokio::test]
+    async fn a_refresh_keeps_a_post_that_was_never_pushed() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, a_post("never-pushed")).await.unwrap();
+        sync_set_local(&db, post.id, "local".to_string()).await.unwrap();
+
+        mirror_posts(&db, vec![], &[]).await.unwrap();
+
+        assert!(post_by_slug(&db, "never-pushed").await.unwrap().is_some());
+    }
+
+    /// And the other direction, so the guard above is not simply "keep
+    /// everything": a post in agreement with the cloud holds nothing this
+    /// machine would lose, so its removal upstream is a removal here.
+    #[tokio::test]
+    async fn a_refresh_still_deletes_a_post_that_matches_the_cloud() {
+        let db = connect_in_memory().await.unwrap();
+        let post = create::<post::Model>(&db, a_post("in-agreement")).await.unwrap();
+        sync_agree(&db, post.id, "same".to_string(), Some(100), 100).await.unwrap();
+
+        let result = mirror_posts(&db, vec![], &[]).await.unwrap();
+
+        assert!(post_by_slug(&db, "in-agreement").await.unwrap().is_none());
+        assert_eq!(result.deleted, 1);
     }
 }
