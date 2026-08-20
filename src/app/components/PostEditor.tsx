@@ -520,6 +520,7 @@ export function PostEditor() {
           const saved = await invoke<{ id: number; published: boolean }>('autosave_post', {
             id,
             ...content,
+            series: pendingSeries(),
           });
           // Recorded before anything else can fail: this text is on disk now,
           // and the next flush must not write it again.
@@ -715,25 +716,15 @@ export function PostEditor() {
           id: postIdRef.current,
           ...content,
           published: publish,
+          // On the row this save writes, not applied after it returns: a first
+          // save that publishes has already sent the post to D1 by then, and it
+          // would go live outside the series it was filed into.
+          series: pendingSeries(),
         }),
       );
       persisted.current = content;
-      const wasNew = postIdRef.current === null;
       setPostId(saved.id);
       postIdRef.current = saved.id;
-      // A series chosen before the post existed had nothing to be written to.
-      // This is the first moment there is.
-      if (wasNew && seriesRef.current.id !== null) {
-        try {
-          await invoke('set_post_series', {
-            postId: saved.id,
-            seriesId: seriesRef.current.id,
-            seriesOrder: seriesRef.current.order,
-          });
-        } catch (err) {
-          setSeriesError(String(err));
-        }
-      }
       setSlug(saved.slug);
       // Point the URL at the saved post so a refresh / next save targets it.
       window.history.replaceState(null, '', `/posts/edit?id=${saved.id}`);
@@ -1205,6 +1196,12 @@ export function PostEditor() {
       live = false;
     };
   }, []);
+
+  /// The series to hand a save that may be creating the post. Ignored by the
+  /// backend when the post already exists, which is why it can be sent every
+  /// time rather than only on the first save.
+  const pendingSeries = () =>
+    seriesRef.current.id === null ? null : { id: seriesRef.current.id, order: seriesRef.current.order };
 
   /// File the post, or take it out of a series.
   ///

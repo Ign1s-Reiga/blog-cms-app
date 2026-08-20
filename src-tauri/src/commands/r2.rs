@@ -493,9 +493,22 @@ pub async fn save_post(
     tags: String,
     body: String,
     published: bool,
+    series: Option<NewPostSeries>,
 ) -> AppResult<PostModel> {
     let origin = if published { post_revision::PUBLISH } else { post_revision::SAVE };
-    save(app, conn.inner(), id, title, tags, body, published, origin).await
+    save(app, conn.inner(), id, title, tags, body, published, origin, series).await
+}
+
+/// The series a **brand-new** post is being filed into, carried by the save
+/// that creates it.
+///
+/// Only read when there is no existing row: an established post already has its
+/// filing on the row, and changing it goes through
+/// [`crate::commands::set_post_series`].
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
+pub struct NewPostSeries {
+    pub id: Option<i32>,
+    pub order: Option<i32>,
 }
 
 /// Persist the editor's in-progress work to this machine, and to nowhere else.
@@ -519,8 +532,9 @@ pub async fn autosave_post(
     title: String,
     tags: String,
     body: String,
+    series: Option<NewPostSeries>,
 ) -> AppResult<PostModel> {
-    save(app, conn.inner(), id, title, tags, body, false, post_revision::AUTOSAVE).await
+    save(app, conn.inner(), id, title, tags, body, false, post_revision::AUTOSAVE, series).await
 }
 
 /// The save itself, shared by the editor's Save/Publish buttons and its
@@ -535,6 +549,7 @@ async fn save(
     body: String,
     published: bool,
     origin: &'static str,
+    series: Option<NewPostSeries>,
 ) -> AppResult<PostModel> {
     let now = now_ts();
 
@@ -565,6 +580,26 @@ async fn save(
             // surfaces as a raw constraint error on Save, and the staged body is
             // discarded with it.
             let slug = super::local_db::unique_slug(conn, &base).await?;
+            // A series chosen in the editor before the post existed. It has
+            // to be on the row this save writes, not applied afterwards: a
+            // first save that publishes has already sent the row to D1 by
+            // then, and the post goes live outside the series it was filed
+            // into.
+            //
+            // A series that is not in the local table is dropped rather than
+            // stored, so the row cannot come out of this pointing at an id
+            // that names nothing.
+            let (series_id, series_order) = match series {
+                Some(NewPostSeries { id: Some(series_id), order }) => {
+                    if db::get::<SeriesModel>(conn, series_id).await?.is_some() {
+                        (Some(series_id), order)
+                    } else {
+                        log::warn!("Ignoring series {series_id} for a new post: no such series");
+                        (None, None)
+                    }
+                }
+                _ => (None, None),
+            };
             PostModel {
                 id: 0,
                 slug,
@@ -573,8 +608,8 @@ async fn save(
                 tags: None,
                 published: false,
                 published_at: None,
-                series_id: None,
-                series_order: None,
+                series_id,
+                series_order,
                 created_at: now,
                 updated_at: now,
             }

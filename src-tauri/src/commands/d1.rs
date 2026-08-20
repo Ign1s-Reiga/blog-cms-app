@@ -290,16 +290,17 @@ pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> AppRe
     let remote = cloudflare::d1_list::<PostModel>(&client, &config).await?;
     let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
 
-    // Bring the cloud's series into the local table before the posts, so a
-    // series made on another machine exists here to be filed under. Matched by
-    // slug, keeping the local id — see `db::upsert_series_from_remote`.
+    // Bring down the series this machine does not have, before the posts, so a
+    // series made on another machine exists here to be filed under.
     //
-    // Nothing local is deleted for being absent up there. A series that has not
-    // been pushed yet is ordinary local work, and the pull is not evidence
-    // against it. Which series a *post* belongs to is decided by
-    // `db::resolve_series`, and this does not change that.
+    // Adding only, in both directions of not-doing-things: a local series the
+    // cloud lacks is not deleted, and a local series the cloud also has is not
+    // overwritten — see `db::adopt_series_from_remote` for why a Refresh must
+    // not discard a rename that has not been pushed yet. Which series a *post*
+    // belongs to is decided by `db::resolve_series`, and this does not change
+    // that.
     for series in &remote_series {
-        if let Err(e) = db::upsert_series_from_remote(conn.inner(), series.clone()).await {
+        if let Err(e) = db::adopt_series_from_remote(conn.inner(), series.clone()).await {
             log::warn!("Could not bring series `{}` down: {e}", series.slug);
         }
     }

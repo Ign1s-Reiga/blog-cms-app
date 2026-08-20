@@ -297,32 +297,32 @@ pub async fn unfile_series(db: &impl ConnectionTrait, series_id: i32) -> AppResu
     Ok(done.rows_affected)
 }
 
-/// Bring a series the cloud has into the local table, matched **by slug**.
+/// Add a series the cloud has and this machine does not, matched **by slug**.
 ///
-/// The local id is kept where a row already exists, because posts point at it:
-/// taking the remote id would refile every post in the series under a number
-/// that means something else here. That is the same rule [`SeriesMap`] follows,
-/// applied to the rows themselves rather than to the references.
+/// Adding only. A local row that already wears the slug is left exactly as it
+/// is, because nothing records whether its title has been edited here since the
+/// last push: overwriting it would silently discard a rename made locally and
+/// not yet sent, which a Refresh has no business doing.
 ///
-/// `created_at` is left as the local row has it. Both sides should agree on when
-/// a series was made, and if they do not, the difference is not worth a write.
-pub async fn upsert_series_from_remote(
+/// The consequence is that series metadata is local-authoritative, matching the
+/// push, which upserts local rows over the cloud's and never deletes them. A
+/// rename made *in the cloud* is therefore not adopted here and is overwritten
+/// by the next push. That is a stale title; the alternative was lost work.
+///
+/// What this is for is narrower than it looks: a post pulled from the cloud can
+/// only be filed under a series that exists locally, so a series made on another
+/// machine has to arrive before the posts that point at it. Which series a post
+/// belongs to is decided by [`resolve_series`], not here.
+pub async fn adopt_series_from_remote(
     db: &impl ConnectionTrait,
     remote: series::Model,
 ) -> AppResult<()> {
-    match series_by_slug(db, &remote.slug).await? {
-        Some(local) => {
-            let model = series::Model {
-                id: local.id,
-                created_at: local.created_at,
-                ..remote
-            };
-            update::<series::Model>(db, model).await?;
-        }
-        None => {
-            create::<series::Model>(db, remote).await?;
-        }
+    if series_by_slug(db, &remote.slug).await?.is_some() {
+        return Ok(());
     }
+    // Inserted with the id unset, so SQLite numbers it here. The cloud's id
+    // means nothing locally — see [`SeriesMap`].
+    create::<series::Model>(db, remote).await?;
     Ok(())
 }
 
@@ -2373,33 +2373,38 @@ mod series_tests {
         }
     }
 
-    /// The rule that keeps a pull from refiling every post: the local row keeps
-    /// its own id, because that is the number the posts point at.
+    /// Two rules at once: a slug the local table already has is left alone, and
+    /// the post filed under it does not change hands.
     #[tokio::test]
-    async fn a_series_from_the_cloud_keeps_the_local_id_its_posts_use() {
+    async fn a_series_the_cloud_also_has_is_left_exactly_as_it_is() {
         let db = connect_in_memory().await.unwrap();
         let local = create::<series::Model>(&db, a_series("shared")).await.unwrap();
         let post = create::<post::Model>(&db, a_post("filed", Some(local.id), Some(1)))
             .await
             .unwrap();
 
+        // Renamed here and not pushed yet.
+        let renamed = series::Model { title: "Renamed here".to_string(), ..local.clone() };
+        update::<series::Model>(&db, renamed).await.unwrap();
+
         // The cloud numbers its own rows, so the same series arrives wearing a
-        // different id and a title edited elsewhere.
+        // different id and the title it had before the local rename.
         let remote = series::Model {
             id: local.id + 999,
             slug: "shared".to_string(),
-            title: "Renamed in the cloud".to_string(),
+            title: "Old name".to_string(),
             description: Some("from up there".to_string()),
             created_at: 900,
         };
-        upsert_series_from_remote(&db, remote).await.unwrap();
+        adopt_series_from_remote(&db, remote).await.unwrap();
 
         let rows = series::Entity::find().all(&db).await.unwrap();
         assert_eq!(rows.len(), 1, "matched by slug, not inserted a second time");
         assert_eq!(rows[0].id, local.id);
-        assert_eq!(rows[0].title, "Renamed in the cloud");
-        assert_eq!(rows[0].description.as_deref(), Some("from up there"));
-        // Local `created_at` is left where it was.
+        // The unpushed rename survives the refresh — overwriting it here would
+        // discard work with no way to get it back.
+        assert_eq!(rows[0].title, "Renamed here");
+        assert_eq!(rows[0].description, None);
         assert_eq!(rows[0].created_at, 100);
 
         // The post is still filed where it was.
@@ -2410,7 +2415,7 @@ mod series_tests {
     #[tokio::test]
     async fn a_series_the_cloud_has_and_this_machine_does_not_is_added() {
         let db = connect_in_memory().await.unwrap();
-        upsert_series_from_remote(&db, a_series("new-here")).await.unwrap();
+        adopt_series_from_remote(&db, a_series("new-here")).await.unwrap();
         assert!(series_by_slug(&db, "new-here").await.unwrap().is_some());
     }
 }
