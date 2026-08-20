@@ -512,8 +512,15 @@ async fn save(
     let mut model = match previous.clone() {
         Some(existing) => existing.post,
         None => {
-            let slug = slugify(&title);
-            let slug = if slug.is_empty() { format!("post-{now}") } else { slug };
+            let base = slugify(&title);
+            let base = if base.is_empty() { format!("post-{now}") } else { base };
+            // The same search `import_article` runs, and for the same reason:
+            // `slug` is unique in the table, so a title colliding with a post
+            // that is already here — pulled from the cloud, imported, or sitting
+            // in the trash — fails the insert outright. From the editor that
+            // surfaces as a raw constraint error on Save, and the staged body is
+            // discarded with it.
+            let slug = super::local_db::unique_slug(conn, &base).await?;
             PostModel {
                 id: 0,
                 slug,
@@ -1732,5 +1739,39 @@ mod tests {
         }
 
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+}
+
+#[cfg(test)]
+mod new_post_slug_tests {
+    use super::*;
+    use crate::db::connect_in_memory;
+
+    /// A second post with the same title gets its own slug rather than failing
+    /// the unique constraint. `slug` is the identity both databases and every R2
+    /// key are built from, so two posts cannot share one — and the editor is
+    /// where duplicate titles are most likely to arrive.
+    #[tokio::test]
+    async fn a_repeated_title_does_not_collide() {
+        let db = connect_in_memory().await.unwrap();
+        let taken = PostModel {
+            id: 0,
+            slug: "my-post".to_string(),
+            title: "My Post".to_string(),
+            excerpt: None,
+            tags: None,
+            published: false,
+            published_at: None,
+            series_id: None,
+            series_order: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        db::create::<PostModel>(&db, taken).await.unwrap();
+
+        let next = super::super::local_db::unique_slug(&db, &slugify("My Post")).await.unwrap();
+
+        assert_eq!(next, "my-post-2");
+        assert!(db::post_by_slug(&db, "my-post").await.unwrap().is_some());
     }
 }

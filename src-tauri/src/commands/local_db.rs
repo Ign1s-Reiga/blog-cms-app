@@ -101,7 +101,7 @@ mod tests {
 ///
 /// The search terminates: every taken candidate is a distinct existing row, so
 /// it runs out after at most one step per post in the library.
-async fn unique_slug(db: &DatabaseConnection, base: &str) -> AppResult<String> {
+pub(super) async fn unique_slug(db: &DatabaseConnection, base: &str) -> AppResult<String> {
     if db::post_by_slug(db, base).await?.is_none() {
         return Ok(base.to_string());
     }
