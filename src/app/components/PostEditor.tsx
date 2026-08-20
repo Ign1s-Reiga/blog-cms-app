@@ -621,14 +621,12 @@ export function PostEditor() {
   // pushes the body to R2 and metadata to D1 (see the `save_post` command).
   const handleSave = async (publish: boolean) => {
     if (saveState.kind === 'saving') return;
-    // Nothing may be written while the body is still on its way in. Until the
-    // load completes the editor holds a real title over an empty body, and
-    // saving from there writes that emptiness over the post — locally, and for
-    // a publish into R2 as well. Autosave has been fenced off from this window
-    // since it was written (see `loadingRef`); the buttons were not, and they
-    // stay enabled throughout because `saveState` is idle. The ref is read
-    // rather than the state beside it because it is written synchronously, and
-    // one render's lag is the whole of the window being guarded.
+    // Nothing may be written while the body is still on its way in: until the
+    // load completes the editor holds a real title over an empty one, and saving
+    // from there writes that emptiness over the post — into R2 too, on a publish.
+    // See `loadingRef`, which fences autosave off from the same window. The ref
+    // rather than the state beside it, because one render's lag is the whole of
+    // what is being guarded.
     if (loadingRef.current) return;
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;

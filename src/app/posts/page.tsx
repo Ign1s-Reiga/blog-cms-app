@@ -614,22 +614,16 @@ export default function PostsPage() {
                       <span className='text-[12px] font-mono tabular-nums text-zinc-400 dark:text-zinc-600'>
                         {post.views !== undefined ? post.views.toLocaleString() : '—'}
                       </span>
-                      {/* Taking a post off the blog. Offered only where it means
-                      something — an unpublished post has nothing to withdraw —
-                      and without a confirmation, by the same rule the trash
-                      follows: publishing it again puts it back, so nothing here
-                      is spent. It is not a deletion, and the label says so
-                      rather than leaving the icon to carry it: the local copy,
-                      its history and its body all stay exactly where they are.
+                      {/* No confirmation, by the rule the trash button
+                      follows: publishing again puts the post back, so nothing
+                      here is spent.
 
                       Withheld from a post whose cloud copy is ahead or in
-                      conflict. `unpublish_post` writes this machine's whole row
-                      to D1 — title, excerpt, tags, series — so on those two it
-                      would not just take the post down, it would settle the
-                      disagreement in local's favour on the way past, which is
-                      the one thing the conflict state exists to stop happening
-                      by accident. Resolve it in the editor first; the button
-                      comes back. */}
+                      conflict. `unpublish_post` sends this machine's whole row
+                      to D1 — title, excerpt, tags, series — so there it would
+                      not just take the post down, it would settle the
+                      disagreement in local's favour on the way past. Resolve it
+                      in the editor first; the button comes back. */}
                       {post.status === 'published' &&
                         post.sync !== 'conflict' &&
                         post.sync !== 'remote_ahead' && (
