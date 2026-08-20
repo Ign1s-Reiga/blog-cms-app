@@ -290,7 +290,11 @@ export default function PostsPage() {
 
   const searchMatches = (p: Post) => {
     const q = search.toLowerCase();
-    return q === '' || p.title.toLowerCase().includes(q) || p.tags.some((t) => t.includes(q));
+    // The tag is lowered like the title is. Tags are stored as typed —
+    // `tags_to_json` only trims — so a `Cloudflare` tag was unreachable by
+    // search whichever case was typed: the query had already been lowered, and
+    // the tag had not.
+    return q === '' || p.title.toLowerCase().includes(q) || p.tags.some((t) => t.toLowerCase().includes(q));
   };
 
   const visible = posts.filter((p) => searchMatches(p) && matches(p, filter));
