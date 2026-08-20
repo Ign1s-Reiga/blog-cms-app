@@ -120,9 +120,7 @@ export async function publishDue(env: Env, now: number): Promise<PublishReport> 
   if (due.results.length === BATCH_LIMIT) {
     // Said out loud, because a full batch is indistinguishable from a finished
     // one in the counts below — and a backlog that never drains is worth seeing.
-    console.warn(
-      `Batch limit of ${BATCH_LIMIT} reached; any remaining schedules wait for the next tick.`,
-    );
+    console.warn(`Batch limit of ${BATCH_LIMIT} reached; any remaining schedules wait for the next tick.`);
   }
 
   const report: PublishReport = { published: [], failed: [], skipped: [] };

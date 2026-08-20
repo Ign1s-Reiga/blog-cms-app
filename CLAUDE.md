@@ -130,7 +130,10 @@ decide what goes on the PR.
 
 Formatting is scoped to `src/`, plus TypeScript and Markdown anywhere. It leaves
 `src-tauri/` to the Rust toolchain, and does not touch workflow YAML or JSON
-config such as `tauri.conf.json` and `tsconfig.json`.
+config such as `tauri.conf.json` and `tsconfig.json`. Anything `.gitignore`
+covers is skipped, so generated files are not reported as unformatted — without
+that, `fmt:check` fails on `next-env.d.ts`, which Next.js rewrites and nobody
+can commit.
 
 **Never run `pnpm run fmt` as part of a feature change.** A repo-wide reformat
 buried in a feature diff makes the real change unreviewable — match the style of
