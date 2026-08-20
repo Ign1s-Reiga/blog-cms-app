@@ -409,11 +409,12 @@ impl BlogMcp {
         // Ordered lock-then-database everywhere it is taken, so the paths that
         // hold it cannot deadlock against each other. Nothing under it reaches
         // the network. See `commands::lock_body_commits`.
-        let body_guard = if params.body.is_some() {
-            Some(commands::lock_body_commits().await)
-        } else {
-            None
-        };
+        // Taken whether or not a body was sent. The fingerprint written at the
+        // end of this function covers the body either way, so the metadata-only
+        // path needs the same protection as the one that replaces text — it was
+        // the guard's absence there that let an editor save land between this
+        // edit's read and its fingerprint.
+        let body_guard = commands::lock_body_commits().await;
 
         // Re-checked inside the transaction that writes. `load_post` refused a
         // trashed post several awaits ago — a body fetched from R2, a snapshot
@@ -479,10 +480,27 @@ impl BlogMcp {
         // while its text changes here and nowhere else. Recording the local
         // fingerprint is what lets the app say so, and it is deliberately the
         // same call the desktop editor makes — one state model, not two.
+        // Which body the fingerprint is about. When this call sent one, it is the
+        // text just written. When it did not, `body` was read before the lock
+        // and an editor save may have replaced the file since — so the copy on
+        // disk is re-read here, under the lock, and that is a local read with
+        // nothing slow about it.
+        //
+        // Hashing the stale copy instead would describe a version that is no
+        // longer anywhere, and if it happened to match `synced_hash` the post
+        // would read `clean` with an unpublished edit sitting in it.
+        let fingerprinted = match &params.body {
+            Some(sent) => sent.clone(),
+            None => {
+                let path = self.posts_dir()?.join(format!("{slug}.md"));
+                tokio::fs::read_to_string(&path).await.unwrap_or_else(|_| body.clone())
+            }
+        };
+
         db::sync_set_local(
             self.conn().inner(),
             saved.id,
-            crate::sync_state::content_hash(&saved, &body),
+            crate::sync_state::content_hash(&saved, &fingerprinted),
         )
         .await
         .map_err(internal)?;
