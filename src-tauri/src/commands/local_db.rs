@@ -47,6 +47,69 @@ pub(super) async fn unique_slug(db: &DatabaseConnection, base: &str) -> AppResul
 }
 
 #[cfg(test)]
+mod staged_import_tests {
+    use super::*;
+
+    fn staged(token: &str) -> Staged {
+        Staged {
+            token: token.to_string(),
+            body: format!("body for {token}"),
+            stem: "notes".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_claim_takes_the_entry_it_was_shown() {
+        let slot = StagedImport::default();
+        *slot.lock() = Some(staged("one"));
+
+        let claimed = slot.claim("one").expect("the token matches");
+        assert_eq!(claimed.body, "body for one");
+        // Taken, so a second confirm cannot create the post again.
+        assert!(slot.lock().is_none());
+        assert!(matches!(slot.claim("one"), Err(AppError::StaleImport)));
+    }
+
+    #[test]
+    fn a_claim_with_the_wrong_token_leaves_the_entry_alone() {
+        let slot = StagedImport::default();
+        *slot.lock() = Some(staged("current"));
+
+        assert!(matches!(slot.claim("stale"), Err(AppError::StaleImport)));
+        // The dialog that *is* on screen still has something to commit.
+        assert_eq!(slot.lock().as_ref().map(|s| s.token.clone()), Some("current".to_string()));
+    }
+
+    /// The failure this pair exists for: a transient error used to leave the
+    /// entry gone, so every retry answered `StaleImport` and the only way on was
+    /// to cancel and pick the file again.
+    #[test]
+    fn a_restored_entry_can_be_claimed_again() {
+        let slot = StagedImport::default();
+        *slot.lock() = Some(staged("one"));
+
+        let claimed = slot.claim("one").unwrap();
+        slot.restore(claimed);
+
+        assert_eq!(slot.claim("one").expect("restored").body, "body for one");
+    }
+
+    #[test]
+    fn a_restore_does_not_displace_a_newer_pick() {
+        let slot = StagedImport::default();
+        *slot.lock() = Some(staged("first"));
+        let claimed = slot.claim("first").unwrap();
+
+        // The author gave up on the failing import and picked another file.
+        *slot.lock() = Some(staged("second"));
+        slot.restore(claimed);
+
+        assert_eq!(slot.lock().as_ref().map(|s| s.token.clone()), Some("second".to_string()));
+        assert!(matches!(slot.claim("first"), Err(AppError::StaleImport)));
+    }
+}
+
+#[cfg(test)]
 mod slug_tests {
     use super::*;
 
@@ -137,6 +200,30 @@ pub struct StagedImport(Mutex<Option<Staged>>);
 impl StagedImport {
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Staged>> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Take the entry this token was shown for, leaving the slot empty.
+    ///
+    /// Taking rather than reading is what keeps two confirms from both creating
+    /// the post: only one of them can come away holding it.
+    fn claim(&self, token: &str) -> AppResult<Staged> {
+        let mut slot = self.lock();
+        match slot.as_ref() {
+            Some(s) if s.token == token => Ok(slot.take().expect("checked while holding the lock")),
+            _ => Err(AppError::StaleImport),
+        }
+    }
+
+    /// Put a claimed entry back after the work on it failed.
+    ///
+    /// Unless a newer pick has taken the slot since. That dialog is the one on
+    /// screen, and restoring over it would leave the app holding a document its
+    /// author never saw, ready to be imported by the next confirm.
+    fn restore(&self, entry: Staged) {
+        let mut slot = self.lock();
+        if slot.is_none() {
+            *slot = Some(entry);
+        }
     }
 }
 
@@ -274,14 +361,40 @@ pub async fn commit_import(
 ) -> AppResult<String> {
     // Take the slot, and only if it is the one this confirm was shown for. The
     // guard is dropped with the block, well before the first `.await`.
-    let entry = {
-        let mut slot = staged.lock();
-        match slot.as_ref() {
-            Some(s) if s.token == token => slot.take().expect("checked while holding the lock"),
-            _ => return Err(AppError::StaleImport),
-        }
-    };
+    //
+    // Taking rather than reading is what keeps two confirms from both creating
+    // the post: only one of them can hold the entry. The cost is that the entry
+    // is out of the slot while the work runs, which is why the failure path
+    // below puts it back.
+    let entry = staged.claim(&token)?;
 
+    match create_import(&app, conn.inner(), &entry, title, tags, excerpt, created_at).await {
+        Ok(title) => Ok(title),
+        Err(e) => {
+            // Put it back. The dialog stays open on a failure and re-enables its
+            // Import button, so without this every retry answers `StaleImport`
+            // and the only way forward is to cancel and pick the file again —
+            // for what may have been a transient database error.
+            //
+            // Unless a newer pick has taken the slot since: that dialog is the
+            // one on screen, and restoring over it would commit a document its
+            // author never saw.
+            staged.restore(entry);
+            Err(e)
+        }
+    }
+}
+
+/// The creation itself, on a staged import that stays staged until it succeeds.
+async fn create_import(
+    app: &tauri::AppHandle,
+    conn: &DatabaseConnection,
+    entry: &Staged,
+    title: String,
+    tags: String,
+    excerpt: Option<String>,
+    created_at: Option<i64>,
+) -> AppResult<String> {
     // An emptied title field falls back to the file name rather than creating a
     // post with no name at all.
     let title = match title.trim() {
@@ -298,7 +411,7 @@ pub async fn commit_import(
         // Fall back to a unique, non-empty slug (e.g. non-ASCII titles).
         if s.is_empty() { format!("post-{now}") } else { s }
     };
-    let slug = unique_slug(conn.inner(), &base).await?;
+    let slug = unique_slug(conn, &base).await?;
 
     // ── Record the metadata locally ──────────────────────────────────────────
     // Metadata first, body second. `slug` is unique, so the insert is what
@@ -321,20 +434,20 @@ pub async fn commit_import(
         created_at: created_at.unwrap_or(now),
         updated_at: now,
     };
-    let created = db::create::<PostModel>(conn.inner(), post).await?;
+    let created = db::create::<PostModel>(conn, post).await?;
 
     // ── Cache the body locally ───────────────────────────────────────────────
-    if let Err(e) = write_body(&app, &created.slug, &entry.body).await {
+    if let Err(e) = write_body(app, &created.slug, &entry.body).await {
         // Take the row back out rather than leave a post whose body never
         // landed: it would open as an empty document indistinguishable from one
         // genuinely written that way.
-        let _ = db::delete::<PostModel>(conn.inner(), created.id).await;
+        let _ = db::delete::<PostModel>(conn, created.id).await;
         return Err(e);
     }
 
     // Imported posts start staged as Draft.
     db::stage_set(
-        conn.inner(),
+        conn,
         post_stage::Model {
             post_id: created.id,
             stage: post_stage::DRAFT.to_string(),
@@ -345,7 +458,7 @@ pub async fn commit_import(
     // Local content the cloud has never seen — which is what an unsynced
     // fingerprint records.
     db::sync_set_local(
-        conn.inner(),
+        conn,
         created.id,
         crate::sync_state::content_hash(&created, &entry.body),
     )

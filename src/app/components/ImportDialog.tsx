@@ -32,11 +32,16 @@ const IGNORED_NOTE: Record<string, string> = {
   date: 'not in a date format this reads',
 };
 
+/// A date-only front matter value is stored as midnight **UTC**, so it has to
+/// be read back in UTC as well. Rendered in the machine's own zone, `2026-08-20`
+/// shows as August 19th anywhere west of Greenwich — a date the file does not
+/// say and the post will not carry.
 function formatDate(seconds: number): string {
   return new Date(seconds * 1000).toLocaleDateString(undefined, {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
+    timeZone: 'UTC',
   });
 }
 
