@@ -259,6 +259,33 @@ export function PostEditor() {
   /// The pending debounce, so a manual save can cancel it rather than have it
   /// fire again straight afterwards.
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /// The timer that returns the save banner to idle.
+  ///
+  /// Held so each operation can cancel the last one's. These are armed per
+  /// operation and fire blind, so a finished save's timer would otherwise clear
+  /// the banner belonging to the publish that followed it — and `handleSave`
+  /// reads that banner to decide whether a save is already running, so clearing
+  /// it mid-upload reopens the door to a second `save_post` with `published:
+  /// true`. The History button, disabled for the same reason, comes back too.
+  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /// Every write to the save banner goes through here, so no write can leave an
+  /// earlier operation's reset still armed. `resetAfterMs` is for the terminal
+  /// states that clear themselves; the rest cancel and stay put.
+  const showSaveState = useCallback((next: SaveState, resetAfterMs?: number) => {
+    if (bannerTimer.current !== null) {
+      clearTimeout(bannerTimer.current);
+      bannerTimer.current = null;
+    }
+    setSaveState(next);
+    if (resetAfterMs !== undefined) {
+      bannerTimer.current = setTimeout(() => {
+        bannerTimer.current = null;
+        setSaveState({ kind: 'idle' });
+      }, resetAfterMs);
+    }
+  }, []);
   /// Tail of the chain of writes to this post.
   ///
   /// Autosave and the Save/Publish buttons write the same row and the same
@@ -365,7 +392,7 @@ export function PostEditor() {
       clearTimeout(autosaveTimer.current);
       autosaveTimer.current = null;
     }
-    setSaveState({ kind: 'saving', publish: false });
+    showSaveState({ kind: 'saving', publish: false });
     try {
       // "Keep mine" settles the conflict on what is *stored*, so what is on
       // screen has to be stored first — cancelling the debounce above would
@@ -379,10 +406,9 @@ export function PostEditor() {
       // this lands after it rather than under it.
       await enqueueWrite(() => invoke('resolve_conflict', { postId, keep }));
       await loadFromBackend(invoke, postId);
-      setSaveState({ kind: 'idle' });
+      showSaveState({ kind: 'idle' });
     } catch (err) {
-      setSaveState({ kind: 'error', message: String(err) });
-      setTimeout(() => setSaveState({ kind: 'idle' }), 6000);
+      showSaveState({ kind: 'error', message: String(err) }, 6000);
     }
   };
 
@@ -564,6 +590,15 @@ export function PostEditor() {
     };
   }, [persistLocally]);
 
+  // A banner reset still armed when the editor closes would set state on a
+  // component that is gone.
+  useEffect(
+    () => () => {
+      if (bannerTimer.current !== null) clearTimeout(bannerTimer.current);
+    },
+    [],
+  );
+
   // ── Scheduling ──────────────────────────────────────────────────────────────
 
   /// Hand the post to Cloudflare to publish at the chosen time.
@@ -585,17 +620,16 @@ export function PostEditor() {
 
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
-    setSaveState({ kind: 'saving', publish: false });
+    showSaveState({ kind: 'saving', publish: false });
     try {
       await flushPending();
       await enqueueWrite(() => invoke('schedule_post', { postId, publishAt: at }));
       if (slug !== null) setSchedule(await readSchedule(invoke, slug));
       setScheduling(false);
-      setSaveState({ kind: 'idle' });
+      showSaveState({ kind: 'idle' });
       setSync(await readSyncState(invoke, postId));
     } catch (err) {
-      setSaveState({ kind: 'error', message: String(err) });
-      setTimeout(() => setSaveState({ kind: 'idle' }), 6000);
+      showSaveState({ kind: 'error', message: String(err) }, 6000);
     }
   };
 
@@ -606,14 +640,13 @@ export function PostEditor() {
     if (postId === null) return;
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
-    setSaveState({ kind: 'saving', publish: false });
+    showSaveState({ kind: 'saving', publish: false });
     try {
       await enqueueWrite(() => invoke('cancel_schedule', { postId }));
       if (slug !== null) setSchedule(await readSchedule(invoke, slug));
-      setSaveState({ kind: 'idle' });
+      showSaveState({ kind: 'idle' });
     } catch (err) {
-      setSaveState({ kind: 'error', message: String(err) });
-      setTimeout(() => setSaveState({ kind: 'idle' }), 6000);
+      showSaveState({ kind: 'error', message: String(err) }, 6000);
     }
   };
 
@@ -637,7 +670,7 @@ export function PostEditor() {
       autosaveTimer.current = null;
     }
     setLocalSave({ kind: 'idle' });
-    setSaveState({ kind: 'saving', publish });
+    showSaveState({ kind: 'saving', publish });
     try {
       // What is being saved, captured before the await so the baseline recorded
       // below is the text that actually went to disk rather than whatever has
@@ -670,11 +703,9 @@ export function PostEditor() {
       // thing that knows which happened.
       setLive(saved.published);
       setSync(await readSyncState(invoke, saved.id));
-      setSaveState({ kind: 'saved', publish });
-      setTimeout(() => setSaveState({ kind: 'idle' }), 3000);
+      showSaveState({ kind: 'saved', publish }, 3000);
     } catch (err) {
-      setSaveState({ kind: 'error', message: String(err) });
-      setTimeout(() => setSaveState({ kind: 'idle' }), 6000);
+      showSaveState({ kind: 'error', message: String(err) }, 6000);
       // A failed publish is exactly when the badge matters most: the post was
       // saved locally and staged `sync_failed`, and the error message here is
       // on a timer. Without this the pill would not appear until the page was
