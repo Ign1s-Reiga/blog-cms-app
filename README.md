@@ -32,8 +32,10 @@ served.
   Scheduled, Failed, and Trash.
 - **Trash** — deleting is a local soft delete. A published post that is trashed **stays live**;
   emptying the trash is the only path that is final.
-- **Import** an existing `.md` file as a draft. YAML front matter is **stripped**, not read: the
-  title comes from the file name and tags start empty, so metadata is re-entered in the app.
+- **Import** an existing `.md` file as a draft. Front matter is read as a **proposal**: title,
+  tags, excerpt, and date are pre-filled for you to confirm or change before anything is
+  created, and keys the app has nowhere to put are named rather than dropped in silence. The
+  body is still stored without the block, and `published: true` never publishes anything.
 - **Series** for grouping related posts — modelled and synced, though there is no management screen
   yet ([#100](https://github.com/Ign1s-Reiga/blog-cms-app/issues/100)).
 
