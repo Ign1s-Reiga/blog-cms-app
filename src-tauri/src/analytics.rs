@@ -200,7 +200,17 @@ async fn query(config: &CloudflareConfig, days: u32) -> Result<Analytics, Analyt
         }
     });
 
-    let client = reqwest::Client::new();
+    // A GraphQL query returns a few kilobytes, so this needs nothing like the
+    // allowance an upload does — and the card is something a person is waiting
+    // in front of. Without it a black-holed endpoint leaves the request in
+    // flight indefinitely.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| {
+            AnalyticsError::new(ErrorKind::Network, format!("Could not create an HTTP client: {e}"))
+        })?;
     let response = client
         .post(GRAPHQL_URL)
         .header("Authorization", format!("Bearer {}", config.api_token))
