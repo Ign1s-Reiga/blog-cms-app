@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "blog-cms-app"
-version = "1.6.3"
+version = "1.6.4"
 dependencies = [
  "axum",
  "chrono",
