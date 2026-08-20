@@ -400,7 +400,30 @@ pub async fn read_post_markdown(
             }
             Ok(content)
         }
-        None => Ok(String::new()),
+        None => {
+            // R2 holds no object under this key. For a post whose body has never
+            // been uploaded that is simply true — `sync_posts` pushes metadata
+            // without one — but it is not the truth about the *post* when this
+            // machine is holding text for it.
+            //
+            // Step 1 hands back the cache only when the copy is not stale *and*
+            // the read succeeds, so arriving here with a readable file means one
+            // of those was false. Answering with an empty document then is the
+            // same lie the credentials case above refuses to tell, and the rest
+            // of the app acts on it: autosave writes the emptiness into the
+            // cache, and an approved MCP publish uploads it as the article.
+            match tokio::fs::read_to_string(&local_path).await {
+                Ok(cached) if !cached.is_empty() => Ok(cached),
+                // A body is on disk and cannot be read — a scanner still holding
+                // it after the rename, most often. Refusing costs an error
+                // message; answering empty costs the post.
+                Err(_) if tokio::fs::try_exists(&local_path).await.unwrap_or(false) => {
+                    Err(AppError::BodyUnavailable(slug))
+                }
+                // Nothing here, nothing up there: the post really has no body.
+                _ => Ok(String::new()),
+            }
+        }
     }
 }
 
