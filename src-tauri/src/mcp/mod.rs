@@ -148,17 +148,14 @@ fn ensure_token(app: &tauri::AppHandle) -> AppResult<String> {
 /// Throw away the current token and issue a new one, invalidating every client
 /// config that carried the old one.
 ///
-/// The old shape of this was delete-then-`ensure_token`, and the delete was
-/// allowed to fail quietly. `ensure_token` begins by *reading*, and `load_token`
-/// reads the keychain before the file — so a credential store that refused the
-/// delete but still answered reads handed the old token straight back as the new
-/// one. The server restarted, the Settings screen showed a token, and the
-/// leaked value everybody was rotating away from went on working.
+/// Reading the token back is not a formality: the promise is that the old one
+/// stops working, and a store that quietly refuses a write would otherwise leave
+/// it in place behind a new-looking return value.
 fn rotate_token(app: &tauri::AppHandle) -> AppResult<String> {
     let token = uuid::Uuid::new_v4().simple().to_string();
 
-    // Overwritten rather than deleted first: `set_password` replaces the entry,
-    // so the old value cannot outlive a delete that did not happen.
+    // Overwrite rather than delete first: `set_password` replaces the entry, so
+    // the old value cannot outlive a delete that did not happen.
     let in_keychain = keyring_set(&token);
     if !in_keychain {
         // The file has to carry it instead — and anything still in the keychain
@@ -172,11 +169,9 @@ fn rotate_token(app: &tauri::AppHandle) -> AppResult<String> {
     stored.token = (!in_keychain).then(|| token.clone());
     save_stored(app, &stored)?;
 
-    // What the next reader will actually get. Which store answered, and why the
-    // other one did not, does not matter here: rotation is a promise that the
-    // old token stops working, and it cannot be kept halfway. If the effective
-    // token is not the one just issued, say so rather than return a new-looking
-    // string that changes nothing.
+    // What the next reader will actually get — which store answered does not
+    // matter. A rotation cannot be kept halfway, so a mismatch is reported
+    // rather than returned as success.
     match load_token(app) {
         Some(effective) if effective == token => Ok(token),
         _ => Err(AppError::McpTokenRotationFailed),
@@ -299,14 +294,11 @@ pub async fn start(app: &tauri::AppHandle, port: u16) -> AppResult<u16> {
 /// Shut the endpoint down and wait for the port to be free again. `false` when
 /// nothing was running.
 ///
-/// The waiting is the point. Both callers restart immediately, usually on the
-/// same port, and firing the shutdown signal only asks the serve task to finish
-/// — the `TcpListener` is dropped when that task next polls and returns, which
-/// has not happened yet when a synchronous `stop` hands back control. `start`
-/// would then bind a port still held by the server it just stopped and fail with
-/// `AddrInUse`, leaving `enabled: true` persisted and nothing listening: the
-/// Settings screen says the endpoint is on and no client can reach it. Whether
-/// that happened came down to which task the runtime polled first.
+/// The waiting is the point. Firing the signal only *asks*; the `TcpListener`
+/// lives in the serve task and is dropped when that task returns. Both callers
+/// restart on the same port straight afterwards, so returning early races them
+/// into `AddrInUse` with `enabled: true` already persisted — an endpoint the
+/// Settings screen calls on that nothing is listening to.
 pub async fn stop(app: &tauri::AppHandle) -> bool {
     // Taken out of the lock in its own statement: the guard is a std mutex and
     // must not be held across the await below.

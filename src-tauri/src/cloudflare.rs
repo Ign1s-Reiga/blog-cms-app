@@ -205,12 +205,10 @@ struct R2ListInfo {
 /// List objects in R2 whose key starts with `prefix` (e.g. `"media/"`).
 ///
 /// Follows the cursor to the end. R2 returns at most a thousand keys per call
-/// and says so in `result_info`, which this used to drop on the floor — a
-/// library past that size listed its first page and reported it as the whole
-/// bucket. Nothing failed: images simply stopped appearing in the media screen,
-/// `list_media` over MCP described a partial library as complete, and
-/// `media_usage` decided what was safe to delete from a view missing the very
-/// posts that might have been using it.
+/// and reports that in `result_info`; a caller that stops at the first page gets
+/// a partial bucket with nothing to say so. That matters most to `media_usage`,
+/// which decides whether an object is safe to delete — a missing page reads as
+/// nothing using it.
 pub async fn list_r2(
     client: &Client,
     config: &CloudflareConfig,
@@ -261,8 +259,7 @@ pub async fn list_r2(
         let next = parsed.result_info.cursor.filter(|c| !c.is_empty());
         match next {
             // A cursor that has not moved would fetch the same page forever.
-            // Stopping short is a partial answer, which is what this function
-            // was already giving; looping is not an answer at all.
+            // A partial answer is bad; not returning is worse.
             Some(from) if Some(&from) == cursor.as_ref() => {
                 log::warn!("R2 listing of `{prefix}` returned the same cursor twice; stopping");
                 break;

@@ -427,18 +427,14 @@ pub async fn mirror_posts(
             txn.rollback().await?;
             continue;
         }
-        // Work the cloud has never been given. Two posts lose the same way here
-        // and only one of them used to be spared: the one that has never been
-        // pushed at all, and the one that was pushed once and edited since. The
-        // second still has a synced hash, so a test for its absence called the
-        // post accounted-for and deleted it — the row, its stage, its sync
-        // record and every revision of it, with no trash row and no undo. What
-        // it actually had was a draft this machine was the only copy of.
+        // Work the cloud has never been given, which covers both a post never
+        // pushed at all and one pushed once and edited since — `local_changed`
+        // answers for both, since the first has no synced hash to match.
+        // Deleting either takes the row, its stage, its sync record and every
+        // revision of it, with no trash row and no undo.
         //
-        // `local_changed` answers for both, since a post that has never been
-        // pushed has no synced hash to match its local one. It is also the same
-        // question the upsert branch asks before declining to overwrite a post,
-        // which is where the two branches had drifted apart.
+        // The same question the upsert branch asks before declining to overwrite
+        // a post; the two must agree.
         let has_unpushed_work = sync_get(&txn, local.id)
             .await?
             .is_some_and(|sync| crate::sync_state::local_changed(&sync));

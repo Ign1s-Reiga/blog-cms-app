@@ -62,19 +62,15 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             setPhase('authed');
             // Pull the freshly connected account's posts into the local cache.
             //
-            // Caught rather than left to float. `LoginScreen` accepts a token
-            // without checking it — "a bad token surfaces as a clear error when
-            // the app talks to R2/D1" — and this is the first thing that talks
-            // to D1, so it is where that error was supposed to surface. Bare, it
-            // became an unhandled rejection instead: the modal closed, the
-            // dashboard read the empty local cache and said "No posts yet", and
-            // nothing anywhere said the credentials were wrong.
+            // `LoginScreen` accepts a token without checking it, on the
+            // grounds that a bad one surfaces when the app talks to R2/D1 —
+            // this pull is that moment, so its error has to be caught or the
+            // empty local cache reads as an account with no posts.
             //
-            // Reported where the sync buttons report theirs rather than as its
-            // own screen, because the app behind it is usable — everything local
-            // works, and the failure is about reaching Cloudflare.
+            // Shown beside the app rather than in front of it: everything local
+            // still works, and what failed was reaching Cloudflare.
             void pullFromCloud().catch((err: unknown) => {
-                setPullError(String(err));
+              setPullError(String(err));
             });
           }}
         />
@@ -92,9 +88,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           <p className='text-[12px] font-semibold text-red-700 dark:text-red-400'>
             Could not read this account&apos;s posts
           </p>
-          <p className='mt-0.5 text-[11px] leading-[1.5] text-red-600 dark:text-red-400/90'>
-            {pullError}
-          </p>
+          <p className='mt-0.5 text-[11px] leading-[1.5] text-red-600 dark:text-red-400/90'>{pullError}</p>
           <button
             type='button'
             onClick={() => setPullError(null)}
