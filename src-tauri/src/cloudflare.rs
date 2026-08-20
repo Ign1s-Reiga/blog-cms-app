@@ -37,6 +37,12 @@ pub struct CloudflareConfig {
     /// Key layout for images used in a post body. Free to change: the reader
     /// never derives these, it follows the URL written into the Markdown.
     pub media_key_pattern: String,
+    /// Which Web Analytics site readership is read from, as its site tag.
+    ///
+    /// Empty when none has been chosen — which is the ordinary state, since
+    /// nothing else in the app needs it. The Analytics route says so and offers
+    /// to pick one rather than showing an empty chart.
+    pub web_analytics_site_tag: String,
 }
 
 impl CloudflareConfig {
@@ -52,6 +58,8 @@ impl CloudflareConfig {
                 .unwrap_or_else(|_| crate::media_keys::DEFAULT_THUMBNAIL_PATTERN.to_string()),
             media_key_pattern: std::env::var("CF_MEDIA_KEY_PATTERN")
                 .unwrap_or_else(|_| crate::media_keys::DEFAULT_MEDIA_PATTERN.to_string()),
+            web_analytics_site_tag: std::env::var("CF_WEB_ANALYTICS_SITE_TAG")
+                .unwrap_or_default(),
         })
     }
 }

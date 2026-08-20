@@ -59,6 +59,10 @@ served.
 - **MCP server** — a local endpoint that lets an AI assistant read the library, draft, and edit,
   with publishing held behind an approval you give in the app.
 - **R2/D1 usage analytics** on the dashboard, read from Cloudflare's GraphQL API.
+- **Readership on the Analytics route** — views and visits per post over 7, 30 or 90 days, read from
+  Cloudflare Web Analytics and matched to posts by slug. Traffic that belongs to no post is listed
+  rather than dropped. Needs a Web Analytics site chosen once, and no token permission beyond the
+  one the usage card already asks for.
 - **In-app updates** from GitHub Releases, signed and verified before install.
 
 ## How it fits together
@@ -139,6 +143,7 @@ blog-cms-app/
 │   │   ├── media_keys.rs        # R2 key layout
 │   │   ├── media_usage.rs       # which posts use a media object
 │   │   ├── analytics.rs         # Cloudflare GraphQL usage data
+│   │   ├── traffic.rs           # Web Analytics readership, matched to posts
 │   │   ├── mcp/                 # MCP endpoint + gated publish queue
 │   │   └── update.rs            # self-update
 │   ├── tests/                   # MCP endpoint + tool-surface tests
@@ -209,14 +214,16 @@ falls back to environment variables, which is convenient on a dev machine:
 
 ### API token permissions
 
-| Permission                   | Needed for                                         |
-| ---------------------------- | -------------------------------------------------- |
-| **Workers R2 Storage: Edit** | Uploading bodies and media                         |
-| **D1: Edit**                 | Reading and writing post metadata                  |
-| **Account Analytics: Read**  | _Optional_ — the dashboard's R2/D1 usage card only |
+| Permission                   | Needed for                                          |
+| ---------------------------- | --------------------------------------------------- |
+| **Workers R2 Storage: Edit** | Uploading bodies and media                          |
+| **D1: Edit**                 | Reading and writing post metadata                   |
+| **Account Analytics: Read**  | _Optional_ — the usage card and the Analytics route |
 
-A token without the analytics permission is perfectly valid for everything else, so the dashboard
-says what is missing rather than showing an empty chart.
+A token without the analytics permission is perfectly valid for everything else, so both the
+dashboard and the Analytics route say what is missing rather than showing an empty chart. The same
+permission covers Web Analytics, so readership needs no second token — only a site to read, picked
+from the account on the Analytics route.
 
 ### D1 schema
 
