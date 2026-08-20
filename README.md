@@ -448,10 +448,6 @@ They are placed under `src/app/components/ui/`.
 Where this is going, one link per piece of work. Each issue is the current state of it — this list
 names the direction and leaves the detail there.
 
-- [Post performance and traffic on the Analytics route](https://github.com/Ign1s-Reiga/blog-cms-app/issues/99)
-- [A management UI for series](https://github.com/Ign1s-Reiga/blog-cms-app/issues/100)
-- [The media library beyond images](https://github.com/Ign1s-Reiga/blog-cms-app/issues/101)
-- [Front matter read on import rather than discarded](https://github.com/Ign1s-Reiga/blog-cms-app/issues/102)
 - [Markdown export](https://github.com/Ign1s-Reiga/blog-cms-app/issues/103)
 - [Search over post bodies](https://github.com/Ign1s-Reiga/blog-cms-app/issues/104)
 - [Tag management across the library](https://github.com/Ign1s-Reiga/blog-cms-app/issues/105)
