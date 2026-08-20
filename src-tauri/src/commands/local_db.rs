@@ -4,7 +4,10 @@
 //! Cloudflare credentials. Anything that also writes to the cloud lives in
 //! `d1` or `r2` instead.
 
+use std::sync::Mutex;
+
 use sea_orm::{DatabaseConnection, TransactionTrait};
+use serde::Serialize;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use crate::db;
@@ -12,82 +15,10 @@ use crate::entities::post::Model as PostModel;
 use crate::entities::{post_revision, post_stage};
 use crate::entities::series::Model as SeriesModel;
 use crate::error::{AppError, AppResult};
+use crate::frontmatter;
 use crate::media_keys;
 use crate::revisions;
 use super::*;
-
-// ─── Front matter ─────────────────────────────────────────────────────────────
-
-/// Remove a leading YAML front-matter block, if the file opens with one.
-///
-/// Nothing reads front matter: the blog takes a post's metadata from D1 and
-/// renders the body as given, so a block left in place publishes as a
-/// horizontal rule followed by a heading made of the raw `title:`/`tags:`
-/// lines. Imported files may still carry one from whatever wrote them, so it is
-/// dropped on the way in.
-///
-/// The block must open on the very first line and close on a line of its own.
-/// Without a closing delimiter the document is returned untouched, so a file
-/// that merely starts with a `---` rule is not truncated.
-fn strip_frontmatter(content: &str) -> &str {
-    let Some(after_open) = content.strip_prefix("---") else {
-        return content;
-    };
-    // The opening `---` has to be alone on its line, or it is a rule or a
-    // setext heading underline rather than a delimiter.
-    let Some(body) = after_open
-        .strip_prefix('\n')
-        .or_else(|| after_open.strip_prefix("\r\n"))
-    else {
-        return content;
-    };
-
-    let mut offset = 0;
-    for line in body.split_inclusive('\n') {
-        if matches!(line.trim_end_matches(['\r', '\n']), "---" | "...") {
-            return body[offset + line.len()..].trim_start_matches(['\r', '\n']);
-        }
-        offset += line.len();
-    }
-    content
-}
-
-#[cfg(test)]
-mod tests {
-    use super::strip_frontmatter;
-
-    #[test]
-    fn strips_a_leading_block() {
-        let doc = "---\ntitle: My Post\ntags: rust, tauri\n---\n\nReal body.\n";
-        assert_eq!(strip_frontmatter(doc), "Real body.\n");
-    }
-
-    #[test]
-    fn handles_crlf_and_the_dots_terminator() {
-        assert_eq!(strip_frontmatter("---\r\ntitle: x\r\n---\r\nBody\r\n"), "Body\r\n");
-        assert_eq!(strip_frontmatter("---\ntitle: x\n...\nBody\n"), "Body\n");
-    }
-
-    /// A document that merely opens with a rule must survive intact — otherwise
-    /// importing it would silently delete everything up to the next `---`.
-    #[test]
-    fn leaves_documents_without_a_closing_delimiter_alone() {
-        let rule_only = "---\n\nJust a rule, then prose.\n";
-        assert_eq!(strip_frontmatter(rule_only), rule_only);
-    }
-
-    #[test]
-    fn leaves_ordinary_documents_alone() {
-        for doc in ["# Heading\n\nBody\n", "Body only\n", "", "----\nnot a delimiter\n"] {
-            assert_eq!(strip_frontmatter(doc), doc);
-        }
-    }
-
-    #[test]
-    fn an_empty_block_still_goes() {
-        assert_eq!(strip_frontmatter("---\n---\nBody\n"), "Body\n");
-    }
-}
 
 // ─── Slugs ────────────────────────────────────────────────────────────────────
 
@@ -131,6 +62,69 @@ pub(super) async fn unique_series_slug(db: &DatabaseConnection, base: &str) -> A
         }
     }
     unreachable!("the loop returns once a candidate is free")
+}
+
+#[cfg(test)]
+mod staged_import_tests {
+    use super::*;
+
+    fn staged(token: &str) -> Staged {
+        Staged {
+            token: token.to_string(),
+            body: format!("body for {token}"),
+            stem: "notes".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_claim_takes_the_entry_it_was_shown() {
+        let slot = StagedImport::default();
+        *slot.lock() = Some(staged("one"));
+
+        let claimed = slot.claim("one").expect("the token matches");
+        assert_eq!(claimed.body, "body for one");
+        // Taken, so a second confirm cannot create the post again.
+        assert!(slot.lock().is_none());
+        assert!(matches!(slot.claim("one"), Err(AppError::StaleImport)));
+    }
+
+    #[test]
+    fn a_claim_with_the_wrong_token_leaves_the_entry_alone() {
+        let slot = StagedImport::default();
+        *slot.lock() = Some(staged("current"));
+
+        assert!(matches!(slot.claim("stale"), Err(AppError::StaleImport)));
+        // The dialog that *is* on screen still has something to commit.
+        assert_eq!(slot.lock().as_ref().map(|s| s.token.clone()), Some("current".to_string()));
+    }
+
+    /// The failure this pair exists for: a transient error used to leave the
+    /// entry gone, so every retry answered `StaleImport` and the only way on was
+    /// to cancel and pick the file again.
+    #[test]
+    fn a_restored_entry_can_be_claimed_again() {
+        let slot = StagedImport::default();
+        *slot.lock() = Some(staged("one"));
+
+        let claimed = slot.claim("one").unwrap();
+        slot.restore(claimed);
+
+        assert_eq!(slot.claim("one").expect("restored").body, "body for one");
+    }
+
+    #[test]
+    fn a_restore_does_not_displace_a_newer_pick() {
+        let slot = StagedImport::default();
+        *slot.lock() = Some(staged("first"));
+        let claimed = slot.claim("first").unwrap();
+
+        // The author gave up on the failing import and picked another file.
+        *slot.lock() = Some(staged("second"));
+        slot.restore(claimed);
+
+        assert_eq!(slot.lock().as_ref().map(|s| s.token.clone()), Some("second".to_string()));
+        assert!(matches!(slot.claim("first"), Err(AppError::StaleImport)));
+    }
 }
 
 #[cfg(test)]
@@ -229,23 +223,94 @@ async fn write_body(app: &tauri::AppHandle, slug: &str, body: &str) -> AppResult
         .map_err(|e| AppError::io("Failed to write local markdown", e))
 }
 
-// ─── Command ──────────────────────────────────────────────────────────────────
+// ─── Import ─────────────────────────────────────────────────────────────────
 
-/// Open a native file picker and import the selected Markdown file as a draft.
+/// A file that has been read and parsed, waiting for the author to confirm what
+/// it proposes.
 ///
-/// The post is created locally only — body in the app's cache, metadata in the
-/// local database, staged as a draft. Publishing or an explicit push is what
-/// sends it to the cloud.
+/// The picked path never crosses to the frontend and never comes back. The body
+/// is read here, held here, and written from here; what the dialog is given is a
+/// token, and a token is the only thing [`commit_import`] acts on. A confirmed
+/// import can therefore only create the file the dialog was actually showing —
+/// there is no path for a caller to substitute, which is the rule the rest of
+/// the OS-level commands follow too.
 ///
-/// Returns the post title on success.
-/// Returns `Err("cancelled")` when the user dismisses the dialog without
-/// choosing a file — the frontend treats this differently from real errors.
+/// One slot, like [`crate::update::PendingUpdate`], because only one dialog can
+/// be open at a time. Picking a second file replaces the first, and the token is
+/// what makes that safe: the stale dialog's confirm is refused rather than
+/// quietly applied to a document its author never saw.
+#[derive(Default)]
+pub struct StagedImport(Mutex<Option<Staged>>);
+
+impl StagedImport {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Staged>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Take the entry this token was shown for, leaving the slot empty.
+    ///
+    /// Taking rather than reading is what keeps two confirms from both creating
+    /// the post: only one of them can come away holding it.
+    fn claim(&self, token: &str) -> AppResult<Staged> {
+        let mut slot = self.lock();
+        match slot.as_ref() {
+            Some(s) if s.token == token => Ok(slot.take().expect("checked while holding the lock")),
+            _ => Err(AppError::StaleImport),
+        }
+    }
+
+    /// Put a claimed entry back after the work on it failed.
+    ///
+    /// Unless a newer pick has taken the slot since. That dialog is the one on
+    /// screen, and restoring over it would leave the app holding a document its
+    /// author never saw, ready to be imported by the next confirm.
+    fn restore(&self, entry: Staged) {
+        let mut slot = self.lock();
+        if slot.is_none() {
+            *slot = Some(entry);
+        }
+    }
+}
+
+pub struct Staged {
+    token: String,
+    /// The document with any front matter already taken out of it.
+    body: String,
+    /// The file name without its extension — the title when nothing else says.
+    stem: String,
+}
+
+/// What an import proposes for itself, for the author to confirm or overwrite.
+///
+/// Every field is a suggestion. `from_file` says which of them the document
+/// actually stated, so the dialog can tell metadata the file carried from the
+/// app's own fallback, and `ignored` names the keys nothing read — the
+/// difference between "your date was passed over" and "you gave no date".
+#[derive(Serialize)]
+pub struct ImportProposal {
+    pub token: String,
+    pub file_name: String,
+    pub title: String,
+    /// Comma-separated, the shape the editor's tag field uses.
+    pub tags: String,
+    pub excerpt: String,
+    /// Seconds. `None` dates the post to when it was imported.
+    pub created_at: Option<i64>,
+    pub from_file: Vec<String>,
+    pub ignored: Vec<String>,
+}
+
+/// Open a native file picker, read the chosen Markdown file, and return what it
+/// proposes. **Nothing is created** — [`commit_import`] does that, once the
+/// author has seen the metadata and said yes.
+///
+/// Returns `Err("cancelled")` when the dialog is dismissed without choosing a
+/// file — the frontend treats that differently from real errors.
 #[tauri::command]
-pub async fn import_article(
+pub async fn stage_import(
     app: tauri::AppHandle,
-    conn: State<'_, DatabaseConnection>,
-) -> AppResult<String> {
-    // ── 1. File picker ────────────────────────────────────────────────────────
+    staged: State<'_, StagedImport>,
+) -> AppResult<ImportProposal> {
     // `blocking_pick_file` must not run on a tokio thread; use spawn_blocking.
     let app_clone = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
@@ -258,7 +323,6 @@ pub async fn import_article(
     .await
     .map_err(|e| AppError::join("Dialog thread panicked", e))?;
 
-    // Resolve to a PathBuf; return "cancelled" if the dialog was dismissed.
     let file_path = match picked {
         None => return Err(AppError::Cancelled),
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -267,36 +331,134 @@ pub async fn import_article(
         Some(_) => return Err(AppError::UnsupportedPathFormat),
     };
 
-    // ── 2. Read file ──────────────────────────────────────────────────────────
     let content = tokio::fs::read_to_string(&file_path)
         .await
         .map_err(|e| AppError::io("Failed to read file", e))?;
 
-    // ── 3. Extract metadata ───────────────────────────────────────────────────
-    // The file name is the only metadata an imported document carries that the
-    // blog can use; tags are added afterwards in the app.
-    let body = strip_frontmatter(&content);
+    // A block that cannot be made sense of yields nothing, and the file name
+    // carries the import exactly as it did before front matter was read at all.
+    let (front, body) = frontmatter::split(&content);
+    let front = front.unwrap_or_default();
 
     let stem = file_path
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("untitled");
+        .unwrap_or("untitled")
+        .to_string();
+    let file_name = file_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&stem)
+        .to_string();
 
-    let title = stem.to_string();
-    let tags = String::new();
+    let mut from_file = Vec::new();
+    for (present, name) in [
+        (front.title.is_some(), "title"),
+        (!front.tags.is_empty(), "tags"),
+        (front.excerpt.is_some(), "excerpt"),
+        (front.date.is_some(), "date"),
+    ] {
+        if present {
+            from_file.push(name.to_string());
+        }
+    }
 
-    // ── 4. Derive slug + R2 key ───────────────────────────────────────────────
+    let token = uuid::Uuid::new_v4().to_string();
+    let proposal = ImportProposal {
+        token: token.clone(),
+        file_name,
+        title: front.title.unwrap_or_else(|| stem.clone()),
+        tags: front.tags.join(", "),
+        excerpt: front.excerpt.unwrap_or_default(),
+        created_at: front.date,
+        from_file,
+        ignored: front.ignored,
+    };
+
+    *staged.lock() = Some(Staged {
+        token,
+        body: body.to_string(),
+        stem,
+    });
+
+    Ok(proposal)
+}
+
+/// Create the staged import as a local draft, with the metadata as confirmed.
+///
+/// The post is created locally only — body in the app's cache, metadata in the
+/// local database, staged as a draft. Publishing or an explicit push is what
+/// sends it to the cloud, so this needs no credentials and puts no unpublished
+/// body in the bucket. A `published: true` in the file changes none of that: it
+/// was reported as unread and goes no further.
+///
+/// Returns the post title on success.
+#[tauri::command]
+pub async fn commit_import(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    staged: State<'_, StagedImport>,
+    token: String,
+    title: String,
+    tags: String,
+    excerpt: Option<String>,
+    created_at: Option<i64>,
+) -> AppResult<String> {
+    // Take the slot, and only if it is the one this confirm was shown for. The
+    // guard is dropped with the block, well before the first `.await`.
+    //
+    // Taking rather than reading is what keeps two confirms from both creating
+    // the post: only one of them can hold the entry. The cost is that the entry
+    // is out of the slot while the work runs, which is why the failure path
+    // below puts it back.
+    let entry = staged.claim(&token)?;
+
+    match create_import(&app, conn.inner(), &entry, title, tags, excerpt, created_at).await {
+        Ok(title) => Ok(title),
+        Err(e) => {
+            // Put it back. The dialog stays open on a failure and re-enables its
+            // Import button, so without this every retry answers `StaleImport`
+            // and the only way forward is to cancel and pick the file again —
+            // for what may have been a transient database error.
+            //
+            // Unless a newer pick has taken the slot since: that dialog is the
+            // one on screen, and restoring over it would commit a document its
+            // author never saw.
+            staged.restore(entry);
+            Err(e)
+        }
+    }
+}
+
+/// The creation itself, on a staged import that stays staged until it succeeds.
+async fn create_import(
+    app: &tauri::AppHandle,
+    conn: &DatabaseConnection,
+    entry: &Staged,
+    title: String,
+    tags: String,
+    excerpt: Option<String>,
+    created_at: Option<i64>,
+) -> AppResult<String> {
+    // An emptied title field falls back to the file name rather than creating a
+    // post with no name at all.
+    let title = match title.trim() {
+        "" => entry.stem.as_str(),
+        t => t,
+    };
+
+    // ── Derive slug + R2 key ─────────────────────────────────────────────────
     // The id is auto-assigned by the DB, so the R2 object key is keyed by slug.
     let now = now_ts();
     let base = {
-        let s = slugify(&title);
-        let s = if s.is_empty() { slugify(stem) } else { s };
+        let s = slugify(title);
+        let s = if s.is_empty() { slugify(&entry.stem) } else { s };
         // Fall back to a unique, non-empty slug (e.g. non-ASCII titles).
         if s.is_empty() { format!("post-{now}") } else { s }
     };
-    let slug = unique_slug(conn.inner(), &base).await?;
+    let slug = unique_slug(conn, &base).await?;
 
-    // ── 5. Record the metadata locally ───────────────────────────────────────
+    // ── Record the metadata locally ──────────────────────────────────────────
     // Metadata first, body second. `slug` is unique, so the insert is what
     // ultimately decides whether this import may exist — and running it before
     // the file write means a slug that slipped past `unique_slug` (two imports
@@ -305,34 +467,32 @@ pub async fn import_article(
     let post = PostModel {
         id: 0, // ignored on insert (auto-increment)
         slug,
-        title: title.clone(),
-        excerpt: None,
+        title: title.to_string(),
+        excerpt: excerpt.filter(|e| !e.trim().is_empty()),
         tags: Some(tags_to_json(&tags)),
         published: false,
         published_at: None,
         series_id: None,
         series_order: None,
-        created_at: now,
+        // A date the file stated is when the post was written; `updated_at` is
+        // when it arrived here, which is now either way.
+        created_at: created_at.unwrap_or(now),
         updated_at: now,
     };
-    let created = db::create::<PostModel>(conn.inner(), post).await?;
+    let created = db::create::<PostModel>(conn, post).await?;
 
-    // ── 6. Cache the body locally ────────────────────────────────────────────
-    // An import lands as a draft, and a draft is local-only — the same rule
-    // `save_post` follows. Nothing reaches R2 or D1 until the post is published
-    // from the editor or pushed with "Push to cloud", so importing needs no
-    // credentials and never puts an unpublished body in the bucket.
-    if let Err(e) = write_body(&app, &created.slug, body).await {
+    // ── Cache the body locally ───────────────────────────────────────────────
+    if let Err(e) = write_body(app, &created.slug, &entry.body).await {
         // Take the row back out rather than leave a post whose body never
         // landed: it would open as an empty document indistinguishable from one
         // genuinely written that way.
-        let _ = db::delete::<PostModel>(conn.inner(), created.id).await;
+        let _ = db::delete::<PostModel>(conn, created.id).await;
         return Err(e);
     }
 
     // Imported posts start staged as Draft.
     db::stage_set(
-        conn.inner(),
+        conn,
         post_stage::Model {
             post_id: created.id,
             stage: post_stage::DRAFT.to_string(),
@@ -343,13 +503,27 @@ pub async fn import_article(
     // Local content the cloud has never seen — which is what an unsynced
     // fingerprint records.
     db::sync_set_local(
-        conn.inner(),
+        conn,
         created.id,
-        crate::sync_state::content_hash(&created, body),
+        crate::sync_state::content_hash(&created, &entry.body),
     )
     .await?;
 
-    Ok(title)
+    Ok(title.to_string())
+}
+
+/// Drop a staged import the author decided against, so its body is not left
+/// sitting in memory until the next pick displaces it.
+///
+/// A token that no longer matches is a no-op: a later pick has already taken the
+/// slot, and cancelling the dialog that lost the race must not throw the newer
+/// one away.
+#[tauri::command]
+pub fn cancel_import(staged: State<'_, StagedImport>, token: String) {
+    let mut slot = staged.lock();
+    if slot.as_ref().is_some_and(|s| s.token == token) {
+        *slot = None;
+    }
 }
 
 // ── Posts: local SQLite ─────────────────────────────────────────────────────────

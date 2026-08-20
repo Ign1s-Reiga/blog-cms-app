@@ -24,6 +24,7 @@ import { renderMarkdown } from '@ign1s-reiga/marked-presets';
 import '@ign1s-reiga/marked-presets/styles';
 import './markdown-theme.css';
 import { useTheme } from 'next-themes';
+import { mediaMarkup } from '@/lib/media';
 import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { appDataDir, join } from '@tauri-apps/api/path';
@@ -890,8 +891,9 @@ export function PostEditor() {
     if (!isTauri()) return;
     try {
       const staged = await invoke<StagedImage>('stage_media_from_library', { key: entry.key });
-      const alt = staged.name.replace(/\.[^.]+$/, '');
-      insertBlock(`![${alt}](${staged.rel})`);
+      // An image tag around a video renders as a broken image and nothing else,
+      // which is what picking a video from the library used to produce.
+      insertBlock(mediaMarkup(staged.rel, staged.name));
     } catch (err) {
       console.error('Failed to insert media from library:', err);
     }
