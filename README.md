@@ -34,8 +34,9 @@ served.
   emptying the trash is the only path that is final.
 - **Import** an existing `.md` file as a draft. YAML front matter is **stripped**, not read: the
   title comes from the file name and tags start empty, so metadata is re-entered in the app.
-- **Series** for grouping related posts — modelled and synced, though there is no management screen
-  yet ([#100](https://github.com/Ign1s-Reiga/blog-cms-app/issues/100)).
+- **Series** for grouping related posts. Create and edit them on the Series screen, file a post
+  into one from its editor, and set where it sits in the reading order. Deleting a series
+  unfiles its posts rather than taking them with it.
 
 ### Publishing
 
@@ -114,6 +115,7 @@ blog-cms-app/
 │   │   └── UpdateCard.tsx       # check / download / install
 │   ├── lib/                     # cn(), sync helpers, updater client
 │   ├── posts/                   # /posts, /posts/new, /posts/edit
+│   ├── series/                   # /series — create, edit, and see what is filed
 │   ├── media/ analytics/ settings/
 │   └── layout.tsx page.tsx globals.css
 ├── src-tauri/                   # Tauri backend (Rust)
@@ -302,7 +304,8 @@ an object that is not there.
 
 **Push to cloud is metadata only.** It is how a title, tag or series change reaches the blog without
 re-uploading anything, but a post whose _body_ has been edited needs a publish before readers see the
-new text.
+new text. Series rows go up ahead of the posts, so a series made here is one the cloud can file them
+under; a series only the cloud has is left alone.
 
 ## Scheduled publishing
 

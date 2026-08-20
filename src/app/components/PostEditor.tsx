@@ -11,6 +11,7 @@ import {
   History,
   ImagePlus,
   Italic,
+  Layers,
   Link2,
   PenLine,
   Strikethrough,
@@ -217,12 +218,31 @@ function sameContent(a: Content, b: Content): boolean {
 
 // ─── PostEditor ───────────────────────────────────────────────────────────────
 
+/// The series a post can be filed under. Mirrors the columns of `list_series`
+/// that this screen needs.
+type SeriesOption = { id: number; title: string };
+
 export function PostEditor() {
   const [title, setTitle] = useState('');
   const [tags, setTags] = useState('');
   const [body, setBody] = useState('');
 
   const [postId, setPostId] = useState<number | null>(null);
+
+  /// The series this post is filed under, and where it sits in one.
+  ///
+  /// Not part of the save. `content_hash` covers what a reader would notice
+  /// of the post's own content, and membership of a series is not in it — so
+  /// filing a post is written through `set_post_series` the moment it is
+  /// chosen, rather than waiting for a Save that would report the post as
+  /// edited when none of its text changed.
+  const [seriesList, setSeriesList] = useState<SeriesOption[]>([]);
+  const [seriesId, setSeriesId] = useState<number | null>(null);
+  const [seriesOrder, setSeriesOrder] = useState('');
+  const [seriesError, setSeriesError] = useState<string | null>(null);
+  /// The filing as it stands, for the save that gives a new post its id —
+  /// there is nothing to write it to until then.
+  const seriesRef = useRef<{ id: number | null; order: number | null }>({ id: null, order: null });
   const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' });
   const [localSave, setLocalSave] = useState<LocalSaveState>({ kind: 'idle' });
 
@@ -338,11 +358,16 @@ export function PostEditor() {
           tags: string | null;
           slug: string;
           published: boolean;
+          series_id: number | null;
+          series_order: number | null;
         } | null>('get_post', { id });
         if (!post || !keepGoing()) return;
         setTitle(post.title);
         setTags(parseTags(post.tags));
         setLive(post.published);
+        setSeriesId(post.series_id);
+        setSeriesOrder(post.series_order === null ? '' : String(post.series_order));
+        seriesRef.current = { id: post.series_id, order: post.series_order };
         const md = await invoke<string>('read_post_markdown', { slug: post.slug });
         if (!keepGoing()) return;
         setBody(md);
@@ -693,8 +718,22 @@ export function PostEditor() {
         }),
       );
       persisted.current = content;
+      const wasNew = postIdRef.current === null;
       setPostId(saved.id);
       postIdRef.current = saved.id;
+      // A series chosen before the post existed had nothing to be written to.
+      // This is the first moment there is.
+      if (wasNew && seriesRef.current.id !== null) {
+        try {
+          await invoke('set_post_series', {
+            postId: saved.id,
+            seriesId: seriesRef.current.id,
+            seriesOrder: seriesRef.current.order,
+          });
+        } catch (err) {
+          setSeriesError(String(err));
+        }
+      }
       setSlug(saved.slug);
       // Point the URL at the saved post so a refresh / next save targets it.
       window.history.replaceState(null, '', `/posts/edit?id=${saved.id}`);
@@ -1148,6 +1187,46 @@ export function PostEditor() {
     // stable refs/setters, so it never needs to re-subscribe.
   }, []);
 
+  // The series available to file into. Local read, and small — there are only
+  // ever a handful — so it is fetched once and not refreshed while the editor
+  // is open. A series made after this point appears the next time it opens.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let live = true;
+    void invoke<SeriesOption[]>('list_series')
+      .then((rows) => {
+        if (live) setSeriesList(rows);
+      })
+      .catch(() => {
+        // A failure here costs the dropdown its options, which is visible on
+        // its own. The editor still saves, publishes, and schedules.
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  /// File the post, or take it out of a series.
+  ///
+  /// A post that does not exist yet has nothing to write to, so the choice is
+  /// held in `seriesRef` and applied by the save that creates it.
+  const applySeries = async (nextId: number | null, nextOrder: number | null) => {
+    setSeriesId(nextId);
+    setSeriesOrder(nextOrder === null ? '' : String(nextOrder));
+    seriesRef.current = { id: nextId, order: nextOrder };
+    setSeriesError(null);
+
+    const id = postIdRef.current;
+    if (id === null || !isTauri()) return;
+    try {
+      await enqueueWrite(() => invoke('set_post_series', { postId: id, seriesId: nextId, seriesOrder: nextOrder }));
+    } catch (err) {
+      // Said out loud rather than swallowed: the control would otherwise show a
+      // filing the database does not have.
+      setSeriesError(String(err));
+    }
+  };
+
   // ── Shared fields, composed differently per layout mode below ────────────────
 
   const titleField = (
@@ -1184,6 +1263,65 @@ export function PostEditor() {
       />
       <span className='text-zinc-200 dark:text-zinc-800 shrink-0'>·</span>
       <span className='text-[11px] font-mono tracking-tight text-zinc-300 dark:text-zinc-700 shrink-0'>{today()}</span>
+    </div>
+  );
+
+  const seriesField = (
+    <div className='flex items-center gap-2 px-4 pb-2 shrink-0'>
+      <Layers size={11} strokeWidth={1.8} className='text-zinc-300 dark:text-zinc-700 shrink-0' />
+      <select
+        aria-label='Series'
+        value={seriesId ?? ''}
+        onChange={(e) => {
+          const next = e.target.value === '' ? null : Number(e.target.value);
+          // Dropping out of a series drops the position with it: an order with
+          // no series to be ordered within is a number about nothing.
+          void applySeries(next, next === null ? null : seriesRef.current.order);
+        }}
+        className={[
+          'text-[12px] font-medium max-w-[240px]',
+          seriesId === null ? 'text-zinc-300 dark:text-zinc-700' : 'text-zinc-500 dark:text-zinc-500',
+          'bg-transparent border-none outline-none focus:ring-0',
+          'transition-colors cursor-pointer',
+        ].join(' ')}
+      >
+        <option value=''>No series</option>
+        {seriesList.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.title}
+          </option>
+        ))}
+      </select>
+
+      {seriesId !== null && (
+        <>
+          <span className='text-zinc-200 dark:text-zinc-800 shrink-0'>·</span>
+          <input
+            type='number'
+            min={1}
+            aria-label='Position in series'
+            value={seriesOrder}
+            onChange={(e) => setSeriesOrder(e.target.value)}
+            // Written on blur rather than per keystroke: every digit typed
+            // would otherwise be a separate write, and `12` would pass through
+            // being `1`.
+            onBlur={() => {
+              const parsed = seriesOrder.trim() === '' ? null : Number(seriesOrder);
+              const next = parsed !== null && Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+              if (next !== seriesRef.current.order) void applySeries(seriesId, next);
+            }}
+            placeholder='#'
+            className={[
+              'w-[42px] text-[12px] font-medium',
+              'text-zinc-500 dark:text-zinc-500',
+              'placeholder:text-zinc-300 dark:placeholder:text-zinc-700',
+              'bg-transparent border-none outline-none focus:ring-0',
+            ].join(' ')}
+          />
+        </>
+      )}
+
+      {seriesError && <span className='truncate text-[11px] text-red-600 dark:text-red-400'>{seriesError}</span>}
     </div>
   );
 
@@ -1495,6 +1633,7 @@ export function PostEditor() {
           <div className='shrink-0 w-full'>
             {titleField}
             {tagsField}
+            {seriesField}
           </div>
           {divider}
           <div className='flex-1 min-h-0 flex'>
@@ -1508,6 +1647,7 @@ export function PostEditor() {
         <div className='flex-1 min-h-0 flex flex-col max-w-[760px] w-full mx-auto px-2'>
           {titleField}
           {tagsField}
+          {seriesField}
           {divider}
           {mode === 'write' ? (
             editor

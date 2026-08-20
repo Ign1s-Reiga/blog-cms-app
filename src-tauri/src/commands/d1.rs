@@ -193,6 +193,27 @@ pub async fn sync_posts(conn: State<'_, DatabaseConnection>) -> AppResult<usize>
     // is translated through the slug both databases agree on. Sending it raw
     // would file the post under whichever unrelated remote series happened to
     // land on that number.
+    // Series go up first. A post's `series_id` can only be translated into a
+    // remote id that exists, so a series made on this machine and never sent
+    // would take every post in it across unfiled — the association would be
+    // made in the app and lost in the crossing, with only a log line to say so.
+    //
+    // Upsert only. A series the cloud has and this machine does not is left
+    // alone: "absent locally" means *not pulled yet* as often as it means
+    // deleted, and a push is not the place to decide which. Deleting a series
+    // here therefore unfiles its posts everywhere on the next push, and leaves
+    // the empty series row in D1 for `d1_delete_series` to take.
+    let local_series = db::list::<SeriesModel>(conn.inner()).await?;
+    for series in local_series {
+        let slug = series.slug.clone();
+        if let Err(e) = cloudflare::d1_series_upsert(&client, &config, series).await {
+            // Not fatal to the whole push: the posts are still worth sending,
+            // and `apply_outbound` sends the ones in this series unfiled rather
+            // than pointing at a row that is not there.
+            log::warn!("Could not push series `{slug}`, its posts will go up unfiled: {e}");
+        }
+    }
+
     let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
     let series = db::SeriesMap::build(conn.inner(), &remote_series).await?;
 
@@ -268,6 +289,21 @@ pub async fn sync_posts_from_cloud(conn: State<'_, DatabaseConnection>) -> AppRe
     let (client, config) = cf()?;
     let remote = cloudflare::d1_list::<PostModel>(&client, &config).await?;
     let remote_series = cloudflare::d1_list::<SeriesModel>(&client, &config).await?;
+
+    // Bring the cloud's series into the local table before the posts, so a
+    // series made on another machine exists here to be filed under. Matched by
+    // slug, keeping the local id — see `db::upsert_series_from_remote`.
+    //
+    // Nothing local is deleted for being absent up there. A series that has not
+    // been pushed yet is ordinary local work, and the pull is not evidence
+    // against it. Which series a *post* belongs to is decided by
+    // `db::resolve_series`, and this does not change that.
+    for series in &remote_series {
+        if let Err(e) = db::upsert_series_from_remote(conn.inner(), series.clone()).await {
+            log::warn!("Could not bring series `{}` down: {e}", series.slug);
+        }
+    }
+
     let mirrored = db::mirror_posts(conn.inner(), remote, &remote_series).await?;
 
     // A post whose cloud copy moved on has a cached body from before that move,

@@ -573,6 +573,33 @@ fn post_update_stmt(model: post::Model) -> UpdateMany<post::Entity> {
         .filter(post::Column::Slug.eq(model.slug))
 }
 
+/// Insert a series into D1, or update the one already wearing its slug.
+///
+/// The mirror of [`d1_post_upsert`], and for the same reason: the two databases
+/// number their rows independently, so `slug` is the only name that means the
+/// same thing on both sides. The id is left unset on insert and D1 numbers its
+/// own row.
+///
+/// A push sends the series ahead of the posts. Without that, a series made on
+/// this machine has no counterpart up there, and every post in it crosses
+/// unfiled — see [`crate::db::SeriesMap::apply_outbound`].
+pub async fn d1_series_upsert(
+    client: &Client,
+    config: &CloudflareConfig,
+    model: series::Model,
+) -> AppResult<()> {
+    let stmt = series::Entity::insert(model.into_insert()).on_conflict(
+        OnConflict::column(series::Column::Slug)
+            .update_columns([
+                series::Column::Title,
+                series::Column::Description,
+                series::Column::CreatedAt,
+            ])
+            .to_owned(),
+    );
+    d1_run(client, config, stmt).await.map(|_| ())
+}
+
 /// Update a post in D1, finding it **by slug**.
 ///
 /// Not by id, though the model carries one. The two databases hand out ids

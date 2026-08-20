@@ -10,6 +10,7 @@ import {
   FileText,
   Image,
   Keyboard,
+  Layers,
   LayoutDashboard,
   Plus,
   Settings,
@@ -39,6 +40,7 @@ interface NavItem {
 const NAV_MAIN: NavItem[] = [
   { href: '/', label: 'Dashboard', Icon: LayoutDashboard },
   { href: '/posts', label: 'Posts', Icon: FileText },
+  { href: '/series', label: 'Series', Icon: Layers },
   { href: '/media', label: 'Media', Icon: Image },
 ];
 

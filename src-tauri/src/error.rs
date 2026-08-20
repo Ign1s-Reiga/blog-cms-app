@@ -136,6 +136,9 @@ pub enum AppError {
     #[error("post {0} not found")]
     PostNotFound(i32),
 
+    #[error("series {0} not found")]
+    SeriesNotFound(i32),
+
     #[error("Invalid post slug: {0}")]
     InvalidSlug(String),
 

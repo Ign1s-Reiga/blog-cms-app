@@ -266,6 +266,66 @@ pub async fn post_by_slug(db: &impl ConnectionTrait, slug: &str) -> AppResult<Op
         .await?)
 }
 
+/// The local series wearing this slug, if any.
+///
+/// Slug is the identity the two databases agree on — see [`SeriesMap`] — so it
+/// is what a series is looked up by whenever a remote row has to be matched to
+/// a local one.
+pub async fn series_by_slug(
+    db: &impl ConnectionTrait,
+    slug: &str,
+) -> AppResult<Option<series::Model>> {
+    Ok(series::Entity::find()
+        .filter(series::Column::Slug.eq(slug))
+        .one(db)
+        .await?)
+}
+
+/// Take every post out of a series, and report how many were moved.
+///
+/// Deleting a series without this leaves its posts pointing at a row that is
+/// gone: the id still reads as a number, so nothing complains, and the post is
+/// filed under a series nobody can name. Run in the same transaction as the
+/// delete, so there is no moment where one has happened and the other has not.
+pub async fn unfile_series(db: &impl ConnectionTrait, series_id: i32) -> AppResult<u64> {
+    let done = post::Entity::update_many()
+        .col_expr(post::Column::SeriesId, sea_orm::sea_query::Expr::value(None::<i32>))
+        .col_expr(post::Column::SeriesOrder, sea_orm::sea_query::Expr::value(None::<i32>))
+        .filter(post::Column::SeriesId.eq(series_id))
+        .exec(db)
+        .await?;
+    Ok(done.rows_affected)
+}
+
+/// Bring a series the cloud has into the local table, matched **by slug**.
+///
+/// The local id is kept where a row already exists, because posts point at it:
+/// taking the remote id would refile every post in the series under a number
+/// that means something else here. That is the same rule [`SeriesMap`] follows,
+/// applied to the rows themselves rather than to the references.
+///
+/// `created_at` is left as the local row has it. Both sides should agree on when
+/// a series was made, and if they do not, the difference is not worth a write.
+pub async fn upsert_series_from_remote(
+    db: &impl ConnectionTrait,
+    remote: series::Model,
+) -> AppResult<()> {
+    match series_by_slug(db, &remote.slug).await? {
+        Some(local) => {
+            let model = series::Model {
+                id: local.id,
+                created_at: local.created_at,
+                ..remote
+            };
+            update::<series::Model>(db, model).await?;
+        }
+        None => {
+            create::<series::Model>(db, remote).await?;
+        }
+    }
+    Ok(())
+}
+
 // ─── Series identity across the two databases ─────────────────────────────────
 
 /// Translates series references between the local database and D1.
@@ -2244,5 +2304,113 @@ mod push_baseline_tests {
     #[tokio::test]
     async fn without_recording_the_pushed_version_it_conflicts_with_itself() {
         assert_eq!(after_a_push(false).await, SyncState::Conflict);
+    }
+}
+
+#[cfg(test)]
+mod series_tests {
+    use super::*;
+
+    fn a_series(slug: &str) -> series::Model {
+        series::Model {
+            id: 0,
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            description: None,
+            created_at: 100,
+        }
+    }
+
+    fn a_post(slug: &str, series_id: Option<i32>, order: Option<i32>) -> post::Model {
+        post::Model {
+            id: 0,
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            excerpt: None,
+            tags: None,
+            published: false,
+            published_at: None,
+            series_id,
+            series_order: order,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// What `delete_series` runs first. Without it the posts keep an id that no
+    /// longer names anything.
+    #[tokio::test]
+    async fn unfiling_empties_one_series_and_leaves_the_others() {
+        let db = connect_in_memory().await.unwrap();
+        let kept = create::<series::Model>(&db, a_series("kept")).await.unwrap();
+        let going = create::<series::Model>(&db, a_series("going")).await.unwrap();
+
+        create::<post::Model>(&db, a_post("in-going", Some(going.id), Some(1)))
+            .await
+            .unwrap();
+        create::<post::Model>(&db, a_post("also-going", Some(going.id), Some(2)))
+            .await
+            .unwrap();
+        create::<post::Model>(&db, a_post("in-kept", Some(kept.id), Some(1)))
+            .await
+            .unwrap();
+        create::<post::Model>(&db, a_post("unfiled", None, None)).await.unwrap();
+
+        assert_eq!(unfile_series(&db, going.id).await.unwrap(), 2);
+
+        let posts = post::Entity::find().all(&db).await.unwrap();
+        for post in &posts {
+            match post.slug.as_str() {
+                "in-going" | "also-going" => {
+                    assert_eq!(post.series_id, None, "{} should have been unfiled", post.slug);
+                    // The order goes with the membership: a position in a series
+                    // the post is no longer in is a number about nothing.
+                    assert_eq!(post.series_order, None);
+                }
+                "in-kept" => assert_eq!(post.series_id, Some(kept.id)),
+                _ => assert_eq!(post.series_id, None),
+            }
+        }
+    }
+
+    /// The rule that keeps a pull from refiling every post: the local row keeps
+    /// its own id, because that is the number the posts point at.
+    #[tokio::test]
+    async fn a_series_from_the_cloud_keeps_the_local_id_its_posts_use() {
+        let db = connect_in_memory().await.unwrap();
+        let local = create::<series::Model>(&db, a_series("shared")).await.unwrap();
+        let post = create::<post::Model>(&db, a_post("filed", Some(local.id), Some(1)))
+            .await
+            .unwrap();
+
+        // The cloud numbers its own rows, so the same series arrives wearing a
+        // different id and a title edited elsewhere.
+        let remote = series::Model {
+            id: local.id + 999,
+            slug: "shared".to_string(),
+            title: "Renamed in the cloud".to_string(),
+            description: Some("from up there".to_string()),
+            created_at: 900,
+        };
+        upsert_series_from_remote(&db, remote).await.unwrap();
+
+        let rows = series::Entity::find().all(&db).await.unwrap();
+        assert_eq!(rows.len(), 1, "matched by slug, not inserted a second time");
+        assert_eq!(rows[0].id, local.id);
+        assert_eq!(rows[0].title, "Renamed in the cloud");
+        assert_eq!(rows[0].description.as_deref(), Some("from up there"));
+        // Local `created_at` is left where it was.
+        assert_eq!(rows[0].created_at, 100);
+
+        // The post is still filed where it was.
+        let refreshed = get::<post::Model>(&db, post.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.series_id, Some(local.id));
+    }
+
+    #[tokio::test]
+    async fn a_series_the_cloud_has_and_this_machine_does_not_is_added() {
+        let db = connect_in_memory().await.unwrap();
+        upsert_series_from_remote(&db, a_series("new-here")).await.unwrap();
+        assert!(series_by_slug(&db, "new-here").await.unwrap().is_some());
     }
 }
