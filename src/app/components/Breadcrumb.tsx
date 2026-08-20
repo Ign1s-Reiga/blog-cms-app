@@ -13,6 +13,7 @@ const LABELS: Record<string, string> = {
   '/': 'Dashboard',
   '/posts': 'Posts',
   '/posts/new': 'New Post',
+  '/series': 'Series',
   '/media': 'Media',
   '/analytics': 'Analytics',
   '/settings': 'Settings',

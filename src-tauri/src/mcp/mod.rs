@@ -469,6 +469,9 @@ pub async fn mcp_approve_publish(
             tags,
             body,
             true,
+            // Only read when a save creates the post. This one always names an
+            // existing id, so the row already carries whatever it is filed under.
+            None,
         )
         .await
         .map(|_| ())

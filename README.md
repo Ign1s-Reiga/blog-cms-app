@@ -39,8 +39,9 @@ served.
   tags, excerpt, and date are pre-filled for you to confirm or change before anything is
   created, and keys the app has nowhere to put are named rather than dropped in silence. The
   body is still stored without the block, and `published: true` never publishes anything.
-- **Series** for grouping related posts — modelled and synced, though there is no management screen
-  yet ([#100](https://github.com/Ign1s-Reiga/blog-cms-app/issues/100)).
+- **Series** for grouping related posts. Create and edit them on the Series screen, file a post
+  into one from its editor, and set where it sits in the reading order. Deleting a series
+  unfiles its posts rather than taking them with it.
 
 ### Publishing
 
@@ -119,6 +120,7 @@ blog-cms-app/
 │   │   └── UpdateCard.tsx       # check / download / install
 │   ├── lib/                     # cn(), sync helpers, updater client
 │   ├── posts/                   # /posts, /posts/new, /posts/edit
+│   ├── series/                   # /series — create, edit, and see what is filed
 │   ├── media/ analytics/ settings/
 │   └── layout.tsx page.tsx globals.css
 ├── src-tauri/                   # Tauri backend (Rust)
@@ -307,7 +309,8 @@ an object that is not there.
 
 **Push to cloud is metadata only.** It is how a title, tag or series change reaches the blog without
 re-uploading anything, but a post whose _body_ has been edited needs a publish before readers see the
-new text.
+new text. Series rows go up ahead of the posts, so a series made here is one the cloud can file them
+under; a series only the cloud has is left alone.
 
 ## Scheduled publishing
 

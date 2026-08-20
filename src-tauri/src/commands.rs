@@ -46,6 +46,34 @@ async fn post_for_cloud(
     config: &CloudflareConfig,
     mut post: PostModel,
 ) -> AppResult<PostModel> {
+    // The post's own series goes up first, if the cloud does not have it.
+    //
+    // Every path that writes a post to the cloud comes through here, and a
+    // series made on this machine has no remote id to be translated into: the
+    // post would cross unfiled, and stay that way until somebody happened to
+    // run a batch push. Publishing is the path this matters most on, because it
+    // is the one that puts the post in front of readers.
+    //
+    // Not fatal. The post's text is worth publishing whether or not its series
+    // made it, and `apply_outbound` already sends an unmatched one unfiled
+    // rather than pointing it at a number that means something else up there.
+    if let Some(local_id) = post.series_id {
+        match db::get::<SeriesModel>(conn, local_id).await? {
+            Some(series) => {
+                let slug = series.slug.clone();
+                if let Err(e) = cloudflare::d1_series_upsert(client, config, series).await {
+                    log::warn!("Could not push series `{slug}` before its post: {e}");
+                }
+            }
+            // Filed under a series that is not there: nothing to send, and
+            // `apply_outbound` will unfile it below.
+            None => log::warn!(
+                "Post `{}` is filed under series {local_id}, which is not in the local table",
+                post.slug
+            ),
+        }
+    }
+
     let remote_series = cloudflare::d1_list::<SeriesModel>(client, config).await?;
     db::SeriesMap::build(conn, &remote_series)
         .await?

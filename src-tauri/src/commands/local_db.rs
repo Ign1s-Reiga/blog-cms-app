@@ -46,6 +46,24 @@ pub(super) async fn unique_slug(db: &DatabaseConnection, base: &str) -> AppResul
     unreachable!("the loop returns once a candidate is free")
 }
 
+/// A slug no series is using yet, on the same rule as [`unique_slug`].
+///
+/// A series slug is not cosmetic: it is the name the local table and D1 agree
+/// on, so two series sharing one would make each other's posts change hands on
+/// the next sync.
+pub(super) async fn unique_series_slug(db: &DatabaseConnection, base: &str) -> AppResult<String> {
+    if db::series_by_slug(db, base).await?.is_none() {
+        return Ok(base.to_string());
+    }
+    for n in 2.. {
+        let candidate = format!("{base}-{n}");
+        if db::series_by_slug(db, &candidate).await?.is_none() {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("the loop returns once a candidate is free")
+}
+
 #[cfg(test)]
 mod staged_import_tests {
     use super::*;
@@ -155,6 +173,33 @@ mod slug_tests {
     /// Why the insert now runs before the file write: this is what actually
     /// refuses a duplicate, and it has to get its answer while the post it would
     /// collide with still has its body on disk.
+    /// A series slug collides on the same rule as a post's, and for a sharper
+    /// reason: two series sharing one would make each other's posts change
+    /// hands on the next sync.
+    #[tokio::test]
+    async fn a_taken_series_slug_moves_to_the_next_free_number() {
+        let db = db::connect_in_memory().await.unwrap();
+        let series = |slug: &str| SeriesModel {
+            id: 0,
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            description: None,
+            created_at: 0,
+        };
+
+        assert_eq!(unique_series_slug(&db, "rust").await.unwrap(), "rust");
+
+        db::create::<SeriesModel>(&db, series("rust")).await.unwrap();
+        assert_eq!(unique_series_slug(&db, "rust").await.unwrap(), "rust-2");
+
+        db::create::<SeriesModel>(&db, series("rust-2")).await.unwrap();
+        assert_eq!(unique_series_slug(&db, "rust").await.unwrap(), "rust-3");
+
+        // Posts and series number their slugs separately.
+        db::create::<PostModel>(&db, draft("rust")).await.unwrap();
+        assert_eq!(unique_series_slug(&db, "tauri").await.unwrap(), "tauri");
+    }
+
     #[tokio::test]
     async fn the_database_refuses_a_duplicate_slug() {
         let db = db::connect_in_memory().await.unwrap();
@@ -1101,6 +1146,14 @@ pub async fn create_series(
 ) -> AppResult<SeriesModel> {
     let mut series = series;
     series.created_at = now_ts();
+    // The slug is derived here rather than taken as given. It is the identity
+    // both databases agree on, so it has to be unique and URL-safe whatever the
+    // caller sent — and a title is the only thing the screen asks for.
+    let base = {
+        let s = slugify(if series.slug.trim().is_empty() { &series.title } else { &series.slug });
+        if s.is_empty() { format!("series-{}", series.created_at) } else { s }
+    };
+    series.slug = unique_series_slug(conn.inner(), &base).await?;
     db::create::<SeriesModel>(conn.inner(), series).await
 }
 
@@ -1122,12 +1175,78 @@ pub async fn update_series(
     conn: State<'_, DatabaseConnection>,
     series: SeriesModel,
 ) -> AppResult<SeriesModel> {
+    // Title and description are editable; `slug` and `created_at` are not, and
+    // are read back from the stored row rather than taken from the caller.
+    //
+    // The slug is how the local table and D1 recognise the same series. Letting
+    // a rename move it would make the renamed series a *different* series to the
+    // cloud: the next push would insert a second row, and every post filed here
+    // would cross over pointing at the old one.
+    let stored = db::get::<SeriesModel>(conn.inner(), series.id)
+        .await?
+        .ok_or(AppError::SeriesNotFound(series.id))?;
+    let series = SeriesModel {
+        slug: stored.slug,
+        created_at: stored.created_at,
+        ..series
+    };
     db::update::<SeriesModel>(conn.inner(), series).await
 }
 
 #[tauri::command]
-pub async fn delete_series(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<()> {
-    db::delete::<SeriesModel>(conn.inner(), id).await
+pub async fn delete_series(conn: State<'_, DatabaseConnection>, id: i32) -> AppResult<u64> {
+    // The posts come out of the series in the same transaction that removes it.
+    // A delete on its own leaves them pointing at an id that no longer names
+    // anything: still a number, so nothing complains, and the post reads as
+    // filed under a series nobody can look up.
+    //
+    // Returns how many posts were unfiled, so the screen can say what happened
+    // rather than leaving it to be discovered.
+    let txn = conn.inner().begin().await?;
+    let unfiled = db::unfile_series(&txn, id).await?;
+    db::delete::<SeriesModel>(&txn, id).await?;
+    txn.commit().await?;
+    Ok(unfiled)
+}
+
+/// File a post under a series, or take it out of one.
+///
+/// Separate from the editor's save because it is a different kind of change:
+/// [`crate::sync_state::content_hash`] covers what a reader would notice of the
+/// post's own content, and membership of a series is not part of that. A post
+/// whose series changed is not "edited" in the sense the Edited filter means,
+/// and marking it so would put it there on a change to nothing it contains.
+///
+/// It still reaches the cloud: a push sends every post, not only the changed
+/// ones, so the new filing crosses with the next "Push to cloud".
+#[tauri::command]
+pub async fn set_post_series(
+    conn: State<'_, DatabaseConnection>,
+    post_id: i32,
+    series_id: Option<i32>,
+    series_order: Option<i32>,
+) -> AppResult<PostModel> {
+    let post = db::get::<PostModel>(conn.inner(), post_id)
+        .await?
+        .ok_or(AppError::PostNotFound(post_id))?;
+
+    // A series that is not there cannot be filed under: the id would be stored
+    // and read back as a series nobody can name, which is the state
+    // `delete_series` exists to prevent.
+    if let Some(id) = series_id {
+        if db::get::<SeriesModel>(conn.inner(), id).await?.is_none() {
+            return Err(AppError::SeriesNotFound(id));
+        }
+    }
+
+    let updated = PostModel {
+        series_id,
+        // An order without a series is a number about nothing.
+        series_order: series_id.and(series_order),
+        updated_at: now_ts(),
+        ..post
+    };
+    db::update::<PostModel>(conn.inner(), updated).await
 }
 
 /// Set (or clear) a post's local staging stage without publishing.

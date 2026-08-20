@@ -309,6 +309,9 @@ impl BlogMcp {
             tags_to_csv(&params.tags),
             params.body,
             false,
+            // An agent's draft is filed by a person afterwards, from the editor
+            // or the Series screen. The tool surface offers no series to set.
+            None,
         )
         .await
         .map_err(internal)?;

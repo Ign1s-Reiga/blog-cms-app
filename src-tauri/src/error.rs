@@ -143,6 +143,9 @@ pub enum AppError {
     #[error("That import is no longer waiting to be confirmed. Choose the file again.")]
     StaleImport,
 
+    #[error("series {0} not found")]
+    SeriesNotFound(i32),
+
     #[error("Invalid post slug: {0}")]
     InvalidSlug(String),
 

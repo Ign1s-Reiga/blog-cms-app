@@ -112,6 +112,7 @@ pub fn run() {
             commands::get_series,
             commands::update_series,
             commands::delete_series,
+            commands::set_post_series,
             // Series — Cloudflare D1
             commands::d1_create_series,
             commands::d1_list_series,
