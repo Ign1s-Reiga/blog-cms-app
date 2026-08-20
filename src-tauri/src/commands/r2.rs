@@ -776,6 +776,29 @@ pub async fn schedule_post(
         return Err(AppError::ScheduleInThePast(publish_at));
     }
 
+    // The guard above reads this machine's mirror, and on this particular field
+    // the mirror is the one thing that cannot be trusted: the Worker publishes by
+    // writing `published` straight into D1, and `upsert_post_from_remote` skips
+    // any post carrying unpushed local edits — so a post the Worker has already
+    // put live goes on reading as a draft here for as long as it has edits
+    // waiting. Scheduling it again from that stale reading would send
+    // `published = false` up in the upsert below (`d1_post_upsert` lists that
+    // column), taking a live article off the blog while reporting success.
+    //
+    // So the cloud is asked. This narrows the window to the round trip rather
+    // than closing it — the Worker could still publish between this answer and
+    // the upsert — but that is a moment instead of a condition that persists
+    // until someone happens to save.
+    let (check_client, check_config) = cf()?;
+    let remote_published = cloudflare::d1_list::<PostModel>(&check_client, &check_config)
+        .await?
+        .into_iter()
+        .find(|p| p.slug == post.slug)
+        .is_some_and(|p| p.published);
+    if remote_published {
+        return Err(AppError::AlreadyPublished(post.slug));
+    }
+
     let body = read_post_markdown(app.clone(), conn.clone(), post.slug.clone()).await?;
     push_to_cloud(&app, conn.inner(), &post, &body).await?;
 
