@@ -60,6 +60,10 @@ pub struct PostTraffic {
     pub slug: String,
     pub title: String,
     pub published: bool,
+    /// In the trash here. The traffic is real and stays in the report — the
+    /// post was being read — but the editor refuses to open a trashed post, so
+    /// the screen must not offer to.
+    pub trashed: bool,
     pub views: u64,
     pub visits: u64,
     /// One entry per day in the window, zeroes included, so a chart has a
@@ -88,6 +92,10 @@ pub struct TrafficReport {
     pub total_views: u64,
     /// Views that reached a post, as opposed to the rest of the blog.
     pub attributed_views: u64,
+    /// A window so busy that one day alone filled the API's group limit, so
+    /// these numbers are a floor rather than a total. Said out loud rather than
+    /// rounded up to a fact — see [`fetch_groups`].
+    pub truncated: bool,
 }
 
 // ─── Site listing (REST) ────────────────────────────────────────────────────
@@ -284,17 +292,21 @@ struct PageloadDimensions {
     request_path: Option<String>,
 }
 
+/// The most groups one query may return. Cloudflare's own cap; asking for more
+/// is an error rather than more rows.
+const GROUP_LIMIT: usize = 10_000;
+
 /// Page loads by day and path.
 ///
 /// `count` is page views and `sum { visits }` is sessions; both are reported
 /// because they answer different questions — how often a post was opened, and
 /// by how many arrivals.
 const QUERY: &str = r#"
-query PostTraffic($accountTag: string!, $siteTag: string!, $start: Date!, $end: Date!) {
+query PostTraffic($accountTag: string!, $siteTag: string!, $start: Date!, $end: Date!, $limit: Int!) {
   viewer {
     accounts(filter: { accountTag: $accountTag }) {
       rumPageloadEventsAdaptiveGroups(
-        limit: 10000
+        limit: $limit
         filter: { siteTag: $siteTag, date_geq: $start, date_leq: $end }
         orderBy: [date_ASC]
       ) {
@@ -324,6 +336,7 @@ fn path_slug(path: &str) -> Option<&str> {
 fn attribute(
     groups: &[PageloadGroup],
     posts: &[PostModel],
+    trashed: &std::collections::HashSet<i32>,
     dates: &[String],
 ) -> (Vec<PostTraffic>, Vec<UnattributedPath>, u64) {
     let by_slug: HashMap<&str, &PostModel> = posts.iter().map(|p| (p.slug.as_str(), p)).collect();
@@ -364,6 +377,7 @@ fn attribute(
                 slug: post.slug.clone(),
                 title: post.title.clone(),
                 published: post.published,
+                trashed: trashed.contains(&id),
                 views,
                 visits,
                 days: dates
@@ -418,21 +432,73 @@ pub async fn fetch_post_traffic(
         .map(|offset| (start + chrono::Duration::days(offset as i64)).to_string())
         .collect();
 
-    let body = serde_json::json!({
-        "query": QUERY,
-        "variables": {
-            "accountTag": config.account_id,
-            "siteTag": config.web_analytics_site_tag.trim(),
-            "start": start.to_string(),
-            "end": end.to_string(),
-        }
-    });
+    let trashed = crate::db::trashed_ids(conn.inner()).await.map_err(|e| {
+        AnalyticsError::new(ErrorKind::Local, format!("Could not read the trash: {e}"))
+    })?;
 
-    let groups = request(&config, body).await?;
-    let (posts, unattributed, total_views) = attribute(&groups, &posts, &dates);
+    let (groups, truncated) = fetch_groups(&config, start, end).await?;
+    let (posts, unattributed, total_views) = attribute(&groups, &posts, &trashed, &dates);
     let attributed_views = posts.iter().map(|p| p.views).sum();
 
-    Ok(TrafficReport { dates, posts, unattributed, total_views, attributed_views })
+    Ok(TrafficReport { dates, posts, unattributed, total_views, attributed_views, truncated })
+}
+
+/// Every group in the window, splitting the range whenever one query comes back
+/// at the limit.
+///
+/// A query that returns exactly `GROUP_LIMIT` rows has almost certainly been
+/// cut short, and there is no cursor to follow — the dataset pages by asking
+/// for less of it. Ordered by date, a truncated answer loses the *end* of the
+/// window, so the days nobody would think to check are the ones that go
+/// missing: the report would read as complete and be quietly wrong about
+/// exactly the traffic somebody opened it to see.
+///
+/// So a full result is thrown away and asked for in halves instead, down to a
+/// single day. A single day that still fills the limit cannot be split any
+/// further; that answer is kept and the report says it is a floor.
+async fn fetch_groups(
+    config: &CloudflareConfig,
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+) -> Result<(Vec<PageloadGroup>, bool), AnalyticsError> {
+    let mut out = Vec::new();
+    let mut truncated = false;
+    let mut pending = vec![(start, end)];
+
+    while let Some((from, to)) = pending.pop() {
+        let body = serde_json::json!({
+            "query": QUERY,
+            "variables": {
+                "accountTag": config.account_id,
+                "siteTag": config.web_analytics_site_tag.trim(),
+                "start": from.to_string(),
+                "end": to.to_string(),
+                "limit": GROUP_LIMIT,
+            }
+        });
+
+        let groups = request(config, body).await?;
+        if groups.len() < GROUP_LIMIT {
+            out.extend(groups);
+            continue;
+        }
+
+        let span = (to - from).num_days();
+        if span < 1 {
+            // One day, still full. Keep what came back and stop claiming it is
+            // everything.
+            log::warn!("A single day of traffic filled the group limit; the report is a floor");
+            truncated = true;
+            out.extend(groups);
+            continue;
+        }
+
+        let mid = from + chrono::Duration::days(span / 2);
+        pending.push((from, mid));
+        pending.push((mid + chrono::Duration::days(1), to));
+    }
+
+    Ok((out, truncated))
 }
 
 /// Send the query and unwrap the account out of the response.
@@ -509,6 +575,10 @@ mod tests {
         }
     }
 
+    fn nothing_trashed() -> std::collections::HashSet<i32> {
+        std::collections::HashSet::new()
+    }
+
     fn group(date: &str, path: &str, views: u64, visits: u64) -> PageloadGroup {
         PageloadGroup {
             count: Some(views),
@@ -547,7 +617,7 @@ mod tests {
             group("2026-08-20", "/posts/second", 3, 3),
         ];
 
-        let (ranked, rest, total) = attribute(&groups, &posts, &dates);
+        let (ranked, rest, total) = attribute(&groups, &posts, &nothing_trashed(), &dates);
 
         assert_eq!(total, 18);
         assert!(rest.is_empty());
@@ -577,7 +647,7 @@ mod tests {
             group("2026-08-20", "/posts/deleted-post", 2, 2),
         ];
 
-        let (ranked, rest, total) = attribute(&groups, &posts, &dates);
+        let (ranked, rest, total) = attribute(&groups, &posts, &nothing_trashed(), &dates);
 
         assert_eq!(total, 43);
         assert_eq!(ranked.iter().map(|p| p.views).sum::<u64>(), 4);
@@ -598,11 +668,33 @@ mod tests {
             group("2026-08-20", "/posts/same/", 6, 5),
         ];
 
-        let (ranked, rest, _) = attribute(&groups, &posts, &dates);
+        let (ranked, rest, _) = attribute(&groups, &posts, &nothing_trashed(), &dates);
         assert!(rest.is_empty());
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].views, 10);
         assert_eq!(ranked[0].days[0].views, 10);
+    }
+
+    /// A post can be read after it is thrown away — it stays live until it is
+    /// unpublished — so its traffic belongs in the report. What must not happen
+    /// is the screen offering to open it, which `get_post` refuses.
+    #[test]
+    fn a_trashed_post_keeps_its_traffic_and_is_marked() {
+        let posts = vec![post(1, "gone"), post(2, "here")];
+        let dates = vec!["2026-08-20".to_string()];
+        let groups = vec![
+            group("2026-08-20", "/posts/gone", 9, 8),
+            group("2026-08-20", "/posts/here", 2, 2),
+        ];
+        let trashed = std::collections::HashSet::from([1]);
+
+        let (ranked, rest, total) = attribute(&groups, &posts, &trashed, &dates);
+
+        assert_eq!(total, 11);
+        assert!(rest.is_empty(), "a trashed post is still a post, not an unmatched path");
+        assert_eq!(ranked[0].slug, "gone");
+        assert!(ranked[0].trashed);
+        assert!(!ranked[1].trashed);
     }
 
     #[test]

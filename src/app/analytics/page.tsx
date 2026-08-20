@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart2, ExternalLink, KeyRound, Loader2, RefreshCw } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
@@ -24,6 +24,8 @@ type PostTraffic = {
   slug: string;
   title: string;
   published: boolean;
+  /// In the trash here. Its traffic is real, but the editor refuses to open it.
+  trashed: boolean;
   views: number;
   visits: number;
   days: DailyViews[];
@@ -36,6 +38,9 @@ type TrafficReport = {
   unattributed: { path: string; views: number }[];
   total_views: number;
   attributed_views: number;
+  /// A day so busy it filled the API's group limit on its own, so these numbers
+  /// are a floor. Said rather than rounded up to a fact.
+  truncated: boolean;
 };
 
 const WINDOWS = [
@@ -68,21 +73,33 @@ export default function AnalyticsPage() {
   const [sites, setSites] = useState<Site[] | null>(null);
   const [choosing, setChoosing] = useState(false);
 
+  /// Which attempt is the current one. Changing the window or pressing Refresh
+  /// starts another request without cancelling the one in flight, and a slow
+  /// 7-day answer landing after a quick 30-day one would leave the tab saying
+  /// 30 days over the wrong report. Only the newest attempt is allowed to
+  /// write — the same guard `AnalyticsCard` uses.
+  const attempt = useRef(0);
+
   const load = useCallback(async () => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
       return;
     }
+    const mine = ++attempt.current;
+    const current = () => mine === attempt.current;
     setLoading(true);
     try {
-      setReport(await invoke<TrafficReport>('fetch_post_traffic', { days }));
+      const fetched = await invoke<TrafficReport>('fetch_post_traffic', { days });
+      if (!current()) return;
+      setReport(fetched);
       setError(null);
     } catch (e) {
+      if (!current()) return;
       setError(isTrafficError(e) ? e : { kind: 'query', message: String(e) });
       setReport(null);
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   }, [days]);
 
@@ -144,6 +161,10 @@ export default function AnalyticsPage() {
   }, [report, focused]);
 
   const peak = Math.max(1, ...series.map((d) => d.views));
+  // Not `peak === 1`: a series whose busiest day saw a single view is a real
+  // series with a real bar to draw, and calling it "nothing recorded" tells the
+  // author their post went unread when it did not.
+  const recorded = series.reduce((sum, d) => sum + d.views, 0);
 
   return (
     <main className='flex-1 overflow-y-auto p-6'>
@@ -232,6 +253,13 @@ export default function AnalyticsPage() {
               </section>
             )}
 
+            {report.truncated && (
+              <p className='rounded-[8px] border border-amber-200 bg-amber-50/60 px-4 py-2.5 text-[11px] leading-[1.6] text-amber-700 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-amber-500'>
+                One day in this window had more distinct pages than Cloudflare will return at once, so these numbers are
+                a floor rather than a total. A shorter window will be exact.
+              </p>
+            )}
+
             <div className='grid gap-4 sm:grid-cols-3'>
               <Stat label='Views' value={report.total_views} hint='Every page on the blog' />
               <Stat label='On posts' value={report.attributed_views} hint='Matched to a post in the library' />
@@ -258,7 +286,7 @@ export default function AnalyticsPage() {
                 )}
               </div>
               <div className='px-4 py-4'>
-                {series.length === 0 || peak === 1 ? (
+                {recorded === 0 ? (
                   <p className='py-6 text-center text-[12px] text-zinc-400 dark:text-zinc-600'>
                     Nothing recorded in this window.
                   </p>
@@ -295,7 +323,11 @@ export default function AnalyticsPage() {
                       <button
                         type='button'
                         onClick={() => setFocused(focused === p.id ? null : p.id)}
-                        onDoubleClick={() => router.push(`/posts/edit?id=${p.id}`)}
+                        // Only for a post the editor will actually open. It
+                        // refuses a trashed one, so offering it here would send
+                        // every double-click to an error message.
+                        onDoubleClick={p.trashed ? undefined : () => router.push(`/posts/edit?id=${p.id}`)}
+                        title={p.trashed ? 'In the trash. Restore it from Posts → Trash to open it.' : undefined}
                         className={cn(
                           'flex w-full items-baseline gap-3 rounded-[6px] px-2.5 py-2 text-left transition-colors',
                           focused === p.id
@@ -310,6 +342,7 @@ export default function AnalyticsPage() {
                           <span className='block truncate font-mono text-[10px] text-zinc-400 dark:text-zinc-600'>
                             {p.slug}
                             {!p.published && ' · not published'}
+                            {p.trashed && ' · in the trash'}
                           </span>
                         </span>
                         <span className='shrink-0 text-right'>
