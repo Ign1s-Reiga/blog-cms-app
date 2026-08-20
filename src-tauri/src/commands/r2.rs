@@ -1583,6 +1583,27 @@ mod tests {
         );
     }
 
+    /// A video is inserted as raw HTML, because Markdown has no syntax for one.
+    /// The publish path finding its source is what makes that work: without it
+    /// the file is never uploaded and the tag points at an `assets/` path that
+    /// means nothing to a reader.
+    ///
+    /// Pinned here because the scan stopping at a quote is the whole reason the
+    /// editor may write the tag at all — see `mediaMarkup` in `src/app/lib/media.ts`.
+    #[test]
+    fn a_video_tags_source_is_found_like_an_images() {
+        let body = "<video controls preload=\"metadata\" src=\"assets/clip.mp4\"></video>";
+        assert_eq!(extract_asset_refs(body), vec!["assets/clip.mp4"]);
+
+        // Mixed in with the image syntax, both are found and neither is doubled.
+        let body = "![a](assets/a.avif)
+
+<video src=\"assets/b.webm\"></video>
+
+![a again](assets/a.avif)";
+        assert_eq!(extract_asset_refs(body), vec!["assets/a.avif", "assets/b.webm"]);
+    }
+
     fn post(slug: &str, title: &str) -> PostModel {
         PostModel {
             id: 0,

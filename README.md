@@ -24,7 +24,10 @@ served.
   so no timer can push anything live.
 - **Revision history** — every edit snapshots the previous version first, and any snapshot can be
   restored.
-- **Media picker** for inserting images from the R2 library, plus a per-post thumbnail.
+- **Media picker** for inserting from the R2 library, plus a per-post thumbnail. Every object is
+  shown as a preview rather than a file name, images and video are told apart before you pick
+  one, and each goes in as the markup it needs — an image tag for an image, a `<video>` for a
+  video.
 
 ### Library
 
