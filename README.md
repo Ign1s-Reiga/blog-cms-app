@@ -24,7 +24,10 @@ served.
   so no timer can push anything live.
 - **Revision history** — every edit snapshots the previous version first, and any snapshot can be
   restored.
-- **Media picker** for inserting images from the R2 library, plus a per-post thumbnail.
+- **Media picker** for inserting from the R2 library, plus a per-post thumbnail. Every object is
+  shown as a preview rather than a file name, images and video are told apart before you pick
+  one, and each goes in as the markup it needs — an image tag for an image, a `<video>` for a
+  video.
 
 ### Library
 
@@ -32,8 +35,10 @@ served.
   Scheduled, Failed, and Trash.
 - **Trash** — deleting is a local soft delete. A published post that is trashed **stays live**;
   emptying the trash is the only path that is final.
-- **Import** an existing `.md` file as a draft. YAML front matter is **stripped**, not read: the
-  title comes from the file name and tags start empty, so metadata is re-entered in the app.
+- **Import** an existing `.md` file as a draft. Front matter is read as a **proposal**: title,
+  tags, excerpt, and date are pre-filled for you to confirm or change before anything is
+  created, and keys the app has nowhere to put are named rather than dropped in silence. The
+  body is still stored without the block, and `published: true` never publishes anything.
 - **Series** for grouping related posts — modelled and synced, though there is no management screen
   yet ([#100](https://github.com/Ign1s-Reiga/blog-cms-app/issues/100)).
 

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { FileWarning, Trash2, Upload } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
+import { isVideo } from '@/lib/media';
 import { cn } from '@/lib/utils';
 
 type MediaItem = {
@@ -47,8 +48,6 @@ type UsingPost = {
   trashed: boolean;
   published: boolean;
 };
-
-const VIDEO_EXT = /\.(?:mp4|webm|mov)$/i;
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -129,7 +128,7 @@ export default function MediaPage() {
           ...r,
           // The key doubles as the local-relative cache path.
           src: convertFileSrc(await join(base, r.key)),
-          isVideo: VIDEO_EXT.test(r.name),
+          isVideo: isVideo(r.name),
           // `?? null`, never `?? []`: an object the survey did not report on is
           // one it could not read, and saying "not used" for it is the one
           // wrong answer here. The same goes for an empty list while some

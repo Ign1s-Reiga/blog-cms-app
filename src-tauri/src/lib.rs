@@ -5,6 +5,7 @@ mod commands;
 mod db;
 mod entities;
 mod error;
+mod frontmatter;
 mod imaging;
 // Public so `tests/mcp_tools.rs` can assert the tool surface from outside the
 // library; every other module stays crate-private.
@@ -72,6 +73,7 @@ pub fn run() {
             Ok(())
         })
         .manage(update::PendingUpdate::default())
+        .manage(commands::StagedImport::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
@@ -85,7 +87,10 @@ pub fn run() {
             analytics::fetch_analytics,
             traffic::fetch_post_traffic,
             traffic::list_web_analytics_sites,
-            commands::import_article,
+            // Import (pick and read, then confirm)
+            commands::stage_import,
+            commands::commit_import,
+            commands::cancel_import,
             imaging::stage_image,
             // Posts — local SQLite
             commands::create_post,

@@ -136,6 +136,13 @@ pub enum AppError {
     #[error("post {0} not found")]
     PostNotFound(i32),
 
+    /// A confirm that no longer matches the file it was shown for: a second
+    /// pick displaced it, or the app was restarted between the two halves of
+    /// the import. Picking again is the only way through, and it is the right
+    /// one — the alternative is importing whatever happens to be staged.
+    #[error("That import is no longer waiting to be confirmed. Choose the file again.")]
+    StaleImport,
+
     #[error("Invalid post slug: {0}")]
     InvalidSlug(String),
 
