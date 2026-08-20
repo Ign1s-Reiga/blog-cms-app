@@ -13,6 +13,7 @@ mod media_keys;
 mod media_usage;
 mod revisions;
 mod sync_state;
+mod traffic;
 mod update;
 mod webview;
 
@@ -82,6 +83,8 @@ pub fn run() {
             auth::save_settings,
             // Analytics (Cloudflare GraphQL)
             analytics::fetch_analytics,
+            traffic::fetch_post_traffic,
+            traffic::list_web_analytics_sites,
             commands::import_article,
             imaging::stage_image,
             // Posts — local SQLite

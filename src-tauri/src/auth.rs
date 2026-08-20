@@ -113,6 +113,11 @@ struct StoredCreds {
     thumbnail_key_pattern: String,
     #[serde(default)]
     media_key_pattern: String,
+    /// Absent in files written before readership could be read. Empty means no
+    /// site has been chosen, which the Analytics route reports rather than
+    /// treating as no traffic.
+    #[serde(default)]
+    web_analytics_site_tag: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     api_token: Option<String>,
 }
@@ -146,6 +151,7 @@ pub fn load_from_disk(app: &tauri::AppHandle) -> Option<CloudflareConfig> {
             stored.media_key_pattern,
             crate::media_keys::DEFAULT_MEDIA_PATTERN,
         ),
+        web_analytics_site_tag: stored.web_analytics_site_tag,
     })
 }
 
@@ -159,6 +165,7 @@ fn save_to_disk(app: &tauri::AppHandle, config: &CloudflareConfig) -> AppResult<
         r2_public_url: config.r2_public_url.clone(),
         thumbnail_key_pattern: config.thumbnail_key_pattern.clone(),
         media_key_pattern: config.media_key_pattern.clone(),
+        web_analytics_site_tag: config.web_analytics_site_tag.clone(),
         api_token: (!in_keyring).then(|| config.api_token.clone()),
     };
 
@@ -192,6 +199,7 @@ pub struct PublicCreds {
     pub r2_public_url: String,
     pub thumbnail_key_pattern: String,
     pub media_key_pattern: String,
+    pub web_analytics_site_tag: String,
 }
 
 /// Whether the app is signed in, plus whether credentials are stored at all.
@@ -221,6 +229,8 @@ pub fn save_credentials(
         r2_public_url: r2_public_url.trim().trim_end_matches('/').to_string(),
         thumbnail_key_pattern: crate::media_keys::DEFAULT_THUMBNAIL_PATTERN.to_string(),
         media_key_pattern: crate::media_keys::DEFAULT_MEDIA_PATTERN.to_string(),
+        // Chosen later, on the Analytics route — signing in does not need it.
+        web_analytics_site_tag: String::new(),
     };
     save_to_disk(&app, &config)?;
     set_creds(Some(config));
@@ -240,6 +250,7 @@ pub fn save_settings(
     r2_public_url: String,
     thumbnail_key_pattern: String,
     media_key_pattern: String,
+    web_analytics_site_tag: Option<String>,
 ) -> AppResult<()> {
     use crate::media_keys::{validate_pattern, PatternKind};
 
@@ -257,6 +268,12 @@ pub fn save_settings(
     config.r2_public_url = public_url;
     config.thumbnail_key_pattern = thumbnail;
     config.media_key_pattern = media;
+    // Absent leaves the stored tag alone. The Settings screen does not carry
+    // the site picker — the Analytics route does — so a save from Settings
+    // must not read as "no site chosen" and clear it.
+    if let Some(tag) = web_analytics_site_tag {
+        config.web_analytics_site_tag = tag.trim().to_string();
+    }
 
     save_to_disk(&app, &config)?;
     set_creds(Some(config));
@@ -279,6 +296,7 @@ pub fn get_credentials() -> Option<PublicCreds> {
         r2_public_url: c.r2_public_url,
         thumbnail_key_pattern: c.thumbnail_key_pattern,
         media_key_pattern: c.media_key_pattern,
+        web_analytics_site_tag: c.web_analytics_site_tag,
     })
 }
 

@@ -66,10 +66,14 @@ pub enum ErrorKind {
     /// The API answered, but not with data we could use. A schema drift on
     /// Cloudflare's side lands here rather than being mistaken for "no data".
     Query,
+    /// Something on this machine failed — reading the local library to match
+    /// paths against. Named apart from the rest because none of the advice for
+    /// a Cloudflare problem applies to it.
+    Local,
 }
 
 impl AnalyticsError {
-    fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self { kind, message: message.into() }
     }
 }
@@ -169,7 +173,7 @@ query BasicUsage($accountTag: string!, $start: Date!, $end: Date!, $bucket: stri
 ///
 /// Cloudflare phrases this several ways across datasets, so this matches on the
 /// recognisable fragments instead of one exact string.
-fn is_permission_error(message: &str) -> bool {
+pub fn is_permission_error(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     [
         "not authorized",

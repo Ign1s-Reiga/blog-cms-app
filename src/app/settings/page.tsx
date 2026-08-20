@@ -14,6 +14,7 @@ type Creds = {
   r2_public_url: string;
   thumbnail_key_pattern: string;
   media_key_pattern: string;
+  web_analytics_site_tag: string;
 };
 
 type SaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } | { kind: 'error'; message: string };
@@ -116,6 +117,13 @@ export default function SettingsPage() {
                     <Row label='Account ID' value={creds.account_id} />
                     <Row label='R2 Bucket' value={creds.r2_bucket} />
                     <Row label='D1 Database' value={creds.d1_database_id} />
+                    {/* Chosen on the Analytics route, which is where the list
+                        of sites can be fetched; shown here so the connection
+                        card states every fact about it. */}
+                    <Row
+                      label='Web Analytics'
+                      value={creds.web_analytics_site_tag || 'Not set — choose one on Analytics'}
+                    />
                     <div className='pt-2'>
                       <Button
                         variant='outline'
