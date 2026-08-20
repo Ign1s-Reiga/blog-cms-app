@@ -9,10 +9,6 @@ network round-trip in the writing loop. Going to the cloud is an explicit act �
 schedule — and the app tracks, per post, how the local copy compares with what readers are being
 served.
 
-> **Status — v1.6.5.** Posts, media, publishing, scheduling, revisions, trash, sync-conflict
-> resolution, an MCP endpoint, and in-app updates all work end to end. The Analytics route is still a
-> placeholder — the dashboard carries an R2/D1 usage card instead. See [Roadmap](#roadmap).
->
 > **Windows only.** That is what the app targets, what the release workflow builds installers for,
 > and what the credential storage is written against.
 
@@ -39,7 +35,7 @@ served.
 - **Import** an existing `.md` file as a draft. YAML front matter is **stripped**, not read: the
   title comes from the file name and tags start empty, so metadata is re-entered in the app.
 - **Series** for grouping related posts — modelled and synced, though there is no management screen
-  yet (see [Roadmap](#roadmap)).
+  yet ([#100](https://github.com/Ign1s-Reiga/blog-cms-app/issues/100)).
 
 ### Publishing
 
@@ -436,9 +432,19 @@ They are placed under `src/app/components/ui/`.
 
 ## Roadmap
 
-- [ ] Analytics route — post performance and traffic (the dashboard has R2/D1 usage today)
-- [ ] Series management UI (the backend commands exist; the screens do not)
-- [ ] Media library beyond images — video and other assets
+Where this is going, one link per piece of work. Each issue is the current state of it — this list
+names the direction and leaves the detail there.
+
+- [Post performance and traffic on the Analytics route](https://github.com/Ign1s-Reiga/blog-cms-app/issues/99)
+- [A management UI for series](https://github.com/Ign1s-Reiga/blog-cms-app/issues/100)
+- [The media library beyond images](https://github.com/Ign1s-Reiga/blog-cms-app/issues/101)
+- [Front matter read on import rather than discarded](https://github.com/Ign1s-Reiga/blog-cms-app/issues/102)
+- [Markdown export](https://github.com/Ign1s-Reiga/blog-cms-app/issues/103)
+- [Search over post bodies](https://github.com/Ign1s-Reiga/blog-cms-app/issues/104)
+- [Tag management across the library](https://github.com/Ign1s-Reiga/blog-cms-app/issues/105)
+- [Bulk actions on posts](https://github.com/Ign1s-Reiga/blog-cms-app/issues/106)
+
+Anything not listed here is in [the open issues](https://github.com/Ign1s-Reiga/blog-cms-app/issues).
 
 ## License
 
