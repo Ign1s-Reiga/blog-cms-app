@@ -238,6 +238,11 @@ pub enum AppError {
     #[error("Post `{0}` no longer exists in the cloud, so there is no cloud version to keep")]
     RemotePostGone(String),
 
+    #[error(
+        "The cloud has no Markdown for `{0}`, so there is no cloud version to keep —          publish this post to put its body there"
+    )]
+    RemoteBodyGone(String),
+
     #[error("Post `{0}` is not in Cloudflare D1, so there was no cloud row to update")]
     RemotePostMissing(String),
 

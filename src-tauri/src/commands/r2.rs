@@ -1001,13 +1001,25 @@ pub async fn resolve_conflict(
                 .find(|p| p.slug == post.slug)
                 .ok_or_else(|| AppError::RemotePostGone(post.slug.clone()))?;
 
+            // A missing object is refused, not read as an empty document. Two
+            // lines up the same absence of the *row* is `RemotePostGone`; the
+            // body deserves the same answer, because "keep cloud" is a request
+            // for a version that would turn out not to exist. Taken as empty it
+            // renames a blank file over the local draft and then `sync_agree`
+            // records the two sides as holding the same thing, so the work is
+            // not merely replaced by nothing, it is marked clean.
+            //
+            // Reachable without anything going wrong: `sync_posts` pushes every
+            // active post's metadata to D1 without uploading a body, so a
+            // never-published draft can be in conflict with a row that has no
+            // object behind it.
             let body = cloudflare::download_from_r2(
                 &client,
                 &config,
                 &media_keys::body_key(&post.slug),
             )
             .await?
-            .unwrap_or_default();
+            .ok_or_else(|| AppError::RemoteBodyGone(post.slug.clone()))?;
 
             // Body first, by the same reasoning as `save_post`: the write is
             // what fails, and until the rename nothing has been replaced.
