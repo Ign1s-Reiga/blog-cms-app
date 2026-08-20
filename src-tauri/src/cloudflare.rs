@@ -622,10 +622,30 @@ pub async fn d1_series_update(
 
 // ─── Client ─────────────────────────────────────────────────────────────────
 
-/// A reqwest client plus the signed-in Cloudflare credentials.
+/// How long a single Cloudflare request may take before it is given up on.
+///
+/// Generous, because it has to cover a media upload over a domestic connection —
+/// but finite, which is the point. reqwest sets no timeout of its own, so a
+/// connection that is accepted and then never answered hangs the caller for as
+/// long as the socket stays open.
+///
+/// The MCP approval path is where that costs most: `mcp_approve_publish` moves a
+/// request to `publishing` before the upload and only settles it afterwards, and
+/// the queue is in memory. A wedged request can then be neither approved nor
+/// rejected again — nothing but restarting the app clears it.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Shorter, because reaching the host is not the slow part; only sending is.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// A reqwest client with those timeouts, plus the signed-in credentials.
 pub fn cf() -> AppResult<(Client, CloudflareConfig)> {
     let config = crate::auth::get_creds().ok_or(AppError::NotConfigured)?;
-    Ok((Client::new(), config))
+    let client = Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()?;
+    Ok((client, config))
 }
 
 #[cfg(test)]
