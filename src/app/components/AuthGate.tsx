@@ -70,7 +70,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             // Shown beside the app rather than in front of it: everything local
             // still works, and what failed was reaching Cloudflare.
             void pullFromCloud().catch((err: unknown) => {
-                setPullError(String(err));
+              setPullError(String(err));
             });
           }}
         />
@@ -88,9 +88,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           <p className='text-[12px] font-semibold text-red-700 dark:text-red-400'>
             Could not read this account&apos;s posts
           </p>
-          <p className='mt-0.5 text-[11px] leading-[1.5] text-red-600 dark:text-red-400/90'>
-            {pullError}
-          </p>
+          <p className='mt-0.5 text-[11px] leading-[1.5] text-red-600 dark:text-red-400/90'>{pullError}</p>
           <button
             type='button'
             onClick={() => setPullError(null)}

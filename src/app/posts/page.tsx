@@ -624,9 +624,7 @@ export default function PostsPage() {
                       not just take the post down, it would settle the
                       disagreement in local's favour on the way past. Resolve it
                       in the editor first; the button comes back. */}
-                      {post.status === 'published' &&
-                        post.sync !== 'conflict' &&
-                        post.sync !== 'remote_ahead' && (
+                      {post.status === 'published' && post.sync !== 'conflict' && post.sync !== 'remote_ahead' && (
                         <button
                           type='button'
                           aria-label={`Unpublish ${post.title}`}
