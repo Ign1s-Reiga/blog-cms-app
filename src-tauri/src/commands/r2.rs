@@ -255,6 +255,49 @@ async fn restore_metadata(
 
 // ─── Post content ───────────────────────────────────────────────────────────
 
+/// Record that this machine and the cloud hold the same content, now that the
+/// body is actually known.
+///
+/// `mirror_posts` has to agree a fingerprint without ever seeing the body — a
+/// refresh does not download one — so it hashes the metadata against an empty
+/// string as a placeholder. That reads `clean`, because both halves of the row
+/// are set to the same placeholder, and it stays true only until something
+/// hashes the post honestly.
+///
+/// The first save does. Even a save that changed nothing hashes the real text,
+/// finds it different from the placeholder, and the post reports `modified` with
+/// no edit behind it. From there the refresh stops applying the cloud's metadata
+/// to it — that branch exists to protect unpushed work — and the next remote
+/// change derives `conflict`, asking which side to keep between two copies that
+/// are identical.
+///
+/// This download is the moment the placeholder can be replaced with the truth:
+/// the bytes just fetched *are* the cloud's copy. Only reached with the body
+/// lock held and after the caller has established that nothing local is pending,
+/// so it cannot overwrite a real edit's fingerprint — and best effort, because a
+/// bookkeeping failure must not cost the caller the body it came for.
+async fn settle_fingerprint_against(conn: &DatabaseConnection, slug: &str, body: &str) {
+    let Ok(Some(post)) = db::post_by_slug(conn, slug).await else {
+        return;
+    };
+    let Ok(Some(row)) = db::sync_get(conn, post.id).await else {
+        // No row means nothing has touched this post since it arrived, which
+        // already reads `clean`. There is no placeholder to correct.
+        return;
+    };
+    if sync_state::local_changed(&row) {
+        return;
+    }
+    let _ = db::sync_agree(
+        conn,
+        post.id,
+        sync_state::content_hash(&post, body),
+        row.remote_updated_at,
+        now_ts(),
+    )
+    .await;
+}
+
 /// Read a post's Markdown body (by slug) for the editor.
 ///
 /// Prefers the local cache (`<app_data>/posts/<slug>.md`). If it isn't cached
@@ -396,6 +439,7 @@ pub async fn read_post_markdown(
             if let Ok(staged) = StagedBody::write(&dir, &content).await {
                 if staged.commit(&local_path).await.is_ok() {
                     let _ = db::body_stale_clear(conn.inner(), &slug).await;
+                    settle_fingerprint_against(conn.inner(), &slug, &content).await;
                 }
             }
             Ok(content)
