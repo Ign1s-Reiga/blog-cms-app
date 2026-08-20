@@ -11,7 +11,6 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { ImportDialog, type ImportProposal } from '@/components/ImportDialog';
 import { onPostsRefreshed } from '@/lib/sync';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -138,9 +137,6 @@ export default function PostsPage() {
   const [filter, setFilter] = useState<FilterId>('all');
   const [search, setSearch] = useState('');
   const [importStatus, setImportStatus] = useState<ImportStatus>({ kind: 'idle' });
-  /// The file that has been read and is waiting to be confirmed. Picking one
-  /// creates nothing by itself — `ImportDialog` commits it, or drops it.
-  const [proposal, setProposal] = useState<ImportProposal | null>(null);
 
   const [posts, setPosts] = useState<Post[]>([]);
   const [trashed, setTrashed] = useState<TrashedPost[]>([]);
@@ -218,14 +214,14 @@ export default function PostsPage() {
   // Re-read local data after a cloud refresh.
   useEffect(() => onPostsRefreshed(() => void loadPosts()), [loadPosts]);
 
-  /// Pick a file and read it. The post is created only once the metadata the
-  /// file proposes has been confirmed — see `commit_import`.
   const handleImportArticle = async () => {
     setImportStatus({ kind: 'loading' });
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      setProposal(await invoke<ImportProposal>('stage_import'));
-      setImportStatus({ kind: 'idle' });
+      const title = await invoke<string>('import_article');
+      setImportStatus({ kind: 'success', title });
+      void loadPosts(); // show the newly imported draft
+      setTimeout(() => setImportStatus({ kind: 'idle' }), 4000);
     } catch (err) {
       const msg = String(err);
       if (msg === 'cancelled') {
@@ -235,16 +231,6 @@ export default function PostsPage() {
       setImportStatus({ kind: 'error', message: msg });
       setTimeout(() => setImportStatus({ kind: 'idle' }), 6000);
     }
-  };
-
-  // Stable so the dialog's Escape listener is not re-bound on every render.
-  const dismissProposal = useCallback(() => setProposal(null), []);
-
-  const handleImported = (title: string) => {
-    setProposal(null);
-    setImportStatus({ kind: 'success', title });
-    void loadPosts(); // show the newly imported draft
-    setTimeout(() => setImportStatus({ kind: 'idle' }), 4000);
   };
 
   /// Run a command that moves a post between listings, and re-read both. They
@@ -333,7 +319,6 @@ export default function PostsPage() {
 
   return (
     <main className='flex-1 overflow-y-auto p-6'>
-      <ImportDialog proposal={proposal} onCancel={dismissProposal} onImported={handleImported} />
       <div className='space-y-4 w-full'>
         {/* Toolbar */}
         <div className='flex items-center justify-between gap-4'>
