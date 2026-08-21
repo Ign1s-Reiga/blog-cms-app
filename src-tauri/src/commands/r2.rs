@@ -344,6 +344,85 @@ async fn has_local_edits(conn: &DatabaseConnection, slug: &str) -> AppResult<boo
         .is_some_and(|row| sync_state::local_changed(&row)))
 }
 
+/// What an export produced, so the app can say what the file actually holds.
+#[derive(serde::Serialize)]
+pub struct Exported {
+    pub path: String,
+    pub slug: String,
+    /// The file carries text readers have not been served: the post is live and
+    /// this machine has edits it has not published. Not an error — exporting
+    /// what is on this machine is the point — but the file and the blog do not
+    /// agree, and only the app knows that.
+    pub unpublished_edits: bool,
+}
+
+/// Write a post out as a `.md` file with front matter, at a path the author
+/// chooses.
+///
+/// The body comes from [`read_post_markdown`], which is what keeps this honest:
+/// a cache the cloud has moved past is refreshed before it is read, and a body
+/// that is neither cached nor reachable is an error rather than an empty
+/// document. An export cannot therefore write a stale version without saying so,
+/// and cannot quietly produce an empty file for a post whose text it could not
+/// find.
+///
+/// Nothing reads the file back. Import takes the file name and strips the block,
+/// so this is a copy for a person or another tool, not a backup that restores
+/// itself.
+#[tauri::command]
+pub async fn export_post(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+) -> AppResult<Exported> {
+    let post = db::get::<PostModel>(conn.inner(), id)
+        .await?
+        .ok_or(AppError::PostNotFound(id))?;
+
+    // Before the dialog: a post whose body cannot be read should say so rather
+    // than ask where to put a file it cannot write.
+    let body = read_post_markdown(app.clone(), conn.clone(), post.slug.clone()).await?;
+
+    let series = match post.series_id {
+        Some(series_id) => db::get::<SeriesModel>(conn.inner(), series_id).await?,
+        None => None,
+    };
+    let unpublished_edits = post.published && has_local_edits(conn.inner(), &post.slug).await?;
+    let document = crate::export::document(&post, series.as_ref(), &body);
+
+    // `blocking_save_file` must not run on a tokio thread; use spawn_blocking.
+    let app_clone = app.clone();
+    let suggested = format!("{}.md", post.slug);
+    let picked = tokio::task::spawn_blocking(move || {
+        app_clone
+            .dialog()
+            .file()
+            .add_filter("Markdown", &["md"])
+            .set_file_name(&suggested)
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| AppError::join("Dialog thread panicked", e))?;
+
+    let path = match picked {
+        None => return Err(AppError::Cancelled),
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        Some(tauri_plugin_dialog::FilePath::Path(p)) => p,
+        #[allow(unreachable_patterns)]
+        Some(_) => return Err(AppError::UnsupportedPathFormat),
+    };
+
+    tokio::fs::write(&path, document)
+        .await
+        .map_err(|e| AppError::io("Failed to write the exported file", e))?;
+
+    Ok(Exported {
+        path: path.to_string_lossy().into_owned(),
+        slug: post.slug,
+        unpublished_edits,
+    })
+}
+
 #[tauri::command]
 pub async fn read_post_markdown(
     app: tauri::AppHandle,

@@ -5,6 +5,7 @@ mod commands;
 mod db;
 mod entities;
 mod error;
+mod export;
 mod imaging;
 // Public so `tests/mcp_tools.rs` can assert the tool surface from outside the
 // library; every other module stays crate-private.
@@ -86,6 +87,7 @@ pub fn run() {
             traffic::fetch_post_traffic,
             traffic::list_web_analytics_sites,
             commands::import_article,
+            commands::export_post,
             imaging::stage_image,
             // Posts — local SQLite
             commands::create_post,
