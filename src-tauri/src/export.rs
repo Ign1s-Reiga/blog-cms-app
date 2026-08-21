@@ -105,7 +105,17 @@ fn push_str(out: &mut String, key: &str, value: &str) {
 /// YAML treats specially in every position — a colon, a leading `-`, `yes`,
 /// `null`, a leading digit. Quoting unconditionally is uglier to read and right
 /// every time.
+///
+/// **No control character is passed through.** A double-quoted YAML scalar may
+/// not hold a raw C0 control, so one that reached a title — through MCP, or
+/// pulled down from a row somebody else wrote — would produce a file no parser
+/// accepts, which is exactly the audience this module exists for. The three
+/// common ones get named escapes; everything else below `0x20`, and DEL, goes
+/// out as a hex escape; and the three non-ASCII characters YAML reads as line
+/// breaks get theirs, since raw they would end the scalar early.
 fn quote(value: &str) -> String {
+    use std::fmt::Write;
+
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for ch in value.chars() {
@@ -115,6 +125,12 @@ fn quote(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\u{85}' => out.push_str("\\N"),
+            '\u{2028}' => out.push_str("\\L"),
+            '\u{2029}' => out.push_str("\\P"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
             c => out.push(c),
         }
     }
@@ -213,6 +229,27 @@ mod tests {
         let block: Vec<&str> = doc.lines().skip(1).take_while(|l| *l != "---").collect();
         assert_eq!(block.len(), 5, "{block:?}");
         assert!(block.iter().all(|l| l.contains(": ")), "{block:?}");
+    }
+
+    /// Raw control characters make a double-quoted scalar invalid YAML, and they
+    /// arrive through MCP or from rows written elsewhere — so the file the other
+    /// tools are meant to read would be the one thing they cannot parse.
+    #[test]
+    fn control_characters_are_escaped_rather_than_written_raw() {
+        let mut p = post();
+        p.title = "nul\u{0}back\u{8}form\u{c}del\u{7f}".to_string();
+        p.excerpt = Some("nel\u{85}sep\u{2028}para\u{2029}".to_string());
+
+        let doc = document(&p, None, "Body\n");
+        assert!(doc.contains(r#"title: "nul\x00back\x08form\x0cdel\x7f""#), "{doc}");
+        assert!(doc.contains(r#"excerpt: "nel\Nsep\Lpara\P""#), "{doc}");
+
+        // Nothing raw below 0x20 reached the block, whatever went in.
+        let block: String = doc.lines().skip(1).take_while(|l| *l != "---").collect();
+        assert!(
+            !block.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7f),
+            "a raw control character reached the block"
+        );
     }
 
     #[test]
