@@ -31,8 +31,10 @@ served.
 
 ### Library
 
-- **Local-first posts list** with search and filters for All, Published, Drafts, Edited, Conflict,
-  Scheduled, Failed, and Trash.
+- **Local-first posts list** with filters for All, Published, Drafts, Edited, Conflict,
+  Scheduled, Failed, and Trash. Search covers titles, tags and the **text of the posts**; a body
+  that is not on this machine is reported as unsearched rather than counted as a miss, with one
+  click to fetch it and search again.
 - **Trash** — deleting is a local soft delete. A published post that is trashed **stays live**;
   emptying the trash is the only path that is final.
 - **Import** an existing `.md` file as a draft. YAML front matter is **stripped**, not read: the
@@ -143,6 +145,7 @@ blog-cms-app/
 │   │   ├── revisions.rs         # pre-edit snapshots
 │   │   ├── imaging.rs           # JPG/PNG → AVIF
 │   │   ├── export.rs            # a post as Markdown, with front matter
+│   │   ├── body_search.rs       # searching post text, and saying what it could not read
 │   │   ├── media_keys.rs        # R2 key layout
 │   │   ├── media_usage.rs       # which posts use a media object
 │   │   ├── analytics.rs         # Cloudflare GraphQL usage data

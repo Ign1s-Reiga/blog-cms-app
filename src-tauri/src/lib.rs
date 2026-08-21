@@ -1,5 +1,6 @@
 mod analytics;
 mod auth;
+mod body_search;
 mod cloudflare;
 mod commands;
 mod db;
@@ -88,6 +89,8 @@ pub fn run() {
             traffic::list_web_analytics_sites,
             commands::import_article,
             commands::export_post,
+            commands::search_post_bodies,
+            commands::cache_bodies,
             imaging::stage_image,
             // Posts — local SQLite
             commands::create_post,
