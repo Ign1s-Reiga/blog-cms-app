@@ -30,9 +30,20 @@ type UnsearchedReason = 'body_not_cached' | 'body_stale';
 /// Mirrors `Unsearched` in `src-tauri/src/body_search.rs`.
 type Unsearched = { id: number; title: string; reason: UnsearchedReason };
 
-/// Mirrors `BodyMatches`. `null` means no body search has answered for the
-/// current query yet — which is not the same as one that found nothing.
-type BodyMatches = { matched: number[]; unsearched: Unsearched[] } | null;
+/// Mirrors `BodyMatches`, with the query it answered kept alongside it.
+///
+/// The query is not decoration. Results outliving the text that produced them
+/// is how a search for `rust` goes on showing its posts while `tauri` is being
+/// typed — the title and tag filters move to the new text immediately, and the
+/// body ids from the old one would still be ORed in. Every use is gated on this
+/// matching what is in the box now.
+///
+/// `null` means no body search has answered for the current query yet — which is
+/// not the same as one that found nothing.
+type BodyMatches = { query: string; matched: number[]; unsearched: Unsearched[] } | null;
+
+/// The shape the backend actually returns; the query is added on arrival.
+type BodyMatchesPayload = { matched: number[]; unsearched: Unsearched[] };
 
 /// Said plainly, because each has a different way out.
 const UNSEARCHED_REASON: Record<UnsearchedReason, string> = {
@@ -285,9 +296,9 @@ export default function PostsPage() {
       try {
         const { invoke, isTauri } = await import('@tauri-apps/api/core');
         if (!isTauri()) return;
-        const found = await invoke<Exclude<BodyMatches, null>>('search_post_bodies', { query: q });
+        const found = await invoke<BodyMatchesPayload>('search_post_bodies', { query: q });
         if (mine !== bodyAttempt.current) return;
-        setBodyMatches(found);
+        setBodyMatches({ query: q, ...found });
       } catch {
         // A failed body search leaves title and tag matching working. Clearing
         // to `null` says "no answer" rather than "nothing matched".
@@ -303,16 +314,24 @@ export default function PostsPage() {
   /// part of this feature that touches the network, and only when asked.
   const fillSearchGaps = async () => {
     if (!bodyMatches || bodyMatches.unsearched.length === 0 || fillingGaps) return;
+    // The query this was started for. Fetching is slow enough to type through,
+    // and answering the old text under the new one is worse than not answering.
+    const asked = bodyMatches.query;
+    const ids = bodyMatches.unsearched.map((u) => u.id);
     setFillingGaps(true);
     try {
       const { invoke, isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
-      await invoke('cache_bodies', { ids: bodyMatches.unsearched.map((u) => u.id) });
-      // Re-run against what is now here. Bumping the attempt counter retires any
-      // debounced search still in flight.
+      await invoke('cache_bodies', { ids });
+      // Only if the box still says what it said. Claiming a fresh attempt
+      // regardless would also retire a debounced search for the *newer* text
+      // and leave the old results sitting under it.
+      if (asked !== search.trim()) return;
       const mine = ++bodyAttempt.current;
-      const found = await invoke<Exclude<BodyMatches, null>>('search_post_bodies', { query: search.trim() });
-      if (mine === bodyAttempt.current) setBodyMatches(found);
+      const found = await invoke<BodyMatchesPayload>('search_post_bodies', { query: asked });
+      if (mine === bodyAttempt.current && asked === search.trim()) {
+        setBodyMatches({ query: asked, ...found });
+      }
     } catch {
       // Whatever could not be fetched stays listed as unsearched, which is
       // already the honest state.
@@ -411,9 +430,11 @@ export default function PostsPage() {
     if (q === '' || p.title.toLowerCase().includes(q) || p.tags.some((t) => t.toLowerCase().includes(q))) {
       return true;
     }
-    // The body, once an answer for this query has come back. Until it has,
-    // `bodyMatches` is null and this contributes nothing rather than excluding.
-    return bodyMatches?.matched.includes(p.id) ?? false;
+    // The body, once an answer *for this query* has come back. An answer for an
+    // earlier query says nothing about this one, so it contributes nothing
+    // rather than keeping unrelated posts on screen until the debounce expires.
+    if (bodyMatches?.query !== search.trim()) return false;
+    return bodyMatches.matched.includes(p.id);
   };
 
   const visible = posts.filter((p) => searchMatches(p) && matches(p, filter));
@@ -561,7 +582,7 @@ export default function PostsPage() {
         {/* The half of the answer that would otherwise be silent. An empty
             result over unsearched posts is not "not found" — it is "not
             looked", and only this says which. */}
-        {bodyMatches && bodyMatches.unsearched.length > 0 && (
+        {bodyMatches && bodyMatches.query === search.trim() && bodyMatches.unsearched.length > 0 && (
           <Alert className='items-center rounded-[6px] px-3 py-2 border-zinc-200 bg-zinc-50 dark:border-white/[0.08] dark:bg-white/[0.03]'>
             <AlertDescription className='flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-zinc-600 dark:text-zinc-400'>
               <span>
