@@ -139,6 +139,12 @@ pub enum AppError {
     #[error("series {0} not found")]
     SeriesNotFound(i32),
 
+    /// A rename with nothing on one side of it. Refused rather than applied,
+    /// because "" is not a tag and writing one would put a value in the column
+    /// that nothing else in the app can produce.
+    #[error("A tag name cannot be empty")]
+    EmptyTag,
+
     #[error("Invalid post slug: {0}")]
     InvalidSlug(String),
 

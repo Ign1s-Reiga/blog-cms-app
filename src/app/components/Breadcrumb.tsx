@@ -14,6 +14,7 @@ const LABELS: Record<string, string> = {
   '/posts': 'Posts',
   '/posts/new': 'New Post',
   '/series': 'Series',
+  '/tags': 'Tags',
   '/media': 'Media',
   '/analytics': 'Analytics',
   '/settings': 'Settings',

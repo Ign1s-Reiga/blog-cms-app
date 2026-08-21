@@ -91,6 +91,8 @@ pub fn run() {
             commands::export_post,
             commands::search_post_bodies,
             commands::cache_bodies,
+            commands::list_tags,
+            commands::rename_tag,
             imaging::stage_image,
             // Posts — local SQLite
             commands::create_post,
