@@ -461,15 +461,8 @@ They are placed under `src/app/components/ui/`.
 
 ## Roadmap
 
-Where this is going, one link per piece of work. Each issue is the current state of it — this list
-names the direction and leaves the detail there.
-
-- [Markdown export](https://github.com/Ign1s-Reiga/blog-cms-app/issues/103)
-- [Search over post bodies](https://github.com/Ign1s-Reiga/blog-cms-app/issues/104)
-- [Tag management across the library](https://github.com/Ign1s-Reiga/blog-cms-app/issues/105)
-- [Bulk actions on posts](https://github.com/Ign1s-Reiga/blog-cms-app/issues/106)
-
-Anything not listed here is in [the open issues](https://github.com/Ign1s-Reiga/blog-cms-app/issues).
+Everything listed here has shipped. What comes next is in [the open issues](https://github.com/Ign1s-Reiga/blog-cms-app/issues) — that is the
+list, rather than a copy of it kept here that has to be remembered separately.
 
 ## License
 
