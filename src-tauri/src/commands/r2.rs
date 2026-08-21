@@ -344,6 +344,56 @@ async fn has_local_edits(conn: &DatabaseConnection, slug: &str) -> AppResult<boo
         .is_some_and(|row| sync_state::local_changed(&row)))
 }
 
+/// What filling the gaps managed.
+#[derive(serde::Serialize)]
+pub struct BodiesCached {
+    pub fetched: usize,
+    /// Posts whose body still could not be brought down, with the reason as the
+    /// error said it — offline, no credentials, or gone from R2.
+    pub failed: Vec<CacheFailure>,
+}
+
+#[derive(serde::Serialize)]
+pub struct CacheFailure {
+    pub id: i32,
+    pub title: String,
+    pub message: String,
+}
+
+/// Bring down the bodies named, so a search can see them.
+///
+/// The explicit half of body search: the search itself never touches the
+/// network, and this is what a person presses when they would rather wait than
+/// be told the answer is incomplete. One post's failure does not stop the rest
+/// — a library with one unreachable post is still worth searching the rest of.
+#[tauri::command]
+pub async fn cache_bodies(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    ids: Vec<i32>,
+) -> AppResult<BodiesCached> {
+    let mut fetched = 0usize;
+    let mut failed = Vec::new();
+
+    for id in ids {
+        let Some(post) = db::get::<PostModel>(conn.inner(), id).await? else {
+            continue;
+        };
+        // The same read the editor does, so the caching, the staleness mark and
+        // the guards around a concurrent save are all the ones already written.
+        match read_post_markdown(app.clone(), conn.clone(), post.slug.clone()).await {
+            Ok(_) => fetched += 1,
+            Err(e) => failed.push(CacheFailure {
+                id: post.id,
+                title: post.title,
+                message: e.to_string(),
+            }),
+        }
+    }
+
+    Ok(BodiesCached { fetched, failed })
+}
+
 /// What an export produced, so the app can say what the file actually holds.
 #[derive(serde::Serialize)]
 pub struct Exported {

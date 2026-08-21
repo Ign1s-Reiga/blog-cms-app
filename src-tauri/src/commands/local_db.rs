@@ -352,6 +352,29 @@ pub async fn import_article(
     Ok(title)
 }
 
+// ─── Body search ────────────────────────────────────────────────────────────
+
+/// Search post bodies for `query`, over the posts that are not in the trash.
+///
+/// Local only: it reads the cached Markdown and never fetches. A post whose body
+/// is not on this machine is reported as unsearched rather than counted as a
+/// miss — see [`crate::body_search`] for why that distinction is the point of
+/// the command.
+///
+/// The caller is expected to debounce. This walks every cached body on every
+/// call, which is right for a library of this size and wrong to run per
+/// keystroke; there is no index, and adding one would mean invalidating it on
+/// every save, publish, refresh and rollback.
+#[tauri::command]
+pub async fn search_post_bodies(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    query: String,
+) -> AppResult<crate::body_search::BodyMatches> {
+    let posts = db::list_active_posts(conn.inner()).await?;
+    crate::body_search::search(&app, conn.inner(), &posts, &query).await
+}
+
 // ── Posts: local SQLite ─────────────────────────────────────────────────────────
 
 #[tauri::command]

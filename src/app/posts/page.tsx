@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, Download, EyeOff, Import, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CheckCircle2, Download, EyeOff, Import, Loader2, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { StatusDot, type PostStatus } from '@/components/StatusDot';
@@ -22,6 +22,23 @@ type ImportStatus =
   | { kind: 'loading' }
   | { kind: 'success'; title: string }
   | { kind: 'error'; message: string };
+
+/// Mirrors `Unchecked` in `src-tauri/src/media_usage.rs`, of which body search
+/// can produce two.
+type UnsearchedReason = 'body_not_cached' | 'body_stale';
+
+/// Mirrors `Unsearched` in `src-tauri/src/body_search.rs`.
+type Unsearched = { id: number; title: string; reason: UnsearchedReason };
+
+/// Mirrors `BodyMatches`. `null` means no body search has answered for the
+/// current query yet — which is not the same as one that found nothing.
+type BodyMatches = { matched: number[]; unsearched: Unsearched[] } | null;
+
+/// Said plainly, because each has a different way out.
+const UNSEARCHED_REASON: Record<UnsearchedReason, string> = {
+  body_not_cached: 'its text is not on this machine',
+  body_stale: 'the copy here is older than the published one',
+};
 
 type ExportStatus =
   | { kind: 'idle' }
@@ -144,6 +161,13 @@ export default function PostsPage() {
   const router = useRouter();
   const [filter, setFilter] = useState<FilterId>('all');
   const [search, setSearch] = useState('');
+  /// What the last body search answered for the query as it then stood.
+  const [bodyMatches, setBodyMatches] = useState<BodyMatches>(null);
+  const [bodySearching, setBodySearching] = useState(false);
+  const [fillingGaps, setFillingGaps] = useState(false);
+  /// Which body search is the current one. A slow answer for `rust` must not
+  /// land on top of a quick one for `rustup` and show the wrong rows.
+  const bodyAttempt = useRef(0);
   const [importStatus, setImportStatus] = useState<ImportStatus>({ kind: 'idle' });
   /// What the last export produced, or why it did not. Kept apart from
   /// `importStatus` so one does not clear the other's message.
@@ -244,6 +268,59 @@ export default function PostsPage() {
     }
   };
 
+  // Bodies are searched on a pause in typing, not on every keystroke: the
+  // command walks every cached body, which is right once and wrong ten times a
+  // second. Titles and tags keep matching instantly below, so the box stays
+  // responsive while this catches up.
+  useEffect(() => {
+    const q = search.trim();
+    if (q === '') {
+      setBodyMatches(null);
+      setBodySearching(false);
+      return;
+    }
+    setBodySearching(true);
+    const mine = ++bodyAttempt.current;
+    const timer = setTimeout(async () => {
+      try {
+        const { invoke, isTauri } = await import('@tauri-apps/api/core');
+        if (!isTauri()) return;
+        const found = await invoke<Exclude<BodyMatches, null>>('search_post_bodies', { query: q });
+        if (mine !== bodyAttempt.current) return;
+        setBodyMatches(found);
+      } catch {
+        // A failed body search leaves title and tag matching working. Clearing
+        // to `null` says "no answer" rather than "nothing matched".
+        if (mine === bodyAttempt.current) setBodyMatches(null);
+      } finally {
+        if (mine === bodyAttempt.current) setBodySearching(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  /// Fetch the bodies that could not be searched, then search again. The only
+  /// part of this feature that touches the network, and only when asked.
+  const fillSearchGaps = async () => {
+    if (!bodyMatches || bodyMatches.unsearched.length === 0 || fillingGaps) return;
+    setFillingGaps(true);
+    try {
+      const { invoke, isTauri } = await import('@tauri-apps/api/core');
+      if (!isTauri()) return;
+      await invoke('cache_bodies', { ids: bodyMatches.unsearched.map((u) => u.id) });
+      // Re-run against what is now here. Bumping the attempt counter retires any
+      // debounced search still in flight.
+      const mine = ++bodyAttempt.current;
+      const found = await invoke<Exclude<BodyMatches, null>>('search_post_bodies', { query: search.trim() });
+      if (mine === bodyAttempt.current) setBodyMatches(found);
+    } catch {
+      // Whatever could not be fetched stays listed as unsearched, which is
+      // already the honest state.
+    } finally {
+      setFillingGaps(false);
+    }
+  };
+
   const exportPost = async (id: number) => {
     if (exportStatus.kind === 'working') return;
     setExportStatus({ kind: 'working', id });
@@ -331,7 +408,12 @@ export default function PostsPage() {
     // `tags_to_json` only trims — so a `Cloudflare` tag was unreachable by
     // search whichever case was typed: the query had already been lowered, and
     // the tag had not.
-    return q === '' || p.title.toLowerCase().includes(q) || p.tags.some((t) => t.toLowerCase().includes(q));
+    if (q === '' || p.title.toLowerCase().includes(q) || p.tags.some((t) => t.toLowerCase().includes(q))) {
+      return true;
+    }
+    // The body, once an answer for this query has come back. Until it has,
+    // `bodyMatches` is null and this contributes nothing rather than excluding.
+    return bodyMatches?.matched.includes(p.id) ?? false;
   };
 
   const visible = posts.filter((p) => searchMatches(p) && matches(p, filter));
@@ -386,11 +468,21 @@ export default function PostsPage() {
               />
               <Input
                 type='text'
-                placeholder='Search posts, tags…'
+                placeholder='Search posts, tags, text…'
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className='h-[30px] w-[200px] pl-[28px] pr-3 text-[12px] rounded-[6px] border-zinc-200 dark:border-white/[0.08] bg-zinc-50 dark:bg-white/[0.04]'
+                className='h-[30px] w-[200px] pl-[28px] pr-[26px] text-[12px] rounded-[6px] border-zinc-200 dark:border-white/[0.08] bg-zinc-50 dark:bg-white/[0.04]'
               />
+              {/* While this is spinning, the rows are matched on titles and tags
+                  alone — so an empty list is not yet an answer about the text. */}
+              {bodySearching && (
+                <Loader2
+                  size={12}
+                  strokeWidth={2}
+                  aria-label='Searching post text'
+                  className='absolute right-[9px] top-1/2 -translate-y-1/2 animate-spin text-zinc-400 dark:text-zinc-600'
+                />
+              )}
             </div>
           </div>
 
@@ -465,6 +557,41 @@ export default function PostsPage() {
               </AlertDescription>
             </Alert>
           ))}
+
+        {/* The half of the answer that would otherwise be silent. An empty
+            result over unsearched posts is not "not found" — it is "not
+            looked", and only this says which. */}
+        {bodyMatches && bodyMatches.unsearched.length > 0 && (
+          <Alert className='items-center rounded-[6px] px-3 py-2 border-zinc-200 bg-zinc-50 dark:border-white/[0.08] dark:bg-white/[0.03]'>
+            <AlertDescription className='flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-zinc-600 dark:text-zinc-400'>
+              <span>
+                {bodyMatches.unsearched.length} post{bodyMatches.unsearched.length === 1 ? '' : 's'} could not be
+                searched
+                {bodyMatches.unsearched.length <= 3 && (
+                  <>
+                    {' — '}
+                    {bodyMatches.unsearched.map((u, i) => (
+                      <span key={u.id}>
+                        {i > 0 && ', '}
+                        <span className='font-medium text-zinc-700 dark:text-zinc-300'>{u.title}</span> (
+                        {UNSEARCHED_REASON[u.reason]})
+                      </span>
+                    ))}
+                  </>
+                )}
+                .
+              </span>
+              <button
+                type='button'
+                onClick={() => void fillSearchGaps()}
+                disabled={fillingGaps}
+                className='rounded-[4px] px-1.5 py-0.5 font-medium text-zinc-700 underline underline-offset-2 transition-colors hover:bg-zinc-100 disabled:opacity-60 dark:text-zinc-300 dark:hover:bg-white/[0.06]'
+              >
+                {fillingGaps ? 'Fetching…' : 'Fetch them and search again'}
+              </button>
+            </AlertDescription>
+          </Alert>
+        )}
 
         {exportStatus.kind === 'success' && (
           <Alert className='items-center rounded-[6px] px-3 py-2 border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/[0.08] dark:text-emerald-400'>
