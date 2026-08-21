@@ -542,64 +542,125 @@ pub async fn rename_tag(
         return Ok(TagRenamed { changed: 0, skipped: Vec::new() });
     }
 
+    // The listing decides only *which* posts to visit. What is written to each
+    // is taken from the row as it stands at that moment — see `retag`.
+    let ids: Vec<i32> = db::list_active_posts(conn.inner())
+        .await?
+        .into_iter()
+        .filter(|p| tags_of(p).iter().any(|t| t == &from))
+        .map(|p| p.id)
+        .collect();
+
+    retag(&app, conn.inner(), &ids, post_revision::TAG_RENAME, |tags| {
+        rewrite_tags(tags, &from, &to)
+    })
+    .await
+}
+
+/// Add a tag to each of `ids`, leaving a post that already carries it alone.
+#[tauri::command]
+pub async fn add_tag_to_posts(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    ids: Vec<i32>,
+    tag: String,
+) -> AppResult<TagRenamed> {
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return Err(AppError::EmptyTag);
+    }
+    retag(&app, conn.inner(), &ids, post_revision::BULK_TAG, |mut tags| {
+        if !tags.iter().any(|t| t == &tag) {
+            tags.push(tag.clone());
+        }
+        tags
+    })
+    .await
+}
+
+/// Take a tag off each of `ids`, leaving a post that does not carry it alone.
+#[tauri::command]
+pub async fn remove_tag_from_posts(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    ids: Vec<i32>,
+    tag: String,
+) -> AppResult<TagRenamed> {
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return Err(AppError::EmptyTag);
+    }
+    retag(&app, conn.inner(), &ids, post_revision::BULK_TAG, |tags| {
+        tags.into_iter().filter(|t| t != &tag).collect()
+    })
+    .await
+}
+
+/// Apply a change to the tags of each post named, safely.
+///
+/// One place for the four things that have to be true of any sweep over tags,
+/// so a second caller cannot get one of them wrong:
+///
+/// 1. **The body is read first.** Tags are part of [`crate::sync_state::content_hash`],
+///    so a post can only be marked as edited where there is a body to
+///    fingerprint. Without that mark `db::upsert_post_from_remote` treats the
+///    row as clean and the next Refresh takes the cloud's tags back — undoing
+///    the change with nothing said. A post whose body is not here is therefore
+///    **left alone** and reported, rather than written and quietly reverted.
+/// 2. **The row is re-read inside the transaction that writes it.**
+///    `into_update` writes every column, so acting on a row read before the
+///    sweep began would revert a title, excerpt, publication or series that
+///    somebody changed in between.
+/// 3. **A revision is snapshotted first**, like every other path that
+///    overwrites a post. A sweep is the hardest kind of edit to undo by hand,
+///    which makes the history worth more here than anywhere.
+/// 4. **The fingerprint is written in the same transaction as the row**, so
+///    there is no moment where one landed and the other did not.
+///
+/// `change` is given the post's current tags and returns what they should be.
+/// Returning them unchanged is not an edit, and nothing is written.
+async fn retag(
+    app: &tauri::AppHandle,
+    conn: &DatabaseConnection,
+    ids: &[i32],
+    origin: &'static str,
+    change: impl Fn(Vec<String>) -> Vec<String>,
+) -> AppResult<TagRenamed> {
     let mut changed = 0usize;
     let mut skipped = Vec::new();
 
-    // The listing is a snapshot, and a rename walks the whole library: an MCP
-    // client or the editor can write to any of these while it does. So the
-    // listing is used only to decide *which* posts to visit, and every decision
-    // about what to write is taken from the row as it is at that moment.
-    for candidate in db::list_active_posts(conn.inner()).await? {
-        let post_id = candidate.id;
-
-        // The body first, outside the transaction: reading it is slow, and there
-        // is no point opening one for a post that cannot be finished.
-        let Some(post) = db::get::<PostModel>(conn.inner(), post_id).await? else {
+    for &post_id in ids {
+        // Outside the transaction: reading a body is slow, and there is no point
+        // opening one for a post that cannot be finished.
+        let Some(post) = db::get::<PostModel>(conn, post_id).await? else {
             continue;
         };
-        if !tags_of(&post).iter().any(|t| t == &from) {
-            continue;
-        }
-        let Some(body) = crate::revisions::cached_body(&app, &post.slug).await else {
+        let Some(body) = crate::revisions::cached_body(app, &post.slug).await else {
             skipped.push(Skipped { id: post_id, title: post.title });
             continue;
         };
 
-        let txn = conn.inner().begin().await?;
+        let txn = conn.begin().await?;
 
-        // Re-read inside the transaction. `into_update` writes every column, so
-        // acting on the row as it was read a moment ago would revert whatever
-        // somebody else changed in between — a title, an excerpt, a publication,
-        // a series — while meaning to touch only the tags.
         let Some(current) = db::get::<PostModel>(&txn, post_id).await? else {
             txn.rollback().await?;
             continue;
         };
-        let tags = tags_of(&current);
-        if !tags.iter().any(|t| t == &from) {
-            // Renamed or removed while this was running. Whoever did that was
-            // acting on the post itself; this is a sweep, and it gives way.
+        let before = tags_of(&current);
+        let after = change(before.clone());
+        if after == before {
             txn.rollback().await?;
             continue;
         }
 
-        // Before the overwrite, like every other edit path. An accidental merge
-        // destroys which posts carried which name, and an inverse rename cannot
-        // put that back — the history is the only route to it.
-        crate::revisions::snapshot_or_log(&app, &txn, &current, post_revision::TAG_RENAME).await;
+        crate::revisions::snapshot_or_log(app, &txn, &current, origin).await;
 
-        let rewritten = rewrite_tags(tags, &from, &to);
         let updated = PostModel {
-            tags: Some(serde_json::to_string(&rewritten).unwrap_or_else(|_| "[]".to_string())),
+            tags: Some(serde_json::to_string(&after).unwrap_or_else(|_| "[]".to_string())),
             updated_at: now_ts(),
             ..current
         };
         let updated = db::update::<PostModel>(&txn, updated).await?;
-
-        // Tags are part of what a reader sees, so they are part of the
-        // fingerprint. Written in the same transaction as the row: a rewritten
-        // post that is not marked as edited is one the next Refresh would
-        // quietly overwrite from the cloud.
         db::sync_set_local(&txn, post_id, crate::sync_state::content_hash(&updated, &body)).await?;
 
         txn.commit().await?;

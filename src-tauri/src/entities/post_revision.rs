@@ -22,6 +22,11 @@ pub const CONFLICT_KEEP_REMOTE: &str = "conflict_keep_remote";
 /// here, and an inverse rename cannot recover which posts carried which name.
 pub const TAG_RENAME: &str = "tag_rename";
 
+/// Tagging several posts at once from the list. Distinct from `TAG_RENAME`
+/// because the two are undone differently: a rename is reversed library-wide,
+/// a bulk tag only on the posts that were selected.
+pub const BULK_TAG: &str = "bulk_tag";
+
 /// Local-only snapshot of a post as it stood *before* one particular edit,
 /// keyed by its own id and pointing at the post it belongs to.
 ///

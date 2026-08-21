@@ -43,6 +43,9 @@ served.
   dates, series and published state. It writes what is on this machine, and says so when that is
   ahead of what readers are being served. Nothing reads the file back — import strips front
   matter — so an export is a copy, not a backup that restores itself.
+- **Bulk actions** on the posts list: tick several posts and trash, restore, publish, unpublish or
+  tag them in one go. One confirmation states the count and the effect before anything runs, and
+  a post that fails is named rather than folded into a total — nothing is rolled back.
 - **Tags** on their own screen, with how many posts carry each. Renaming one rewrites it across
   the library, and renaming it onto an existing tag merges the two — which is how a `Rust` and a
   `rust` become one. Tags are listed as stored, so both are visible; search treats them alike,
