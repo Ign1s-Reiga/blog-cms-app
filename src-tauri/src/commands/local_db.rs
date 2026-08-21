@@ -434,24 +434,32 @@ pub struct TagCount {
     pub posts: usize,
 }
 
-/// A post whose tags were rewritten but whose "edited" mark could not be.
+/// A post carrying the tag that was left exactly as it was.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct Unmarked {
+pub struct Skipped {
     pub id: i32,
     pub title: String,
 }
 
-/// What a rename did.
+/// What a rename did, and what it deliberately did not do.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TagRenamed {
     /// Posts whose tag list changed.
     pub changed: usize,
-    /// Posts that were rewritten but could not be marked as edited, because
-    /// their body is not on this machine to fingerprint. They still go up on
-    /// the next push — `sync_posts` sends every post, not only changed ones —
-    /// they simply will not appear under the Edited filter until something
-    /// reads their body.
-    pub unmarked: Vec<Unmarked>,
+    /// Posts carrying the tag that were **not** rewritten, because their body is
+    /// not on this machine.
+    ///
+    /// Not a detail. Tags are part of `content_hash`, so a rewritten post can
+    /// only be marked as edited where there is a body to fingerprint — and an
+    /// unmarked row is one `upsert_post_from_remote` treats as clean, so the
+    /// next Refresh would take the cloud's tags and put the old name back with
+    /// nothing said. Leaving the post alone and naming it here is the honest
+    /// half of that trade: a rename that visibly did not finish beats one that
+    /// silently comes undone.
+    ///
+    /// Opening such a post once brings its body down and the rename can be run
+    /// again.
+    pub skipped: Vec<Skipped>,
 }
 
 /// Read a post's tags out of the JSON column.
@@ -516,9 +524,6 @@ fn rewrite_tags(tags: Vec<String>, from: &str, to: &str) -> Vec<String> {
 /// two together, because a post ending up with the name twice keeps it once. One
 /// operation rather than two that would have to agree with each other.
 ///
-/// A post's other tags are kept, in the order they were in. Rewriting the list
-/// from a set would reorder every post's tags as a side effect of renaming one.
-///
 /// Local, like every other edit here. The rewritten posts are marked as edited
 /// and go up on an explicit push; nothing is published by renaming a tag.
 #[tauri::command]
@@ -534,50 +539,74 @@ pub async fn rename_tag(
         return Err(AppError::EmptyTag);
     }
     if from == to {
-        return Ok(TagRenamed { changed: 0, unmarked: Vec::new() });
+        return Ok(TagRenamed { changed: 0, skipped: Vec::new() });
     }
 
     let mut changed = 0usize;
-    let mut unmarked = Vec::new();
+    let mut skipped = Vec::new();
 
-    for post in db::list_active_posts(conn.inner()).await? {
-        let tags = tags_of(&post);
+    // The listing is a snapshot, and a rename walks the whole library: an MCP
+    // client or the editor can write to any of these while it does. So the
+    // listing is used only to decide *which* posts to visit, and every decision
+    // about what to write is taken from the row as it is at that moment.
+    for candidate in db::list_active_posts(conn.inner()).await? {
+        let post_id = candidate.id;
+
+        // The body first, outside the transaction: reading it is slow, and there
+        // is no point opening one for a post that cannot be finished.
+        let Some(post) = db::get::<PostModel>(conn.inner(), post_id).await? else {
+            continue;
+        };
+        if !tags_of(&post).iter().any(|t| t == &from) {
+            continue;
+        }
+        let Some(body) = crate::revisions::cached_body(&app, &post.slug).await else {
+            skipped.push(Skipped { id: post_id, title: post.title });
+            continue;
+        };
+
+        let txn = conn.inner().begin().await?;
+
+        // Re-read inside the transaction. `into_update` writes every column, so
+        // acting on the row as it was read a moment ago would revert whatever
+        // somebody else changed in between — a title, an excerpt, a publication,
+        // a series — while meaning to touch only the tags.
+        let Some(current) = db::get::<PostModel>(&txn, post_id).await? else {
+            txn.rollback().await?;
+            continue;
+        };
+        let tags = tags_of(&current);
         if !tags.iter().any(|t| t == &from) {
+            // Renamed or removed while this was running. Whoever did that was
+            // acting on the post itself; this is a sweep, and it gives way.
+            txn.rollback().await?;
             continue;
         }
 
-        let rewritten = rewrite_tags(tags, &from, &to);
+        // Before the overwrite, like every other edit path. An accidental merge
+        // destroys which posts carried which name, and an inverse rename cannot
+        // put that back — the history is the only route to it.
+        crate::revisions::snapshot_or_log(&app, &txn, &current, post_revision::TAG_RENAME).await;
 
-        let id = post.id;
-        let title = post.title.clone();
-        let slug = post.slug.clone();
+        let rewritten = rewrite_tags(tags, &from, &to);
         let updated = PostModel {
             tags: Some(serde_json::to_string(&rewritten).unwrap_or_else(|_| "[]".to_string())),
             updated_at: now_ts(),
-            ..post
+            ..current
         };
-        let updated = db::update::<PostModel>(conn.inner(), updated).await?;
-        changed += 1;
+        let updated = db::update::<PostModel>(&txn, updated).await?;
 
         // Tags are part of what a reader sees, so they are part of the
-        // fingerprint — which means the mark can only be refreshed where the
-        // body is here to hash. Where it is not, the row is still rewritten and
-        // the post is named, rather than the change being made silently or
-        // refused outright.
-        match crate::revisions::cached_body(&app, &slug).await {
-            Some(body) => {
-                db::sync_set_local(
-                    conn.inner(),
-                    id,
-                    crate::sync_state::content_hash(&updated, &body),
-                )
-                .await?;
-            }
-            None => unmarked.push(Unmarked { id, title }),
-        }
+        // fingerprint. Written in the same transaction as the row: a rewritten
+        // post that is not marked as edited is one the next Refresh would
+        // quietly overwrite from the cloud.
+        db::sync_set_local(&txn, post_id, crate::sync_state::content_hash(&updated, &body)).await?;
+
+        txn.commit().await?;
+        changed += 1;
     }
 
-    Ok(TagRenamed { changed, unmarked })
+    Ok(TagRenamed { changed, skipped })
 }
 
 // ── Posts: local SQLite ─────────────────────────────────────────────────────────

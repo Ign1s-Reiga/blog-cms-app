@@ -11,9 +11,11 @@ import { onPostsRefreshed } from '@/lib/sync';
 /// Mirrors `TagCount` in `src-tauri/src/commands/local_db.rs`.
 type TagCount = { name: string; posts: number };
 
-/// Mirrors `TagRenamed`. `unmarked` are posts whose row was rewritten but whose
-/// Edited mark could not be, because their body is not here to fingerprint.
-type TagRenamed = { changed: number; unmarked: { id: number; title: string }[] };
+/// Mirrors `TagRenamed`. `skipped` are posts carrying the tag that were left
+/// alone because their body is not on this machine — rewriting them could not be
+/// marked as an edit, and an unmarked row is one the next Refresh would quietly
+/// overwrite from the cloud.
+type TagRenamed = { changed: number; skipped: { id: number; title: string }[] };
 
 type Editing = { from: string; to: string } | null;
 
@@ -102,15 +104,29 @@ export default function TagsPage() {
               <span className='font-mono font-semibold'>{result.from}</span> → {}
               <span className='font-mono font-semibold'>{result.to}</span> on {result.changed} post
               {result.changed === 1 ? '' : 's'}. They are edited locally and go up on the next push.
-              {/* Named rather than glossed: the row changed, the Edited mark did
-                  not, and only this says which posts that was true of. */}
-              {result.unmarked.length > 0 && (
-                <>
-                  {' '}
-                  {result.unmarked.length} of them could not be marked as edited, because their text is not on this
-                  machine to fingerprint — they will still be pushed.
-                </>
-              )}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* A rename that visibly did not finish, rather than one that silently
+            comes undone on the next Refresh. */}
+        {result && result.skipped.length > 0 && (
+          <Alert className='items-start rounded-[6px] px-3 py-2 border-amber-200 bg-amber-50/60 dark:border-amber-900/40 dark:bg-amber-950/20'>
+            <AlertDescription className='text-[12px] leading-[1.6] text-amber-700 dark:text-amber-500'>
+              {result.skipped.length} post{result.skipped.length === 1 ? '' : 's'} carrying{' '}
+              <span className='font-mono font-semibold'>{result.from}</span>{' '}
+              {result.skipped.length === 1 ? 'was' : 'were'} left unchanged: their text is not on this machine, so the
+              rename could not be recorded as an edit — and an unrecorded edit is one the next refresh would overwrite
+              from the cloud. Open {result.skipped.length === 1 ? 'it' : 'them'} once to bring the text down, then
+              rename again.
+              <span className='mt-1 block'>
+                {result.skipped.map((p, i) => (
+                  <span key={p.id}>
+                    {i > 0 && ', '}
+                    <span className='font-medium'>{p.title}</span>
+                  </span>
+                ))}
+              </span>
             </AlertDescription>
           </Alert>
         )}
