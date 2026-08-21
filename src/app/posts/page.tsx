@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { BulkActions, type BulkAction, type BulkOutcome } from '@/components/BulkActions';
 import { onPostsRefreshed } from '@/lib/sync';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -184,6 +185,10 @@ export default function PostsPage() {
   /// need a navigation.
   const params = useSearchParams();
   const [tagFilter, setTagFilter] = useState<string | null>(null);
+  /// Ids ticked in the list. Held as a Set so the row checkboxes stay cheap,
+  /// and cleared whenever the listing is reloaded — an id that is no longer on
+  /// screen must not stay selected and be acted on from behind a filter.
+  const [selected, setSelected] = useState<Set<number>>(new Set());
   const [importStatus, setImportStatus] = useState<ImportStatus>({ kind: 'idle' });
   /// What the last export produced, or why it did not. Kept apart from
   /// `importStatus` so one does not clear the other's message.
@@ -232,6 +237,10 @@ export default function PostsPage() {
       } catch {
         // ignore schedule query errors
       }
+      // A selection belongs to the listing it was made in: an id that is no
+      // longer on screen must not stay ticked and be acted on from behind a
+      // filter or a refresh.
+      setSelected(new Set());
       setPosts(
         rows.map((p) => ({
           ...toPost(p),
@@ -345,6 +354,119 @@ export default function PostsPage() {
     }
   };
 
+  /// Apply one action to every selected post.
+  ///
+  /// Each post goes through the *same command* the single-post button uses, one
+  /// at a time: a bulk publish is the publish, run repeatedly, with the same
+  /// staging, revisions and sync bookkeeping. Nothing is rolled back — a post
+  /// that succeeded stays done — and a failure is recorded against the post it
+  /// belongs to rather than aborting the rest.
+  const runBulk = async (action: BulkAction, tag: string): Promise<BulkOutcome> => {
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
+    const ids = actionable;
+    const outcome: BulkOutcome = { done: 0, failed: [], skipped: [] };
+    if (!isTauri()) return outcome;
+
+    const rowOf = (id: number) => posts.find((p) => p.id === id) ?? trashed.find((p) => p.id === id);
+    const titleOf = (id: number) => rowOf(id)?.title ?? `Post ${id}`;
+
+    // Tagging is one command over the whole selection, not one per post: it has
+    // to re-read each row, snapshot it and refresh its fingerprint in a single
+    // transaction, and that lives on the Rust side for exactly that reason.
+    if (action === 'addTag' || action === 'removeTag') {
+      try {
+        const command = action === 'addTag' ? 'add_tag_to_posts' : 'remove_tag_from_posts';
+        const result = await invoke<{ changed: number; skipped: { id: number; title: string }[] }>(command, {
+          ids,
+          tag,
+        });
+        outcome.done = result.changed;
+        outcome.skipped = result.skipped;
+      } catch (err) {
+        // A failure here is the whole call, not one post's.
+        outcome.failed.push({ id: 0, title: `${ids.length} posts`, message: String(err) });
+      }
+      setSelected(new Set());
+      await loadPosts();
+      return outcome;
+    }
+
+    for (const id of ids) {
+      try {
+        const row = rowOf(id);
+
+        // Both of these send this machine's whole row to D1, so neither may run
+        // while the cloud's copy is ahead or in disagreement: they would settle
+        // it in the stale local copy's favour on the way past. The per-row
+        // Unpublish button hides itself for exactly this reason; a bulk run must
+        // not be the way around it.
+        if (
+          (action === 'publish' || action === 'unpublish') &&
+          (row?.sync === 'conflict' || row?.sync === 'remote_ahead')
+        ) {
+          outcome.failed.push({
+            id,
+            title: titleOf(id),
+            message:
+              row.sync === 'conflict'
+                ? 'the cloud copy disagrees with this one — resolve it in the editor first'
+                : 'the cloud copy is newer — pull or resolve it in the editor first',
+          });
+          continue;
+        }
+
+        switch (action) {
+          case 'trash':
+            await invoke('trash_post', { id });
+            break;
+          case 'restore':
+            await invoke('restore_post', { id });
+            break;
+          case 'publish': {
+            // The editor's Publish, not `publish_post`. That command flips the
+            // flag and pushes metadata; it never uploads the Markdown, so using
+            // it here would put a post live in D1 with no body in R2 — or leave
+            // readers on an older one — and report success either way.
+            //
+            // `save_post` is the path the editor's button takes: body to R2,
+            // row to D1, staging and revisions with it. The body is read first
+            // so a post whose text cannot be found fails before anything is
+            // published rather than after.
+            if (!row) break;
+            const body = await invoke<string>('read_post_markdown', { slug: row.slug });
+            await invoke('save_post', {
+              id,
+              title: row.title,
+              tags: row.tags.join(', '),
+              body,
+              published: true,
+              series: null,
+            });
+            break;
+          }
+          case 'unpublish':
+            await invoke('unpublish_post', { postId: id });
+            break;
+        }
+        outcome.done += 1;
+      } catch (err) {
+        outcome.failed.push({ id, title: titleOf(id), message: String(err) });
+      }
+    }
+
+    setSelected(new Set());
+    await loadPosts();
+    return outcome;
+  };
+
+  const toggleSelected = (id: number) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  };
+
   const exportPost = async (id: number) => {
     if (exportStatus.kind === 'working') return;
     setExportStatus({ kind: 'working', id });
@@ -453,6 +575,17 @@ export default function PostsPage() {
 
   const visible = posts.filter((p) => searchMatches(p) && tagMatches(p) && matches(p, filter));
   const visibleTrash = trashed.filter((p) => searchMatches(p) && tagMatches(p));
+
+  /// The selection as it applies to what is actually on screen.
+  ///
+  /// `selected` is not trusted directly anywhere. Changing tab, search or tag
+  /// filter does not clear it, so a post ticked in the trash and then hidden by
+  /// a switch to All would otherwise still be there for the library's actions to
+  /// find — published, trashed or tagged without ever being visible. Intersecting
+  /// with the rows on screen means a hidden post cannot be acted on at all,
+  /// while one that is still shown keeps its tick.
+  const onScreen = new Set([...visible, ...visibleTrash].map((p) => p.id));
+  const actionable = [...selected].filter((id) => onScreen.has(id));
 
   const tabs: { id: FilterId; label: string; count: number }[] = (
     ['all', 'published', 'edited', 'conflict', 'draft', 'scheduled', 'failed', 'trash'] as const
@@ -629,6 +762,13 @@ export default function PostsPage() {
           </Alert>
         )}
 
+        <BulkActions
+          selected={actionable}
+          onClear={() => setSelected(new Set())}
+          onRun={runBulk}
+          inTrash={filter === 'trash'}
+        />
+
         {tagFilter !== null && (
           <div className='flex items-center gap-2 text-[12px] text-zinc-600 dark:text-zinc-400'>
             <span>Tagged</span>
@@ -701,6 +841,13 @@ export default function PostsPage() {
                   className='grid grid-cols-[1fr_auto] sm:grid-cols-[1fr_120px_90px_100px_180px] items-center gap-0 px-4 py-[10px]'
                 >
                   <div className='flex items-center gap-2.5 min-w-0 pr-4'>
+                    <input
+                      type='checkbox'
+                      checked={selected.has(post.id)}
+                      onChange={() => toggleSelected(post.id)}
+                      aria-label={`Select ${post.title}`}
+                      className='size-[13px] shrink-0 cursor-pointer accent-zinc-600 dark:accent-zinc-400'
+                    />
                     <span className='text-[13px] font-medium text-zinc-500 dark:text-zinc-500 truncate line-through decoration-zinc-300 dark:decoration-zinc-700'>
                       {post.title}
                     </span>
@@ -820,6 +967,16 @@ export default function PostsPage() {
                     className='group grid grid-cols-[1fr_auto_auto_auto] sm:grid-cols-[1fr_120px_90px_100px_80px] items-center gap-0 px-4 py-[10px] cursor-pointer hover:bg-zinc-50 dark:hover:bg-white/[0.02] transition-colors duration-100'
                   >
                     <div className='flex items-center gap-2.5 min-w-0 pr-4'>
+                      {/* Its own click target: ticking a row must not open it,
+                          and the row's handler is on the whole grid. */}
+                      <input
+                        type='checkbox'
+                        checked={selected.has(post.id)}
+                        onChange={() => toggleSelected(post.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        aria-label={`Select ${post.title}`}
+                        className='size-[13px] shrink-0 cursor-pointer accent-zinc-600 dark:accent-zinc-400'
+                      />
                       <StatusDot status={displayStatus(post)} />
                       <span className='text-[13px] font-medium text-zinc-800 dark:text-zinc-200 truncate group-hover:text-zinc-900 dark:group-hover:text-white transition-colors duration-100'>
                         {post.title}

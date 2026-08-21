@@ -93,6 +93,8 @@ pub fn run() {
             commands::cache_bodies,
             commands::list_tags,
             commands::rename_tag,
+            commands::add_tag_to_posts,
+            commands::remove_tag_from_posts,
             imaging::stage_image,
             // Posts — local SQLite
             commands::create_post,
