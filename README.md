@@ -457,4 +457,5 @@ Anything not listed here is in [the open issues](https://github.com/Ign1s-Reiga/
 
 ## License
 
-Not yet specified.
+[MIT](LICENSE). The Cloudflare Worker under `worker/` is covered by it too — it is part of this
+repository and there is no separate notice.
