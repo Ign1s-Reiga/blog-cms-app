@@ -43,6 +43,10 @@ served.
   dates, series and published state. It writes what is on this machine, and says so when that is
   ahead of what readers are being served. Nothing reads the file back — import strips front
   matter — so an export is a copy, not a backup that restores itself.
+- **Tags** on their own screen, with how many posts carry each. Renaming one rewrites it across
+  the library, and renaming it onto an existing tag merges the two — which is how a `Rust` and a
+  `rust` become one. Tags are listed as stored, so both are visible; search treats them alike,
+  which is what hides the difference elsewhere. A rename is a local edit and goes up on a push.
 - **Series** for grouping related posts. Create and edit them on the Series screen, file a post
   into one from its editor, and set where it sits in the reading order. Deleting a series
   unfiles its posts rather than taking them with it.
@@ -129,6 +133,7 @@ blog-cms-app/
 │   ├── lib/                     # cn(), sync helpers, updater client
 │   ├── posts/                   # /posts, /posts/new, /posts/edit
 │   ├── series/                   # /series — create, edit, and see what is filed
+│   ├── tags/                     # /tags — counts, rename, merge
 │   ├── media/ analytics/ settings/
 │   └── layout.tsx page.tsx globals.css
 ├── src-tauri/                   # Tauri backend (Rust)

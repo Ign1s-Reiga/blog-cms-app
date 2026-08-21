@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CheckCircle2, Download, EyeOff, Import, Loader2, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { StatusDot, type PostStatus } from '@/components/StatusDot';
 import { StatusPill } from '@/components/StatusPill';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -179,6 +179,11 @@ export default function PostsPage() {
   /// Which body search is the current one. A slow answer for `rust` must not
   /// land on top of a quick one for `rustup` and show the wrong rows.
   const bodyAttempt = useRef(0);
+  /// The tag the list is narrowed to, arriving from the Tags screen as
+  /// `?tag=`. Held in state rather than read per render so clearing it does not
+  /// need a navigation.
+  const params = useSearchParams();
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [importStatus, setImportStatus] = useState<ImportStatus>({ kind: 'idle' });
   /// What the last export produced, or why it did not. Kept apart from
   /// `importStatus` so one does not clear the other's message.
@@ -421,6 +426,10 @@ export default function PostsPage() {
     }
   };
 
+  useEffect(() => {
+    setTagFilter(params.get('tag'));
+  }, [params]);
+
   const searchMatches = (p: Post) => {
     const q = search.toLowerCase();
     // The tag is lowered like the title is. Tags are stored as typed —
@@ -437,8 +446,13 @@ export default function PostsPage() {
     return bodyMatches.matched.includes(p.id);
   };
 
-  const visible = posts.filter((p) => searchMatches(p) && matches(p, filter));
-  const visibleTrash = trashed.filter(searchMatches);
+  /// Exact, not case-insensitive like the search box: the Tags screen lists tags
+  /// as they are stored, so a filter arriving from it must mean the one that was
+  /// clicked rather than everything that looks like it.
+  const tagMatches = (p: Post) => tagFilter === null || p.tags.includes(tagFilter);
+
+  const visible = posts.filter((p) => searchMatches(p) && tagMatches(p) && matches(p, filter));
+  const visibleTrash = trashed.filter((p) => searchMatches(p) && tagMatches(p));
 
   const tabs: { id: FilterId; label: string; count: number }[] = (
     ['all', 'published', 'edited', 'conflict', 'draft', 'scheduled', 'failed', 'trash'] as const
@@ -454,7 +468,8 @@ export default function PostsPage() {
       failed: 'Failed',
       trash: 'Trash',
     }[id],
-    count: id === 'trash' ? trashed.length : posts.filter((p) => matches(p, id)).length,
+    count:
+      id === 'trash' ? trashed.filter(tagMatches).length : posts.filter((p) => tagMatches(p) && matches(p, id)).length,
   }));
 
   return (
@@ -612,6 +627,29 @@ export default function PostsPage() {
               </button>
             </AlertDescription>
           </Alert>
+        )}
+
+        {tagFilter !== null && (
+          <div className='flex items-center gap-2 text-[12px] text-zinc-600 dark:text-zinc-400'>
+            <span>Tagged</span>
+            <Badge
+              variant='outline'
+              className='h-auto rounded-[4px] border-zinc-200 bg-zinc-100 px-[6px] py-[2px] font-mono text-[10px] font-semibold text-zinc-600 dark:border-white/[0.07] dark:bg-white/[0.05] dark:text-zinc-400'
+            >
+              {tagFilter}
+            </Badge>
+            <button
+              type='button'
+              onClick={() => {
+                setTagFilter(null);
+                // Take it out of the URL too, or a reload puts it back.
+                router.replace('/posts');
+              }}
+              className='rounded-[4px] px-1.5 py-0.5 text-[11px] font-medium underline underline-offset-2 transition-colors hover:bg-zinc-100 dark:hover:bg-white/[0.06]'
+            >
+              Clear
+            </button>
+          </div>
         )}
 
         {exportStatus.kind === 'success' && (

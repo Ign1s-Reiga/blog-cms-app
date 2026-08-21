@@ -17,6 +17,11 @@ pub const AUTOSAVE: &str = "autosave";
 /// cloud's — the one overwrite in the app that is not the author's own typing.
 pub const CONFLICT_KEEP_REMOTE: &str = "conflict_keep_remote";
 
+/// A library-wide tag rename or merge. Its own origin because it is the one
+/// edit nobody made to a particular post: an accidental merge is undone from
+/// here, and an inverse rename cannot recover which posts carried which name.
+pub const TAG_RENAME: &str = "tag_rename";
+
 /// Local-only snapshot of a post as it stood *before* one particular edit,
 /// keyed by its own id and pointing at the post it belongs to.
 ///

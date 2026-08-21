@@ -14,6 +14,7 @@ import {
   LayoutDashboard,
   Plus,
   Settings,
+  Tags,
   Zap,
 } from 'lucide-react';
 import Link from 'next/link';
@@ -41,6 +42,7 @@ const NAV_MAIN: NavItem[] = [
   { href: '/', label: 'Dashboard', Icon: LayoutDashboard },
   { href: '/posts', label: 'Posts', Icon: FileText },
   { href: '/series', label: 'Series', Icon: Layers },
+  { href: '/tags', label: 'Tags', Icon: Tags },
   { href: '/media', label: 'Media', Icon: Image },
 ];
 

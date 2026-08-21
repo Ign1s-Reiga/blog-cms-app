@@ -134,6 +134,56 @@ pub(super) async fn unique_series_slug(db: &DatabaseConnection, base: &str) -> A
 }
 
 #[cfg(test)]
+mod tag_tests {
+    use super::rewrite_tags;
+
+    fn tags(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_rename_keeps_the_other_tags_where_they_were() {
+        assert_eq!(
+            rewrite_tags(tags(&["rust", "Tauri", "sqlite"]), "Tauri", "tauri"),
+            tags(&["rust", "tauri", "sqlite"])
+        );
+    }
+
+    /// Renaming onto a tag the post already has *is* the merge. The post keeps
+    /// the name once, in the position the renamed tag held.
+    #[test]
+    fn renaming_onto_an_existing_tag_folds_the_two_together() {
+        assert_eq!(
+            rewrite_tags(tags(&["Rust", "sqlite", "rust"]), "Rust", "rust"),
+            tags(&["rust", "sqlite"])
+        );
+    }
+
+    #[test]
+    fn a_post_without_the_tag_is_untouched() {
+        assert_eq!(
+            rewrite_tags(tags(&["rust", "tauri"]), "python", "py"),
+            tags(&["rust", "tauri"])
+        );
+    }
+
+    /// A duplicate that was already in the column does not survive a rewrite,
+    /// but nothing else about the list changes.
+    #[test]
+    fn an_existing_duplicate_is_collapsed() {
+        assert_eq!(
+            rewrite_tags(tags(&["rust", "rust", "tauri"]), "tauri", "tauri-2"),
+            tags(&["rust", "tauri-2"])
+        );
+    }
+
+    #[test]
+    fn renaming_the_only_tag_leaves_one_tag() {
+        assert_eq!(rewrite_tags(tags(&["old"]), "old", "new"), tags(&["new"]));
+    }
+}
+
+#[cfg(test)]
 mod slug_tests {
     use super::*;
 
@@ -373,6 +423,190 @@ pub async fn search_post_bodies(
 ) -> AppResult<crate::body_search::BodyMatches> {
     let posts = db::list_active_posts(conn.inner()).await?;
     crate::body_search::search(&app, conn.inner(), &posts, &query).await
+}
+
+// ─── Tags ────────────────────────────────────────────────────────────────────
+
+/// A tag, and how many posts carry it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TagCount {
+    pub name: String,
+    pub posts: usize,
+}
+
+/// A post carrying the tag that was left exactly as it was.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Skipped {
+    pub id: i32,
+    pub title: String,
+}
+
+/// What a rename did, and what it deliberately did not do.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TagRenamed {
+    /// Posts whose tag list changed.
+    pub changed: usize,
+    /// Posts carrying the tag that were **not** rewritten, because their body is
+    /// not on this machine.
+    ///
+    /// Not a detail. Tags are part of `content_hash`, so a rewritten post can
+    /// only be marked as edited where there is a body to fingerprint — and an
+    /// unmarked row is one `upsert_post_from_remote` treats as clean, so the
+    /// next Refresh would take the cloud's tags and put the old name back with
+    /// nothing said. Leaving the post alone and naming it here is the honest
+    /// half of that trade: a rename that visibly did not finish beats one that
+    /// silently comes undone.
+    ///
+    /// Opening such a post once brings its body down and the rename can be run
+    /// again.
+    pub skipped: Vec<Skipped>,
+}
+
+/// Read a post's tags out of the JSON column.
+///
+/// A column that is not a JSON array reads as no tags rather than as an error.
+/// Everything writes it through `tags_to_json`, so anything else got there
+/// before this app did, and a tag screen is not where that should surface.
+fn tags_of(post: &PostModel) -> Vec<String> {
+    post.tags
+        .as_deref()
+        .and_then(|t| serde_json::from_str::<Vec<String>>(t).ok())
+        .unwrap_or_default()
+}
+
+/// Every tag in use, with its count, most-used first and ties broken by name so
+/// the order does not shuffle between reads of the same library.
+///
+/// Grouped by the exact string stored. `Rust` and `rust` are listed separately,
+/// deliberately: they are two tags to everything that stores them, and seeing
+/// both is how somebody notices there is a merge to do. Search matches them
+/// together, which is what hid the problem in the first place.
+#[tauri::command]
+pub async fn list_tags(conn: State<'_, DatabaseConnection>) -> AppResult<Vec<TagCount>> {
+    let posts = db::list_active_posts(conn.inner()).await?;
+
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for post in &posts {
+        // A post carrying the same tag twice counts once.
+        let mut seen = std::collections::HashSet::new();
+        for tag in tags_of(post) {
+            if seen.insert(tag.clone()) {
+                *counts.entry(tag).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut out: Vec<TagCount> = counts
+        .into_iter()
+        .map(|(name, posts)| TagCount { name, posts })
+        .collect();
+    out.sort_by(|a, b| b.posts.cmp(&a.posts).then_with(|| a.name.cmp(&b.name)));
+    Ok(out)
+}
+
+/// Replace `from` with `to` in one post's tag list.
+///
+/// Order is preserved and the renamed tag stays where it was: rebuilding the
+/// list from a set would reorder every post's tags as a side effect of renaming
+/// one. A name that ends up present twice — which is what renaming onto an
+/// existing tag means — is kept once, and that is the whole of the merge.
+fn rewrite_tags(tags: Vec<String>, from: &str, to: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    tags.into_iter()
+        .map(|t| if t == from { to.to_string() } else { t })
+        .filter(|t| seen.insert(t.clone()))
+        .collect()
+}
+
+/// Rename `from` to `to` across every post that carries it.
+///
+/// **This is also the merge.** Renaming onto a tag that already exists folds the
+/// two together, because a post ending up with the name twice keeps it once. One
+/// operation rather than two that would have to agree with each other.
+///
+/// Local, like every other edit here. The rewritten posts are marked as edited
+/// and go up on an explicit push; nothing is published by renaming a tag.
+#[tauri::command]
+pub async fn rename_tag(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    from: String,
+    to: String,
+) -> AppResult<TagRenamed> {
+    let from = from.trim().to_string();
+    let to = to.trim().to_string();
+    if from.is_empty() || to.is_empty() {
+        return Err(AppError::EmptyTag);
+    }
+    if from == to {
+        return Ok(TagRenamed { changed: 0, skipped: Vec::new() });
+    }
+
+    let mut changed = 0usize;
+    let mut skipped = Vec::new();
+
+    // The listing is a snapshot, and a rename walks the whole library: an MCP
+    // client or the editor can write to any of these while it does. So the
+    // listing is used only to decide *which* posts to visit, and every decision
+    // about what to write is taken from the row as it is at that moment.
+    for candidate in db::list_active_posts(conn.inner()).await? {
+        let post_id = candidate.id;
+
+        // The body first, outside the transaction: reading it is slow, and there
+        // is no point opening one for a post that cannot be finished.
+        let Some(post) = db::get::<PostModel>(conn.inner(), post_id).await? else {
+            continue;
+        };
+        if !tags_of(&post).iter().any(|t| t == &from) {
+            continue;
+        }
+        let Some(body) = crate::revisions::cached_body(&app, &post.slug).await else {
+            skipped.push(Skipped { id: post_id, title: post.title });
+            continue;
+        };
+
+        let txn = conn.inner().begin().await?;
+
+        // Re-read inside the transaction. `into_update` writes every column, so
+        // acting on the row as it was read a moment ago would revert whatever
+        // somebody else changed in between — a title, an excerpt, a publication,
+        // a series — while meaning to touch only the tags.
+        let Some(current) = db::get::<PostModel>(&txn, post_id).await? else {
+            txn.rollback().await?;
+            continue;
+        };
+        let tags = tags_of(&current);
+        if !tags.iter().any(|t| t == &from) {
+            // Renamed or removed while this was running. Whoever did that was
+            // acting on the post itself; this is a sweep, and it gives way.
+            txn.rollback().await?;
+            continue;
+        }
+
+        // Before the overwrite, like every other edit path. An accidental merge
+        // destroys which posts carried which name, and an inverse rename cannot
+        // put that back — the history is the only route to it.
+        crate::revisions::snapshot_or_log(&app, &txn, &current, post_revision::TAG_RENAME).await;
+
+        let rewritten = rewrite_tags(tags, &from, &to);
+        let updated = PostModel {
+            tags: Some(serde_json::to_string(&rewritten).unwrap_or_else(|_| "[]".to_string())),
+            updated_at: now_ts(),
+            ..current
+        };
+        let updated = db::update::<PostModel>(&txn, updated).await?;
+
+        // Tags are part of what a reader sees, so they are part of the
+        // fingerprint. Written in the same transaction as the row: a rewritten
+        // post that is not marked as edited is one the next Refresh would
+        // quietly overwrite from the cloud.
+        db::sync_set_local(&txn, post_id, crate::sync_state::content_hash(&updated, &body)).await?;
+
+        txn.commit().await?;
+        changed += 1;
+    }
+
+    Ok(TagRenamed { changed, skipped })
 }
 
 // ── Posts: local SQLite ─────────────────────────────────────────────────────────
