@@ -37,6 +37,10 @@ served.
   emptying the trash is the only path that is final.
 - **Import** an existing `.md` file as a draft. YAML front matter is **stripped**, not read: the
   title comes from the file name and tags start empty, so metadata is re-entered in the app.
+- **Export** a post as a `.md` file with front matter carrying its title, slug, tags, excerpt,
+  dates, series and published state. It writes what is on this machine, and says so when that is
+  ahead of what readers are being served. Nothing reads the file back — import strips front
+  matter — so an export is a copy, not a backup that restores itself.
 - **Series** for grouping related posts. Create and edit them on the Series screen, file a post
   into one from its editor, and set where it sits in the reading order. Deleting a series
   unfiles its posts rather than taking them with it.
@@ -138,6 +142,7 @@ blog-cms-app/
 │   │   ├── sync_state.rs        # content hashing, conflict detection
 │   │   ├── revisions.rs         # pre-edit snapshots
 │   │   ├── imaging.rs           # JPG/PNG → AVIF
+│   │   ├── export.rs            # a post as Markdown, with front matter
 │   │   ├── media_keys.rs        # R2 key layout
 │   │   ├── media_usage.rs       # which posts use a media object
 │   │   ├── analytics.rs         # Cloudflare GraphQL usage data

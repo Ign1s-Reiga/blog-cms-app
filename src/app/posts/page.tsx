@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, EyeOff, Import, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
+import { CheckCircle2, Download, EyeOff, Import, Plus, RotateCcw, Search, Trash2 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { StatusDot, type PostStatus } from '@/components/StatusDot';
@@ -21,6 +21,14 @@ type ImportStatus =
   | { kind: 'idle' }
   | { kind: 'loading' }
   | { kind: 'success'; title: string }
+  | { kind: 'error'; message: string };
+
+type ExportStatus =
+  | { kind: 'idle' }
+  | { kind: 'working'; id: number }
+  /// `unpublishedEdits` means the file carries text readers have not been
+  /// served — worth saying, because the file and the blog then disagree.
+  | { kind: 'success'; slug: string; path: string; unpublishedEdits: boolean }
   | { kind: 'error'; message: string };
 
 // Row shape the table renders.
@@ -137,6 +145,9 @@ export default function PostsPage() {
   const [filter, setFilter] = useState<FilterId>('all');
   const [search, setSearch] = useState('');
   const [importStatus, setImportStatus] = useState<ImportStatus>({ kind: 'idle' });
+  /// What the last export produced, or why it did not. Kept apart from
+  /// `importStatus` so one does not clear the other's message.
+  const [exportStatus, setExportStatus] = useState<ExportStatus>({ kind: 'idle' });
 
   const [posts, setPosts] = useState<Post[]>([]);
   const [trashed, setTrashed] = useState<TrashedPost[]>([]);
@@ -230,6 +241,32 @@ export default function PostsPage() {
       }
       setImportStatus({ kind: 'error', message: msg });
       setTimeout(() => setImportStatus({ kind: 'idle' }), 6000);
+    }
+  };
+
+  const exportPost = async (id: number) => {
+    if (exportStatus.kind === 'working') return;
+    setExportStatus({ kind: 'working', id });
+    try {
+      const { invoke, isTauri } = await import('@tauri-apps/api/core');
+      if (!isTauri()) return;
+      const done = await invoke<{ path: string; slug: string; unpublished_edits: boolean }>('export_post', { id });
+      setExportStatus({
+        kind: 'success',
+        slug: done.slug,
+        path: done.path,
+        unpublishedEdits: done.unpublished_edits,
+      });
+      setTimeout(() => setExportStatus({ kind: 'idle' }), 6000);
+    } catch (err) {
+      const msg = String(err);
+      // Dismissing the save dialog is not a failure.
+      if (msg === 'cancelled') {
+        setExportStatus({ kind: 'idle' });
+        return;
+      }
+      setExportStatus({ kind: 'error', message: msg });
+      setTimeout(() => setExportStatus({ kind: 'idle' }), 8000);
     }
   };
 
@@ -428,6 +465,27 @@ export default function PostsPage() {
               </AlertDescription>
             </Alert>
           ))}
+
+        {exportStatus.kind === 'success' && (
+          <Alert className='items-center rounded-[6px] px-3 py-2 border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/[0.08] dark:text-emerald-400'>
+            <CheckCircle2 size={13} strokeWidth={2} className='size-3.5' />
+            <AlertDescription className='text-[12px] font-medium text-emerald-700 dark:text-emerald-400'>
+              <span className='font-semibold'>&ldquo;{exportStatus.slug}&rdquo;</span> written to{' '}
+              <span className='font-mono text-[11px]'>{exportStatus.path}</span>.
+              {/* The file and the blog disagree, and only the app knows it. */}
+              {exportStatus.unpublishedEdits &&
+                ' It includes edits that have not been published, so it is ahead of what readers are being served.'}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {exportStatus.kind === 'error' && (
+          <Alert className='items-center rounded-[6px] px-3 py-2 border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/[0.08] dark:text-red-400'>
+            <AlertDescription className='text-[12px] font-medium text-red-700 dark:text-red-400'>
+              <span className='font-bold'>Export failed:</span> {exportStatus.message}
+            </AlertDescription>
+          </Alert>
+        )}
 
         {/* Trash — its own listing, with its own actions. Deliberately not a
             filter over the table below: these posts are excluded from
@@ -628,6 +686,22 @@ export default function PostsPage() {
                       not just take the post down, it would settle the
                       disagreement in local's favour on the way past. Resolve it
                       in the editor first; the button comes back. */}
+                      {/* Writes the post out as a `.md` file. Available for
+                      every post, published or not: what it exports is what is
+                      on this machine. */}
+                      <button
+                        type='button'
+                        aria-label={`Export ${post.title} as Markdown`}
+                        title='Export as Markdown'
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void exportPost(post.id);
+                        }}
+                        disabled={exportStatus.kind === 'working'}
+                        className='shrink-0 p-1 rounded-[4px] text-zinc-300 dark:text-zinc-700 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-white/[0.06] disabled:opacity-40 transition-colors'
+                      >
+                        <Download size={13} strokeWidth={2} />
+                      </button>
                       {post.status === 'published' && post.sync !== 'conflict' && post.sync !== 'remote_ahead' && (
                         <button
                           type='button'
