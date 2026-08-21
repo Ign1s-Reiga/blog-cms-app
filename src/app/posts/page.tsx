@@ -363,12 +363,12 @@ export default function PostsPage() {
   /// belongs to rather than aborting the rest.
   const runBulk = async (action: BulkAction, tag: string): Promise<BulkOutcome> => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
-    const ids = [...selected];
+    const ids = actionable;
     const outcome: BulkOutcome = { done: 0, failed: [], skipped: [] };
     if (!isTauri()) return outcome;
 
-    const titleOf = (id: number) =>
-      posts.find((p) => p.id === id)?.title ?? trashed.find((p) => p.id === id)?.title ?? `Post ${id}`;
+    const rowOf = (id: number) => posts.find((p) => p.id === id) ?? trashed.find((p) => p.id === id);
+    const titleOf = (id: number) => rowOf(id)?.title ?? `Post ${id}`;
 
     // Tagging is one command over the whole selection, not one per post: it has
     // to re-read each row, snapshot it and refresh its fingerprint in a single
@@ -393,6 +393,28 @@ export default function PostsPage() {
 
     for (const id of ids) {
       try {
+        const row = rowOf(id);
+
+        // Both of these send this machine's whole row to D1, so neither may run
+        // while the cloud's copy is ahead or in disagreement: they would settle
+        // it in the stale local copy's favour on the way past. The per-row
+        // Unpublish button hides itself for exactly this reason; a bulk run must
+        // not be the way around it.
+        if (
+          (action === 'publish' || action === 'unpublish') &&
+          (row?.sync === 'conflict' || row?.sync === 'remote_ahead')
+        ) {
+          outcome.failed.push({
+            id,
+            title: titleOf(id),
+            message:
+              row.sync === 'conflict'
+                ? 'the cloud copy disagrees with this one — resolve it in the editor first'
+                : 'the cloud copy is newer — pull or resolve it in the editor first',
+          });
+          continue;
+        }
+
         switch (action) {
           case 'trash':
             await invoke('trash_post', { id });
@@ -400,9 +422,28 @@ export default function PostsPage() {
           case 'restore':
             await invoke('restore_post', { id });
             break;
-          case 'publish':
-            await invoke('publish_post', { postId: id });
+          case 'publish': {
+            // The editor's Publish, not `publish_post`. That command flips the
+            // flag and pushes metadata; it never uploads the Markdown, so using
+            // it here would put a post live in D1 with no body in R2 — or leave
+            // readers on an older one — and report success either way.
+            //
+            // `save_post` is the path the editor's button takes: body to R2,
+            // row to D1, staging and revisions with it. The body is read first
+            // so a post whose text cannot be found fails before anything is
+            // published rather than after.
+            if (!row) break;
+            const body = await invoke<string>('read_post_markdown', { slug: row.slug });
+            await invoke('save_post', {
+              id,
+              title: row.title,
+              tags: row.tags.join(', '),
+              body,
+              published: true,
+              series: null,
+            });
             break;
+          }
           case 'unpublish':
             await invoke('unpublish_post', { postId: id });
             break;
@@ -534,6 +575,17 @@ export default function PostsPage() {
 
   const visible = posts.filter((p) => searchMatches(p) && tagMatches(p) && matches(p, filter));
   const visibleTrash = trashed.filter((p) => searchMatches(p) && tagMatches(p));
+
+  /// The selection as it applies to what is actually on screen.
+  ///
+  /// `selected` is not trusted directly anywhere. Changing tab, search or tag
+  /// filter does not clear it, so a post ticked in the trash and then hidden by
+  /// a switch to All would otherwise still be there for the library's actions to
+  /// find — published, trashed or tagged without ever being visible. Intersecting
+  /// with the rows on screen means a hidden post cannot be acted on at all,
+  /// while one that is still shown keeps its tick.
+  const onScreen = new Set([...visible, ...visibleTrash].map((p) => p.id));
+  const actionable = [...selected].filter((id) => onScreen.has(id));
 
   const tabs: { id: FilterId; label: string; count: number }[] = (
     ['all', 'published', 'edited', 'conflict', 'draft', 'scheduled', 'failed', 'trash'] as const
@@ -711,7 +763,7 @@ export default function PostsPage() {
         )}
 
         <BulkActions
-          selected={[...selected]}
+          selected={actionable}
           onClear={() => setSelected(new Set())}
           onRun={runBulk}
           inTrash={filter === 'trash'}
