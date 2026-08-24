@@ -422,28 +422,18 @@ export default function PostsPage() {
           case 'restore':
             await invoke('restore_post', { id });
             break;
-          case 'publish': {
-            // The editor's Publish, not `publish_post`. That command flips the
-            // flag and pushes metadata; it never uploads the Markdown, so using
-            // it here would put a post live in D1 with no body in R2 — or leave
-            // readers on an older one — and report success either way.
+          case 'publish':
+            // `publish_stored_post`, not `save_post` with this row's fields.
+            // These rows were read when the list last loaded, and `save` writes
+            // every column — sending them back would revert a title, excerpt or
+            // tag set that moved in between, and publish the reverted version.
+            // The command takes an id and re-reads the row and body itself.
             //
-            // `save_post` is the path the editor's button takes: body to R2,
-            // row to D1, staging and revisions with it. The body is read first
-            // so a post whose text cannot be found fails before anything is
-            // published rather than after.
-            if (!row) break;
-            const body = await invoke<string>('read_post_markdown', { slug: row.slug });
-            await invoke('save_post', {
-              id,
-              title: row.title,
-              tags: row.tags.join(', '),
-              body,
-              published: true,
-              series: null,
-            });
+            // Not `publish_post` either: that flips the flag and pushes
+            // metadata without ever uploading the Markdown, which would put a
+            // post live in D1 with no body in R2 and report success anyway.
+            await invoke('publish_stored_post', { id });
             break;
-          }
           case 'unpublish':
             await invoke('unpublish_post', { postId: id });
             break;

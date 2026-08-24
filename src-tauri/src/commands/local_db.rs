@@ -467,7 +467,7 @@ pub struct TagRenamed {
 /// A column that is not a JSON array reads as no tags rather than as an error.
 /// Everything writes it through `tags_to_json`, so anything else got there
 /// before this app did, and a tag screen is not where that should surface.
-fn tags_of(post: &PostModel) -> Vec<String> {
+pub(crate) fn tags_of(post: &PostModel) -> Vec<String> {
     post.tags
         .as_deref()
         .and_then(|t| serde_json::from_str::<Vec<String>>(t).ok())

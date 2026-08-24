@@ -479,6 +479,16 @@ pub async fn read_post_markdown(
     conn: State<'_, DatabaseConnection>,
     slug: String,
 ) -> AppResult<String> {
+    read_markdown(&app, conn.inner(), slug).await
+}
+
+/// The read itself, shared by the editor and by a publish that was asked for
+/// somewhere the text is not on screen.
+pub(crate) async fn read_markdown(
+    app: &tauri::AppHandle,
+    conn: &DatabaseConnection,
+    slug: String,
+) -> AppResult<String> {
     // The slug builds a local file path and an R2 key, so reject anything that
     // isn't a strict slug (guards against path traversal / injection).
     if !media_keys::is_safe_slug(&slug) {
@@ -510,8 +520,8 @@ pub async fn read_post_markdown(
     //    happened and write over the very text it was meant to protect.
     let before = {
         let _guard = lock_body_commits().await;
-        let stale = !has_local_edits(conn.inner(), &slug).await?
-            && db::body_is_stale(conn.inner(), &slug).await?;
+        let stale = !has_local_edits(conn, &slug).await?
+            && db::body_is_stale(conn, &slug).await?;
         if !stale {
             if let Ok(content) = tokio::fs::read_to_string(&local_path).await {
                 return Ok(content);
@@ -548,7 +558,7 @@ pub async fn read_post_markdown(
     // as the post's loaded contents, and the next save would write nothing over
     // a draft that was there all along.
     let _guard = lock_body_commits().await;
-    if has_local_edits(conn.inner(), &slug).await? || body_stamp(&local_path).await != before {
+    if has_local_edits(conn, &slug).await? || body_stamp(&local_path).await != before {
         return Ok(match tokio::fs::read_to_string(&local_path).await {
             Ok(current) => current,
             // Unreadable after all that: hand back what the cloud gave rather
@@ -567,8 +577,8 @@ pub async fn read_post_markdown(
             let _ = tokio::fs::create_dir_all(&dir).await;
             if let Ok(staged) = StagedBody::write(&dir, &content).await {
                 if staged.commit(&local_path).await.is_ok() {
-                    let _ = db::body_stale_clear(conn.inner(), &slug).await;
-                    settle_fingerprint_against(conn.inner(), &slug, &content).await;
+                    let _ = db::body_stale_clear(conn, &slug).await;
+                    settle_fingerprint_against(conn, &slug, &content).await;
                 }
             }
             Ok(content)
@@ -626,6 +636,56 @@ pub async fn save_post(
 ) -> AppResult<PostModel> {
     let origin = if published { post_revision::PUBLISH } else { post_revision::SAVE };
     save(app, conn.inner(), id, title, tags, body, published, origin, series).await
+}
+
+/// Publish a post the library already holds, exactly as it is stored.
+///
+/// The editor's Publish carries the title, tags and body in front of the author,
+/// because that text *is* the edit being published. A sweep over the posts list
+/// has no such text. Its rows were read when the list last loaded — possibly
+/// minutes ago, and several writers back — and `save` writes every column, so
+/// sending them back would revert whatever moved in between and put the
+/// reverted version on the blog. This is the hazard `retag`'s doc comment
+/// names in point 2, and the reason it re-reads inside its own transaction.
+///
+/// So this takes an id and nothing else: the row and the body are read here,
+/// immediately before the save that uses them. It is still `save` underneath —
+/// `publish_post` flips the flag and pushes metadata without ever uploading the
+/// Markdown, which would put a post live in D1 with no body in R2.
+///
+/// One post per call, so a failure names the post it belongs to rather than
+/// collapsing a sweep into a single error.
+#[tauri::command]
+pub async fn publish_stored_post(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+) -> AppResult<PostModel> {
+    let Some(post) = db::get::<PostModel>(conn.inner(), id).await? else {
+        return Err(AppError::PostNotFound(id));
+    };
+    // `save` refuses a trashed post too. Asked here as well so the body read —
+    // which can reach the network — does not happen for a post that cannot be
+    // published anyway.
+    refuse_if_trashed(conn.inner(), &post).await?;
+
+    // Read before the save, so a post whose text cannot be found fails before
+    // anything is published rather than after.
+    let body = read_markdown(&app, conn.inner(), post.slug.clone()).await?;
+    let tags = crate::commands::local_db::tags_of(&post).join(", ");
+
+    save(
+        app,
+        conn.inner(),
+        Some(id),
+        post.title,
+        tags,
+        body,
+        true,
+        post_revision::PUBLISH,
+        None,
+    )
+    .await
 }
 
 /// The series a **brand-new** post is being filed into, carried by the save
