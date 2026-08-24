@@ -635,7 +635,7 @@ pub async fn save_post(
     series: Option<NewPostSeries>,
 ) -> AppResult<PostModel> {
     let origin = if published { post_revision::PUBLISH } else { post_revision::SAVE };
-    save(app, conn.inner(), id, title, tags, body, published, origin, series).await
+    save(app, conn.inner(), id, Some(title), Some(tags), body, published, origin, series).await
 }
 
 /// Publish a post the library already holds, exactly as it is stored.
@@ -648,10 +648,16 @@ pub async fn save_post(
 /// reverted version on the blog. This is the hazard `retag`'s doc comment
 /// names in point 2, and the reason it re-reads inside its own transaction.
 ///
-/// So this takes an id and nothing else: the row and the body are read here,
-/// immediately before the save that uses them. It is still `save` underneath —
-/// `publish_post` flips the flag and pushes metadata without ever uploading the
-/// Markdown, which would put a post live in D1 with no body in R2.
+/// So this takes an id and nothing else, and does not read the title and tags
+/// either: it passes `None` for both and lets `save` take them off the row it
+/// reads for itself. Reading them here would only move the stale-read window
+/// rather than close it — the body can come from R2, and an autosave or an MCP
+/// writer landing during that fetch would be overwritten by fields captured
+/// before it.
+///
+/// It is still `save` underneath — `publish_post` flips the flag and pushes
+/// metadata without ever uploading the Markdown, which would put a post live in
+/// D1 with no body in R2.
 ///
 /// One post per call, so a failure names the post it belongs to rather than
 /// collapsing a sweep into a single error.
@@ -672,20 +678,8 @@ pub async fn publish_stored_post(
     // Read before the save, so a post whose text cannot be found fails before
     // anything is published rather than after.
     let body = read_markdown(&app, conn.inner(), post.slug.clone()).await?;
-    let tags = crate::commands::local_db::tags_of(&post).join(", ");
 
-    save(
-        app,
-        conn.inner(),
-        Some(id),
-        post.title,
-        tags,
-        body,
-        true,
-        post_revision::PUBLISH,
-        None,
-    )
-    .await
+    save(app, conn.inner(), Some(id), None, None, body, true, post_revision::PUBLISH, None).await
 }
 
 /// The series a **brand-new** post is being filed into, carried by the save
@@ -723,18 +717,27 @@ pub async fn autosave_post(
     body: String,
     series: Option<NewPostSeries>,
 ) -> AppResult<PostModel> {
-    save(app, conn.inner(), id, title, tags, body, false, post_revision::AUTOSAVE, series).await
+    save(app, conn.inner(), id, Some(title), Some(tags), body, false, post_revision::AUTOSAVE, series)
+        .await
 }
 
 /// The save itself, shared by the editor's Save/Publish buttons and its
 /// autosave. `origin` is the history entry this save's snapshot is filed under.
+///
+/// `title` and `tags` are `None` for a save that is not carrying an edit to
+/// them — a publish of what is already stored. They are then taken from the row
+/// this function reads for itself, which is the only way to be sure they are
+/// the current ones: a caller reading them beforehand has to hold them across
+/// whatever it does next, and a body fetched from R2 in that gap is long enough
+/// for an autosave or an MCP writer to land. Only a brand-new post requires a
+/// title, having no row to take one from.
 #[allow(clippy::too_many_arguments)]
 async fn save(
     app: tauri::AppHandle,
     conn: &DatabaseConnection,
     id: Option<i32>,
-    title: String,
-    tags: String,
+    title: Option<String>,
+    tags: Option<String>,
     body: String,
     published: bool,
     origin: &'static str,
@@ -760,7 +763,7 @@ async fn save(
     let mut model = match previous.clone() {
         Some(existing) => existing.post,
         None => {
-            let base = slugify(&title);
+            let base = slugify(title.as_deref().unwrap_or_default());
             let base = if base.is_empty() { format!("post-{now}") } else { base };
             // The same search `import_article` runs, and for the same reason:
             // `slug` is unique in the table, so a title colliding with a post
@@ -805,9 +808,15 @@ async fn save(
         }
     };
 
-    // Apply the editor's fields.
-    model.title = title;
-    model.tags = Some(tags_to_json(&tags));
+    // Apply the editor's fields, where this save is carrying any. Left alone,
+    // the row keeps what it already had — read above, moments ago, rather than
+    // handed in from whenever the caller last looked.
+    if let Some(title) = title {
+        model.title = title;
+    }
+    if let Some(tags) = tags {
+        model.tags = Some(tags_to_json(&tags));
+    }
     // Saving locally never takes a live post off the blog. `published` describes
     // the *cloud's* copy, which a local save does not touch — the old version
     // goes on being served either way — so clearing the flag here would report a
