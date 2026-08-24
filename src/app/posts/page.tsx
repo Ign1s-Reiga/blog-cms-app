@@ -376,7 +376,7 @@ export default function PostsPage() {
     if (action === 'addTag' || action === 'removeTag') {
       try {
         const command = action === 'addTag' ? 'add_tag_to_posts' : 'remove_tag_from_posts';
-        const result = await invoke<{ changed: number; skipped: { id: number; title: string }[] }>(command, {
+        const result = await invoke<{ changed: number; skipped: BulkOutcome['skipped'] }>(command, {
           ids,
           tag,
         });

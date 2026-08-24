@@ -439,6 +439,24 @@ pub struct TagCount {
 pub struct Skipped {
     pub id: i32,
     pub title: String,
+    pub reason: SkipReason,
+}
+
+/// Why a post was left out of a tag sweep.
+///
+/// Both mean "the body here cannot stand in for the body the post actually
+/// has", which is what [`crate::sync_state::content_hash`] needs, and both are
+/// cured the same way — open the post once. They are told apart because the
+/// sentence explaining them is not the same: one says the text was never
+/// fetched, the other that what was fetched has been overtaken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// Its Markdown is in R2 and nowhere on this machine.
+    BodyNotCached,
+    /// Its cached Markdown is behind the cloud's — a refresh moved the metadata
+    /// on and the body did not follow.
+    BodyStale,
 }
 
 /// What a rename did, and what it deliberately did not do.
@@ -601,12 +619,22 @@ pub async fn remove_tag_from_posts(
 /// One place for the four things that have to be true of any sweep over tags,
 /// so a second caller cannot get one of them wrong:
 ///
-/// 1. **The body is read first.** Tags are part of [`crate::sync_state::content_hash`],
-///    so a post can only be marked as edited where there is a body to
-///    fingerprint. Without that mark `db::upsert_post_from_remote` treats the
-///    row as clean and the next Refresh takes the cloud's tags back — undoing
-///    the change with nothing said. A post whose body is not here is therefore
-///    **left alone** and reported, rather than written and quietly reverted.
+/// 1. **The body is read first, and it has to be the real one.** Tags are part
+///    of [`crate::sync_state::content_hash`], so a post can only be marked as
+///    edited where there is a body to fingerprint. Without that mark
+///    `db::upsert_post_from_remote` treats the row as clean and the next
+///    Refresh takes the cloud's tags back — undoing the change with nothing
+///    said. A post whose body is not here is therefore **left alone** and
+///    reported, rather than written and quietly reverted.
+///
+///    A *stale* body is left alone for the opposite reason: writing it would
+///    mark the row edited, and `read_post_markdown` only refreshes a stale body
+///    while the row is **not** edited. Fingerprinting text known to be behind
+///    the cloud therefore switches off the refresh that would have replaced it,
+///    and the app serves that text from then on as if the author had written
+///    it. `body_search` already draws this distinction — a cached-but-stale
+///    body is `Unchecked::BodyStale` there, on the grounds that it says nothing
+///    about the version readers are being served.
 /// 2. **The row is re-read inside the transaction that writes it.**
 ///    `into_update` writes every column, so acting on a row read before the
 ///    sweep began would revert a title, excerpt, publication or series that
@@ -636,9 +664,21 @@ async fn retag(
             continue;
         };
         let Some(body) = crate::revisions::cached_body(app, &post.slug).await else {
-            skipped.push(Skipped { id: post_id, title: post.title });
+            skipped.push(Skipped {
+                id: post_id,
+                title: post.title,
+                reason: SkipReason::BodyNotCached,
+            });
             continue;
         };
+        if db::body_is_stale(conn, &post.slug).await? {
+            skipped.push(Skipped {
+                id: post_id,
+                title: post.title,
+                reason: SkipReason::BodyStale,
+            });
+            continue;
+        }
 
         let txn = conn.begin().await?;
 
