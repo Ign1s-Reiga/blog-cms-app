@@ -333,6 +333,11 @@ export default function PostsPage() {
     const asked = bodyMatches.query;
     const ids = bodyMatches.unsearched.map((u) => u.id);
     setFillingGaps(true);
+    // The attempt this claims, once it claims one. Retiring a debounced search
+    // that is still in flight makes its own `finally` a no-op — that guard only
+    // clears the spinner for the attempt still current — so whoever does the
+    // retiring inherits the spinner and has to put it down again.
+    let mine: number | null = null;
     try {
       const { invoke, isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
@@ -341,7 +346,8 @@ export default function PostsPage() {
       // regardless would also retire a debounced search for the *newer* text
       // and leave the old results sitting under it.
       if (asked !== search.trim()) return;
-      const mine = ++bodyAttempt.current;
+      mine = ++bodyAttempt.current;
+      setBodySearching(true);
       const found = await invoke<BodyMatchesPayload>('search_post_bodies', { query: asked });
       if (mine === bodyAttempt.current && asked === search.trim()) {
         setBodyMatches({ query: asked, ...found });
@@ -351,6 +357,7 @@ export default function PostsPage() {
       // already the honest state.
     } finally {
       setFillingGaps(false);
+      if (mine !== null && mine === bodyAttempt.current) setBodySearching(false);
     }
   };
 
@@ -459,10 +466,16 @@ export default function PostsPage() {
 
   const exportPost = async (id: number) => {
     if (exportStatus.kind === 'working') return;
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
+    // Asked before the working state is claimed, not inside it. There is
+    // nothing to export to in a browser, and returning from under
+    // `{kind:'working'}` used to leave it there for good — the guard above then
+    // refused every later export, so `pnpm run dev` lost the button for the rest
+    // of the session. A `finally` would clear it, but it would also clear the
+    // success and error states below, which are meant to stay on screen.
+    if (!isTauri()) return;
     setExportStatus({ kind: 'working', id });
     try {
-      const { invoke, isTauri } = await import('@tauri-apps/api/core');
-      if (!isTauri()) return;
       const done = await invoke<{ path: string; slug: string; unpublished_edits: boolean }>('export_post', { id });
       setExportStatus({
         kind: 'success',
