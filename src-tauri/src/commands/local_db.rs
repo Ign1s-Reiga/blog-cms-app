@@ -616,6 +616,15 @@ pub async fn remove_tag_from_posts(
 ///    which makes the history worth more here than anywhere.
 /// 4. **The fingerprint is written in the same transaction as the row**, so
 ///    there is no moment where one landed and the other did not.
+/// 5. **A trashed post is left alone.** Trash is a separate table, so
+///    `db::get` hands one back like any other row — nothing here would have
+///    noticed. `rename_tag` never sees one because it filters through
+///    `db::list_active_posts` first, but the id lists behind
+///    `add_tag_to_posts` and `remove_tag_from_posts` come from the frontend.
+///    Checked twice for the reason [`crate::commands::refuse_if_trashed`]
+///    gives: cheaply up front to skip the body read, and again inside the
+///    transaction, because the answer that matters is the one at the moment of
+///    the write.
 ///
 /// `change` is given the post's current tags and returns what they should be.
 /// Returning them unchanged is not an edit, and nothing is written.
@@ -635,6 +644,9 @@ async fn retag(
         let Some(post) = db::get::<PostModel>(conn, post_id).await? else {
             continue;
         };
+        if db::trash_get(conn, post_id).await?.is_some() {
+            continue;
+        }
         let Some(body) = crate::revisions::cached_body(app, &post.slug).await else {
             skipped.push(Skipped { id: post_id, title: post.title });
             continue;
@@ -646,6 +658,10 @@ async fn retag(
             txn.rollback().await?;
             continue;
         };
+        if db::trash_get(&txn, post_id).await?.is_some() {
+            txn.rollback().await?;
+            continue;
+        }
         let before = tags_of(&current);
         let after = change(before.clone());
         if after == before {
