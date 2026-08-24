@@ -12,11 +12,17 @@ export type BulkOutcome = {
   /// Named individually. A count of failures says something went wrong; this
   /// says which post and what it said, which is what makes it actionable.
   failed: { id: number; title: string; message: string }[];
-  /// Posts a tag change deliberately left alone — their body is not on this
-  /// machine, so the edit could not be marked and the next refresh would undo
-  /// it. Mirrors `Skipped` in `src-tauri/src/commands/local_db.rs`.
-  skipped: { id: number; title: string }[];
+  /// Posts a tag change deliberately left alone — the body here cannot stand in
+  /// for the one the post actually has, so the edit could not be marked and the
+  /// next refresh would undo it. Mirrors `Skipped` in
+  /// `src-tauri/src/commands/local_db.rs`.
+  skipped: { id: number; title: string; reason: SkipReason }[];
 };
+
+/// Mirrors `SkipReason`. Both end in the same advice — open the post once —
+/// but for different reasons, and saying the wrong one sends the reader looking
+/// for a problem they do not have.
+export type SkipReason = 'body_not_cached' | 'body_stale';
 
 export type BulkAction = 'trash' | 'restore' | 'publish' | 'unpublish' | 'addTag' | 'removeTag';
 
@@ -223,17 +229,35 @@ export function BulkActions({
             </p>
           ))}
 
-          {outcome.skipped.length > 0 && (
+          {outcome.skipped.filter((p) => p.reason === 'body_not_cached').length > 0 && (
             <p className='px-3 text-[11px] leading-[1.6] text-amber-600 dark:text-amber-500'>
               Left unchanged because their text is not on this machine, so the edit could not be recorded and the next
               refresh would undo it:{' '}
-              {outcome.skipped.map((p, i) => (
-                <span key={p.id}>
-                  {i > 0 && ', '}
-                  <span className='font-medium'>{p.title}</span>
-                </span>
-              ))}
+              {outcome.skipped
+                .filter((p) => p.reason === 'body_not_cached')
+                .map((p, i) => (
+                  <span key={p.id}>
+                    {i > 0 && ', '}
+                    <span className='font-medium'>{p.title}</span>
+                  </span>
+                ))}
               . Open them once to bring the text down, then try again.
+            </p>
+          )}
+
+          {outcome.skipped.filter((p) => p.reason === 'body_stale').length > 0 && (
+            <p className='px-3 text-[11px] leading-[1.6] text-amber-600 dark:text-amber-500'>
+              Left unchanged because the copy of their text here is behind the cloud&apos;s. Recording an edit against
+              it would put this machine&apos;s older text forward as the newer one:{' '}
+              {outcome.skipped
+                .filter((p) => p.reason === 'body_stale')
+                .map((p, i) => (
+                  <span key={p.id}>
+                    {i > 0 && ', '}
+                    <span className='font-medium'>{p.title}</span>
+                  </span>
+                ))}
+              . Open them once to bring the current text down, then try again.
             </p>
           )}
         </div>

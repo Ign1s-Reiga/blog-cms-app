@@ -12,10 +12,14 @@ import { onPostsRefreshed } from '@/lib/sync';
 type TagCount = { name: string; posts: number };
 
 /// Mirrors `TagRenamed`. `skipped` are posts carrying the tag that were left
-/// alone because their body is not on this machine — rewriting them could not be
-/// marked as an edit, and an unmarked row is one the next Refresh would quietly
-/// overwrite from the cloud.
-type TagRenamed = { changed: number; skipped: { id: number; title: string }[] };
+/// alone because the body on this machine cannot stand in for the one the post
+/// actually has — rewriting them could not be marked as an edit, and an unmarked
+/// row is one the next Refresh would quietly overwrite from the cloud.
+///
+/// `reason` mirrors `SkipReason`: the text was never fetched, or what was
+/// fetched has been overtaken. Same remedy, different sentence.
+type SkipReason = 'body_not_cached' | 'body_stale';
+type TagRenamed = { changed: number; skipped: { id: number; title: string; reason: SkipReason }[] };
 
 type Editing = { from: string; to: string } | null;
 
@@ -115,10 +119,14 @@ export default function TagsPage() {
             <AlertDescription className='text-[12px] leading-[1.6] text-amber-700 dark:text-amber-500'>
               {result.skipped.length} post{result.skipped.length === 1 ? '' : 's'} carrying{' '}
               <span className='font-mono font-semibold'>{result.from}</span>{' '}
-              {result.skipped.length === 1 ? 'was' : 'were'} left unchanged: their text is not on this machine, so the
-              rename could not be recorded as an edit — and an unrecorded edit is one the next refresh would overwrite
-              from the cloud. Open {result.skipped.length === 1 ? 'it' : 'them'} once to bring the text down, then
-              rename again.
+              {result.skipped.length === 1 ? 'was' : 'were'} left unchanged:{' '}
+              {result.skipped.every((p) => p.reason === 'body_stale')
+                ? "the copy of their text here is behind the cloud's, so recording the rename against it would put this machine's older text forward as the newer one"
+                : result.skipped.every((p) => p.reason === 'body_not_cached')
+                  ? 'their text is not on this machine, so the rename could not be recorded as an edit — and an unrecorded edit is one the next refresh would overwrite from the cloud'
+                  : 'the text here is either missing or behind the cloud, so the rename could not be recorded against it'}
+              . Open {result.skipped.length === 1 ? 'it' : 'them'} once to bring the current text down, then rename
+              again.
               <span className='mt-1 block'>
                 {result.skipped.map((p, i) => (
                   <span key={p.id}>
