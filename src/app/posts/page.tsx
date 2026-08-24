@@ -584,7 +584,12 @@ export default function PostsPage() {
   /// find — published, trashed or tagged without ever being visible. Intersecting
   /// with the rows on screen means a hidden post cannot be acted on at all,
   /// while one that is still shown keeps its tick.
-  const onScreen = new Set([...visible, ...visibleTrash].map((p) => p.id));
+  ///
+  /// The trash is one listing *or* the other, never both: it renders under its
+  /// own branch below, so unioning the two sets here would have kept a ticked
+  /// trashed post live after a switch to All — the exact case the paragraph
+  /// above says cannot happen.
+  const onScreen = new Set((filter === 'trash' ? visibleTrash : visible).map((p) => p.id));
   const actionable = [...selected].filter((id) => onScreen.has(id));
 
   const tabs: { id: FilterId; label: string; count: number }[] = (
