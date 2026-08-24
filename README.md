@@ -461,8 +461,9 @@ They are placed under `src/app/components/ui/`.
 
 ## Roadmap
 
-Everything listed here has shipped. What comes next is in [the open issues](https://github.com/Ign1s-Reiga/blog-cms-app/issues) — that is the
-list, rather than a copy of it kept here that has to be remembered separately.
+The roadmap is [the open issues](https://github.com/Ign1s-Reiga/blog-cms-app/issues). Keeping a copy
+here means keeping it up to date separately, which is how a reverted item was left sitting on the
+old list.
 
 ## License
 
