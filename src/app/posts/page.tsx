@@ -180,6 +180,16 @@ export default function PostsPage() {
   /// Which body search is the current one. A slow answer for `rust` must not
   /// land on top of a quick one for `rustup` and show the wrong rows.
   const bodyAttempt = useRef(0);
+  /// What the search box says *now*, for the code that has to ask after an
+  /// await. `search` inside an async function is the value from the render that
+  /// created it, so a gap-fill started before the query changed would compare
+  /// the old text against itself, conclude nothing had moved, and go on to
+  /// retire the newer query's search and answer under it. A ref is read at the
+  /// moment of asking rather than at the moment of closing over.
+  const liveSearch = useRef(search);
+  useEffect(() => {
+    liveSearch.current = search;
+  }, [search]);
   /// The tag the list is narrowed to, arriving from the Tags screen as
   /// `?tag=`. Held in state rather than read per render so clearing it does not
   /// need a navigation.
@@ -345,11 +355,16 @@ export default function PostsPage() {
       // Only if the box still says what it said. Claiming a fresh attempt
       // regardless would also retire a debounced search for the *newer* text
       // and leave the old results sitting under it.
-      if (asked !== search.trim()) return;
+      //
+      // Read through the ref, not `search`: this function closed over the value
+      // as it stood when the button was pressed, so comparing against that
+      // would be comparing `asked` with itself and would pass however much the
+      // box had moved on.
+      if (asked !== liveSearch.current.trim()) return;
       mine = ++bodyAttempt.current;
       setBodySearching(true);
       const found = await invoke<BodyMatchesPayload>('search_post_bodies', { query: asked });
-      if (mine === bodyAttempt.current && asked === search.trim()) {
+      if (mine === bodyAttempt.current && asked === liveSearch.current.trim()) {
         setBodyMatches({ query: asked, ...found });
       }
     } catch {
