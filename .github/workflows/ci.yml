@@ -85,6 +85,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -108,6 +110,18 @@ jobs:
       # frontend must be built before the Rust crate is checked.
       - name: Build static export
         run: pnpm run build
+
+      # Before the tests: a lint failure is cheap to reach and cheap to read, and
+      # there is no reason to spend three minutes on the suite to learn the
+      # branch would have been rejected anyway. `--all-targets` covers the test
+      # code too — the one warning outside `src/` that adopting this turned up
+      # was in a test.
+      #
+      # `-D warnings` rather than a warning nobody acts on. The
+      # `too_many_arguments` case this had to settle had been sitting in
+      # `save_post` unnoticed for exactly that reason.
+      - name: cargo clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
 
       # `cargo test` compiles and links every target before running anything, so
       # it covers what `cargo check` did and then some: check stops at type

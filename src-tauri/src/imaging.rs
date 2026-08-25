@@ -224,7 +224,7 @@ mod tests {
 
         // AVIF is an ISO-BMFF file: the `ftyp` box sits at offset 4.
         assert_eq!(&avif[4..8], b"ftyp", "output is not an ISO-BMFF container");
-        assert!(avif.len() > 0);
+        assert!(!avif.is_empty());
     }
 
     #[test]
