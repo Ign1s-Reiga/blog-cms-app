@@ -615,6 +615,42 @@ pub async fn remove_tag_from_posts(
 }
 
 /// Apply a change to the tags of each post named, safely.
+/// What a tag sweep needs besides the database: a post's Markdown as this
+/// machine holds it, and somewhere to file a revision before overwriting a row.
+///
+/// Both of those went through the `tauri::AppHandle` directly, which is what put
+/// [`retag`] out of reach of a test — `db::connect_in_memory` can stand up a
+/// database, and nothing could stand up a handle. Naming the two things the
+/// sweep actually wants leaves the handle to the implementation and lets a test
+/// supply its own. The decisions this exists to protect — whether a body is
+/// here, whether it is current, whether the row is in the trash — are all
+/// decisions about *whether* to write, so they are exactly what a fake can
+/// exercise.
+pub(crate) trait TagSweep {
+    /// The post's cached Markdown, or `None` when it is not on this machine.
+    fn cached_body(&self, slug: &str) -> impl std::future::Future<Output = Option<String>>;
+
+    /// Record `post` as it stands before the sweep overwrites it. Failures are
+    /// logged rather than returned: a lost revision must not abandon a sweep
+    /// halfway.
+    fn snapshot(
+        &self,
+        txn: &sea_orm::DatabaseTransaction,
+        post: &PostModel,
+        origin: &str,
+    ) -> impl std::future::Future<Output = ()>;
+}
+
+impl TagSweep for tauri::AppHandle {
+    async fn cached_body(&self, slug: &str) -> Option<String> {
+        revisions::cached_body(self, slug).await
+    }
+
+    async fn snapshot(&self, txn: &sea_orm::DatabaseTransaction, post: &PostModel, origin: &str) {
+        revisions::snapshot_or_log(self, txn, post, origin).await;
+    }
+}
+
 ///
 /// One place for the four things that have to be true of any sweep over tags,
 /// so a second caller cannot get one of them wrong:
@@ -661,7 +697,7 @@ pub async fn remove_tag_from_posts(
 /// reaches the body checks, and again inside the transaction where the row it
 /// compares is the one being written.
 async fn retag(
-    app: &tauri::AppHandle,
+    env: &impl TagSweep,
     conn: &DatabaseConnection,
     ids: &[i32],
     origin: &'static str,
@@ -693,7 +729,7 @@ async fn retag(
         if change(tags_of(&post)) == tags_of(&post) {
             continue;
         }
-        let Some(body) = crate::revisions::cached_body(app, &post.slug).await else {
+        let Some(body) = env.cached_body(&post.slug).await else {
             skipped.push(Skipped {
                 id: post_id,
                 title: post.title,
@@ -727,7 +763,7 @@ async fn retag(
             continue;
         }
 
-        crate::revisions::snapshot_or_log(app, &txn, &current, origin).await;
+        env.snapshot(&txn, &current, origin).await;
 
         let updated = PostModel {
             tags: Some(serde_json::to_string(&after).unwrap_or_else(|_| "[]".to_string())),
@@ -1497,4 +1533,185 @@ pub async fn list_posts_by_stage(
 ) -> AppResult<Vec<PostModel>> {
     validate_stage(&stage)?;
     db::posts_in_stage(conn.inner(), stage).await
+}
+
+/// Tests for the tag sweep.
+///
+/// Every one of these covers a bug that shipped without a test because nothing
+/// could construct a `tauri::AppHandle`. [`TagSweep`] exists so they can.
+#[cfg(test)]
+mod tag_sweep_tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::db::connect_in_memory;
+    use crate::entities::post;
+
+    /// A stand-in for the app: bodies come from a map, revisions are counted
+    /// rather than written.
+    struct FakeSweep {
+        bodies: HashMap<String, String>,
+        snapshots: Mutex<Vec<i32>>,
+    }
+
+    impl FakeSweep {
+        fn with(bodies: &[(&str, &str)]) -> Self {
+            Self {
+                bodies: bodies.iter().map(|(s, b)| (s.to_string(), b.to_string())).collect(),
+                snapshots: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn snapshotted(&self) -> Vec<i32> {
+            self.snapshots.lock().unwrap().clone()
+        }
+    }
+
+    impl TagSweep for FakeSweep {
+        async fn cached_body(&self, slug: &str) -> Option<String> {
+            self.bodies.get(slug).cloned()
+        }
+
+        async fn snapshot(
+            &self,
+            _txn: &sea_orm::DatabaseTransaction,
+            post: &PostModel,
+            _origin: &str,
+        ) {
+            self.snapshots.lock().unwrap().push(post.id);
+        }
+    }
+
+    fn a_post(slug: &str, tags: &[&str]) -> post::Model {
+        post::Model {
+            id: 0,
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            excerpt: None,
+            tags: Some(serde_json::to_string(tags).unwrap()),
+            published: true,
+            published_at: None,
+            series_id: None,
+            series_order: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// Adds `new` to whatever the post carries — the shape `add_tag_to_posts`
+    /// uses, without going through the command and its `State`.
+    fn add(new: &'static str) -> impl Fn(Vec<String>) -> Vec<String> {
+        move |mut tags: Vec<String>| {
+            if !tags.iter().any(|t| t == new) {
+                tags.push(new.to_string());
+            }
+            tags
+        }
+    }
+
+    async fn locally_edited(conn: &DatabaseConnection, id: i32) -> bool {
+        db::sync_get(conn, id)
+            .await
+            .unwrap()
+            .is_some_and(|row| crate::sync_state::local_changed(&row))
+    }
+
+    /// The ordinary case, so the guards below are known to be refusing
+    /// something that would otherwise have gone through.
+    #[tokio::test]
+    async fn a_post_with_a_body_is_tagged_and_marked_edited() {
+        let conn = connect_in_memory().await.unwrap();
+        let post = db::create::<post::Model>(&conn, a_post("hello", &["rust"])).await.unwrap();
+        let env = FakeSweep::with(&[("hello", "# Hello\n")]);
+
+        let out = retag(&env, &conn, &[post.id], post_revision::BULK_TAG, add("tauri")).await.unwrap();
+
+        assert_eq!(out.changed, 1);
+        assert!(out.skipped.is_empty());
+        assert_eq!(tags_of(&db::get::<PostModel>(&conn, post.id).await.unwrap().unwrap()), vec![
+            "rust".to_string(),
+            "tauri".to_string()
+        ]);
+        assert!(locally_edited(&conn, post.id).await, "the edit was not marked, so a refresh would undo it");
+        assert_eq!(env.snapshotted(), vec![post.id]);
+    }
+
+    /// #124. Fingerprinting a body known to be behind the cloud marks the row
+    /// edited, and `read_post_markdown` only refreshes a stale body while the
+    /// row is *not* edited — so doing it here switches off the refresh that
+    /// would have replaced the text, permanently.
+    #[tokio::test]
+    async fn a_stale_body_is_not_fingerprinted() {
+        let conn = connect_in_memory().await.unwrap();
+        let post = db::create::<post::Model>(&conn, a_post("stale", &["rust"])).await.unwrap();
+        db::body_stale_set(&conn, "stale", 100).await.unwrap();
+        let env = FakeSweep::with(&[("stale", "text this machine has not caught up with\n")]);
+
+        let out = retag(&env, &conn, &[post.id], post_revision::BULK_TAG, add("tauri")).await.unwrap();
+
+        assert_eq!(out.changed, 0);
+        assert_eq!(out.skipped.len(), 1);
+        assert_eq!(out.skipped[0].reason, SkipReason::BodyStale);
+        assert!(
+            !locally_edited(&conn, post.id).await,
+            "a stale body was fingerprinted, which stops the refresh that would have replaced it"
+        );
+        assert_eq!(tags_of(&db::get::<PostModel>(&conn, post.id).await.unwrap().unwrap()), vec!["rust".to_string()]);
+        assert!(env.snapshotted().is_empty());
+    }
+
+    /// The other half of #124's reasoning: a body that is simply not here is
+    /// reported differently, because the sentence shown to the user is not the
+    /// same one.
+    #[tokio::test]
+    async fn a_missing_body_is_reported_as_not_cached() {
+        let conn = connect_in_memory().await.unwrap();
+        let post = db::create::<post::Model>(&conn, a_post("absent", &["rust"])).await.unwrap();
+        let env = FakeSweep::with(&[]);
+
+        let out = retag(&env, &conn, &[post.id], post_revision::BULK_TAG, add("tauri")).await.unwrap();
+
+        assert_eq!(out.changed, 0);
+        assert_eq!(out.skipped.len(), 1);
+        assert_eq!(out.skipped[0].reason, SkipReason::BodyNotCached);
+    }
+
+    /// #123. Trash is its own table, so `db::get` hands a trashed row back like
+    /// any other and nothing in the sweep used to notice.
+    #[tokio::test]
+    async fn a_trashed_post_is_left_alone() {
+        let conn = connect_in_memory().await.unwrap();
+        let post = db::create::<post::Model>(&conn, a_post("binned", &["rust"])).await.unwrap();
+        db::trash_set(&conn, post.id, 100).await.unwrap();
+        let env = FakeSweep::with(&[("binned", "# Binned\n")]);
+
+        let out = retag(&env, &conn, &[post.id], post_revision::BULK_TAG, add("tauri")).await.unwrap();
+
+        assert_eq!(out.changed, 0);
+        assert!(out.skipped.is_empty(), "a trashed post was never eligible, so it is not a skip to report");
+        assert_eq!(tags_of(&db::get::<PostModel>(&conn, post.id).await.unwrap().unwrap()), vec!["rust".to_string()]);
+        assert!(!locally_edited(&conn, post.id).await);
+        assert!(env.snapshotted().is_empty());
+    }
+
+    /// #127. A post the change does not touch is unaffected, not skipped —
+    /// reporting it said its text was missing and sent the user looking for a
+    /// problem they did not have.
+    #[tokio::test]
+    async fn a_post_with_nothing_to_change_is_not_reported() {
+        let conn = connect_in_memory().await.unwrap();
+        // Carries the tag already, and has no body — the combination that used
+        // to produce the misleading report.
+        let post = db::create::<post::Model>(&conn, a_post("already", &["rust", "tauri"])).await.unwrap();
+        let env = FakeSweep::with(&[]);
+
+        let out = retag(&env, &conn, &[post.id], post_revision::BULK_TAG, add("tauri")).await.unwrap();
+
+        assert_eq!(out.changed, 0);
+        assert!(
+            out.skipped.is_empty(),
+            "a post that needed no edit was reported as one the edit could not be recorded for"
+        );
+    }
 }
