@@ -62,6 +62,11 @@ jobs:
       - name: Lint (oxlint)
         run: pnpm exec oxlint
 
+      # Before the build, for the same reason clippy runs before `cargo test`:
+      # the cheap failure should be the one you wait for.
+      - name: Test (vitest)
+        run: pnpm test
+
       - name: Build static export
         run: pnpm run build
 
