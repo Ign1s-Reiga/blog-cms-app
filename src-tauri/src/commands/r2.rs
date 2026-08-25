@@ -623,6 +623,11 @@ pub(crate) async fn read_markdown(
 /// whether the post is live. A live post saved with `published: false` stays
 /// live — readers keep the version already on the blog — and its local edits are
 /// recorded as unpublished. Taking a post off the blog is `unpublish_post`.
+// Every one of these is a field the editor sends, and the names are the IPC
+// contract: Tauri matches command arguments by name, so folding them into a
+// struct would change what the frontend calls rather than only how this reads.
+// `save` below carries the same allow for the same reason.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn save_post(
     app: tauri::AppHandle,
