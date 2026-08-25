@@ -180,6 +180,16 @@ export default function PostsPage() {
   /// Which body search is the current one. A slow answer for `rust` must not
   /// land on top of a quick one for `rustup` and show the wrong rows.
   const bodyAttempt = useRef(0);
+  /// What the search box says *now*, for the code that has to ask after an
+  /// await. `search` inside an async function is the value from the render that
+  /// created it, so a gap-fill started before the query changed would compare
+  /// the old text against itself, conclude nothing had moved, and go on to
+  /// retire the newer query's search and answer under it. A ref is read at the
+  /// moment of asking rather than at the moment of closing over.
+  const liveSearch = useRef(search);
+  useEffect(() => {
+    liveSearch.current = search;
+  }, [search]);
   /// The tag the list is narrowed to, arriving from the Tags screen as
   /// `?tag=`. Held in state rather than read per render so clearing it does not
   /// need a navigation.
@@ -333,6 +343,11 @@ export default function PostsPage() {
     const asked = bodyMatches.query;
     const ids = bodyMatches.unsearched.map((u) => u.id);
     setFillingGaps(true);
+    // The attempt this claims, once it claims one. Retiring a debounced search
+    // that is still in flight makes its own `finally` a no-op — that guard only
+    // clears the spinner for the attempt still current — so whoever does the
+    // retiring inherits the spinner and has to put it down again.
+    let mine: number | null = null;
     try {
       const { invoke, isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
@@ -340,10 +355,16 @@ export default function PostsPage() {
       // Only if the box still says what it said. Claiming a fresh attempt
       // regardless would also retire a debounced search for the *newer* text
       // and leave the old results sitting under it.
-      if (asked !== search.trim()) return;
-      const mine = ++bodyAttempt.current;
+      //
+      // Read through the ref, not `search`: this function closed over the value
+      // as it stood when the button was pressed, so comparing against that
+      // would be comparing `asked` with itself and would pass however much the
+      // box had moved on.
+      if (asked !== liveSearch.current.trim()) return;
+      mine = ++bodyAttempt.current;
+      setBodySearching(true);
       const found = await invoke<BodyMatchesPayload>('search_post_bodies', { query: asked });
-      if (mine === bodyAttempt.current && asked === search.trim()) {
+      if (mine === bodyAttempt.current && asked === liveSearch.current.trim()) {
         setBodyMatches({ query: asked, ...found });
       }
     } catch {
@@ -351,6 +372,7 @@ export default function PostsPage() {
       // already the honest state.
     } finally {
       setFillingGaps(false);
+      if (mine !== null && mine === bodyAttempt.current) setBodySearching(false);
     }
   };
 
@@ -459,10 +481,16 @@ export default function PostsPage() {
 
   const exportPost = async (id: number) => {
     if (exportStatus.kind === 'working') return;
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
+    // Asked before the working state is claimed, not inside it. There is
+    // nothing to export to in a browser, and returning from under
+    // `{kind:'working'}` used to leave it there for good — the guard above then
+    // refused every later export, so `pnpm run dev` lost the button for the rest
+    // of the session. A `finally` would clear it, but it would also clear the
+    // success and error states below, which are meant to stay on screen.
+    if (!isTauri()) return;
     setExportStatus({ kind: 'working', id });
     try {
-      const { invoke, isTauri } = await import('@tauri-apps/api/core');
-      if (!isTauri()) return;
       const done = await invoke<{ path: string; slug: string; unpublished_edits: boolean }>('export_post', { id });
       setExportStatus({
         kind: 'success',
