@@ -655,7 +655,11 @@ pub async fn remove_tag_from_posts(
 ///    the write.
 ///
 /// `change` is given the post's current tags and returns what they should be.
-/// Returning them unchanged is not an edit, and nothing is written.
+/// Returning them unchanged is not an edit, and nothing is written — nor
+/// reported: a post the change does not touch is simply unaffected, not one
+/// that was skipped. Asked twice, cheaply up front so an unaffected post never
+/// reaches the body checks, and again inside the transaction where the row it
+/// compares is the one being written.
 async fn retag(
     app: &tauri::AppHandle,
     conn: &DatabaseConnection,
@@ -673,6 +677,20 @@ async fn retag(
             continue;
         };
         if db::trash_get(conn, post_id).await?.is_some() {
+            continue;
+        }
+        // Nothing to do is not the same as could not be done. Asked here, on
+        // the row already in hand, so a post the change does not touch never
+        // reaches the body checks below — being told that a post was "left
+        // unchanged" because its text is missing, when the tag was not on it in
+        // the first place, sends the reader looking for a problem they do not
+        // have. `remove_tag_from_posts` is where this shows: its ids are a
+        // selection, not a filtered list like `rename_tag`'s.
+        //
+        // This is a shortcut, not the decision. The row can move between here
+        // and the write, so the comparison that governs is the one inside the
+        // transaction below, against the row read there.
+        if change(tags_of(&post)) == tags_of(&post) {
             continue;
         }
         let Some(body) = crate::revisions::cached_body(app, &post.slug).await else {
