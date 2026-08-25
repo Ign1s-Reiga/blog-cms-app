@@ -640,7 +640,7 @@ pub async fn save_post(
     series: Option<NewPostSeries>,
 ) -> AppResult<PostModel> {
     let origin = if published { post_revision::PUBLISH } else { post_revision::SAVE };
-    save(app, conn.inner(), id, Some(title), Some(tags), body, published, origin, series).await
+    save(&app, conn.inner(), id, Some(title), Some(tags), body, published, origin, series).await
 }
 
 /// Publish a post the library already holds, exactly as it is stored.
@@ -684,7 +684,7 @@ pub async fn publish_stored_post(
     // anything is published rather than after.
     let body = read_markdown(&app, conn.inner(), post.slug.clone()).await?;
 
-    save(app, conn.inner(), Some(id), None, None, body, true, post_revision::PUBLISH, None).await
+    save(&app, conn.inner(), Some(id), None, None, body, true, post_revision::PUBLISH, None).await
 }
 
 /// The series a **brand-new** post is being filed into, carried by the save
@@ -722,8 +722,61 @@ pub async fn autosave_post(
     body: String,
     series: Option<NewPostSeries>,
 ) -> AppResult<PostModel> {
-    save(app, conn.inner(), id, Some(title), Some(tags), body, false, post_revision::AUTOSAVE, series)
+    save(&app, conn.inner(), id, Some(title), Some(tags), body, false, post_revision::AUTOSAVE, series)
         .await
+}
+
+/// What a save needs besides the database: somewhere to put the body, a place to
+/// file a revision, and a way to reach the cloud.
+///
+/// All three went through the `tauri::AppHandle` directly, which is what kept
+/// [`save`] out of reach of a test — `db::connect_in_memory` can stand up a
+/// database and a temporary directory can stand in for the app's data dir, but
+/// nothing can stand up a handle without Tauri's `test` feature.
+///
+/// The same move as [`crate::commands::local_db::TagSweep`], and deliberately
+/// not the same trait: that one hands back a body and snapshots into a
+/// `DatabaseTransaction`, this one wants a directory and snapshots against the
+/// connection. Merging them would widen both to fit a caller that does not want
+/// the extra.
+///
+/// `push` is a seam, not a fake of the cloud. It exists so `save` compiles
+/// without a handle; nothing here reproduces what R2 and D1 do, and a save that
+/// does not publish returns before reaching it.
+pub(crate) trait SaveEnv {
+    /// The directory this machine keeps post bodies in, created if absent.
+    fn posts_dir(&self) -> impl std::future::Future<Output = AppResult<std::path::PathBuf>>;
+
+    /// Record `post` as it stands before this save overwrites it. Best effort,
+    /// like the function behind it: a lost revision must not fail a save.
+    fn snapshot(
+        &self,
+        conn: &DatabaseConnection,
+        post: &PostModel,
+        origin: &str,
+    ) -> impl std::future::Future<Output = ()>;
+
+    /// Put the body and metadata where readers get them.
+    fn push(
+        &self,
+        conn: &DatabaseConnection,
+        post: &PostModel,
+        body: &str,
+    ) -> impl std::future::Future<Output = AppResult<()>>;
+}
+
+impl SaveEnv for tauri::AppHandle {
+    async fn posts_dir(&self) -> AppResult<std::path::PathBuf> {
+        crate::commands::posts_dir(self).await
+    }
+
+    async fn snapshot(&self, conn: &DatabaseConnection, post: &PostModel, origin: &str) {
+        revisions::snapshot_or_log(self, conn, post, origin).await;
+    }
+
+    async fn push(&self, conn: &DatabaseConnection, post: &PostModel, body: &str) -> AppResult<()> {
+        push_to_cloud(self, conn, post, body).await
+    }
 }
 
 /// The save itself, shared by the editor's Save/Publish buttons and its
@@ -738,7 +791,7 @@ pub async fn autosave_post(
 /// title, having no row to take one from.
 #[allow(clippy::too_many_arguments)]
 async fn save(
-    app: tauri::AppHandle,
+    env: &impl SaveEnv,
     conn: &DatabaseConnection,
     id: Option<i32>,
     title: Option<String>,
@@ -841,7 +894,7 @@ async fn save(
     // whether *this* save publishes it.
     let live = model.published;
 
-    let dir = posts_dir(&app).await?;
+    let dir = env.posts_dir().await?;
 
     // 1. Stage the body. Nothing else has changed yet, so a disk that cannot
     //    take the write leaves the post exactly as it was.
@@ -878,7 +931,7 @@ async fn save(
     //
     //    Best effort by design — see `revisions::snapshot_or_log`.
     if let Some(before) = previous.as_ref() {
-        revisions::snapshot_or_log(&app, conn, &before.post, origin).await;
+        env.snapshot(conn, &before.post, origin).await;
     }
 
     // The cached body is about to become this machine's own writing, so whatever
@@ -949,7 +1002,7 @@ async fn save(
         return Ok(saved);
     }
 
-    let synced = push_to_cloud(&app, conn, &saved, &body).await;
+    let synced = env.push(conn, &saved, &body).await;
 
     let stage = if synced.is_ok() { post_stage::PUBLISHED } else { post_stage::SYNC_FAILED };
     db::stage_set(
@@ -2076,5 +2129,226 @@ mod new_post_slug_tests {
 
         assert_eq!(next, "my-post-2");
         assert!(db::post_by_slug(&db, "my-post").await.unwrap().is_some());
+    }
+}
+
+/// Tests for the save path.
+///
+/// [`SaveEnv`] exists so these can run: a temporary directory stands in for the
+/// app's data dir, revisions are counted rather than written, and `push` is
+/// never reached because nothing here publishes.
+///
+/// `flavor = "multi_thread"`, unlike the rest of the file. `save` takes
+/// [`crate::commands::lock_body_commits`], which is one process-global
+/// `tokio::sync::Mutex` shared by every test in the binary while each
+/// `#[tokio::test]` gets a runtime of its own. A waiter on a current-thread
+/// runtime only makes progress when that runtime polls it, so four tests
+/// queueing on the same lock spend most of their time waiting to be woken —
+/// measured at 11s against 1.25s for the same tests run serially, and worse
+/// when one of them fails slowly. A multi-threaded runtime has a worker free to
+/// poll the waiter, which brings it back to 3.4s without making the lock any
+/// less real.
+#[cfg(test)]
+mod save_tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::db::connect_in_memory;
+    use crate::entities::post;
+
+    /// A directory of its own per test, removed on the way out. `save` stages a
+    /// body and renames it into place, so this has to be a real directory
+    /// rather than a fake path.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "blog-cms-save-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct FakeEnv {
+        dir: PathBuf,
+        snapshots: Mutex<Vec<i32>>,
+        pushes: Mutex<Vec<i32>>,
+    }
+
+    impl FakeEnv {
+        fn in_dir(dir: &TempDir) -> Self {
+            Self { dir: dir.0.clone(), snapshots: Mutex::new(Vec::new()), pushes: Mutex::new(Vec::new()) }
+        }
+
+        fn pushed(&self) -> Vec<i32> {
+            self.pushes.lock().unwrap().clone()
+        }
+
+        fn snapshotted(&self) -> Vec<i32> {
+            self.snapshots.lock().unwrap().clone()
+        }
+    }
+
+    impl SaveEnv for FakeEnv {
+        async fn posts_dir(&self) -> AppResult<PathBuf> {
+            Ok(self.dir.clone())
+        }
+
+        async fn snapshot(&self, _conn: &DatabaseConnection, post: &PostModel, _origin: &str) {
+            self.snapshots.lock().unwrap().push(post.id);
+        }
+
+        /// Recorded, not performed. Nothing below publishes, so reaching this at
+        /// all would mean the local-only branch had stopped short-circuiting.
+        async fn push(&self, _conn: &DatabaseConnection, post: &PostModel, _body: &str) -> AppResult<()> {
+            self.pushes.lock().unwrap().push(post.id);
+            Ok(())
+        }
+    }
+
+    fn a_post(slug: &str, title: &str, tags: &[&str]) -> post::Model {
+        post::Model {
+            id: 0,
+            slug: slug.to_string(),
+            title: title.to_string(),
+            excerpt: None,
+            tags: Some(serde_json::to_string(tags).unwrap()),
+            published: false,
+            published_at: None,
+            series_id: None,
+            series_order: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn tags_of(post: &PostModel) -> Vec<String> {
+        post.tags
+            .as_deref()
+            .and_then(|t| serde_json::from_str::<Vec<String>>(t).ok())
+            .unwrap_or_default()
+    }
+
+    /// #125. Bulk publish used to send the posts list's own copy of the row
+    /// back, and `save` writes every column — so a title or tag set changed
+    /// since the list last loaded was reverted, and published. The fix was
+    /// `None` meaning "keep what the row has"; this is what holds it to that.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn none_keeps_the_title_and_tags_the_row_already_has() {
+        let conn = connect_in_memory().await.unwrap();
+        let dir = TempDir::new();
+        let env = FakeEnv::in_dir(&dir);
+        let post = db::create::<post::Model>(&conn, a_post("post", "Stored title", &["rust"]))
+            .await
+            .unwrap();
+
+        let saved = save(
+            &env,
+            &conn,
+            Some(post.id),
+            None,
+            None,
+            "# Body\n".to_string(),
+            false,
+            post_revision::SAVE,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(saved.title, "Stored title");
+        assert_eq!(tags_of(&saved), vec!["rust".to_string()]);
+
+        let reread = db::get::<PostModel>(&conn, post.id).await.unwrap().unwrap();
+        assert_eq!(reread.title, "Stored title", "the stored title was overwritten by a save that carried none");
+        assert_eq!(tags_of(&reread), vec!["rust".to_string()]);
+    }
+
+    /// The other direction, so the `Option` is pinned both ways and the editor's
+    /// own Save cannot be quietly turned into a no-op later.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn some_overwrites_the_title_and_tags() {
+        let conn = connect_in_memory().await.unwrap();
+        let dir = TempDir::new();
+        let env = FakeEnv::in_dir(&dir);
+        let post = db::create::<post::Model>(&conn, a_post("post", "Stored title", &["rust"]))
+            .await
+            .unwrap();
+
+        let saved = save(
+            &env,
+            &conn,
+            Some(post.id),
+            Some("Edited title".to_string()),
+            Some("rust, tauri".to_string()),
+            "# Body\n".to_string(),
+            false,
+            post_revision::SAVE,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(saved.title, "Edited title");
+        assert_eq!(tags_of(&saved), vec!["rust".to_string(), "tauri".to_string()]);
+    }
+
+    /// The short-circuit the two tests above depend on: a save that is not
+    /// publishing must not reach the cloud. If this ever fails, the tests here
+    /// are quietly exercising a fake of R2 and D1 rather than avoiding them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_save_that_does_not_publish_never_reaches_the_cloud() {
+        let conn = connect_in_memory().await.unwrap();
+        let dir = TempDir::new();
+        let env = FakeEnv::in_dir(&dir);
+        let post = db::create::<post::Model>(&conn, a_post("post", "Stored title", &["rust"]))
+            .await
+            .unwrap();
+
+        save(&env, &conn, Some(post.id), None, None, "# Body\n".to_string(), false, post_revision::SAVE, None)
+            .await
+            .unwrap();
+
+        assert!(env.pushed().is_empty(), "a draft save pushed to the cloud");
+        assert_eq!(env.snapshotted(), vec![post.id], "the row was overwritten without a revision behind it");
+    }
+
+    /// The body is what the save was given, written where the app looks for it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_body_lands_in_the_posts_directory() {
+        let conn = connect_in_memory().await.unwrap();
+        let dir = TempDir::new();
+        let env = FakeEnv::in_dir(&dir);
+        let post = db::create::<post::Model>(&conn, a_post("landing", "Stored title", &[])).await.unwrap();
+
+        save(
+            &env,
+            &conn,
+            Some(post.id),
+            None,
+            None,
+            "# Written\n".to_string(),
+            false,
+            post_revision::SAVE,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let written = tokio::fs::read_to_string(dir.0.join("landing.md")).await.unwrap();
+        assert_eq!(written, "# Written\n");
     }
 }
