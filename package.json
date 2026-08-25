@@ -3,6 +3,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "fmt": "oxfmt --ignore-path .gitignore src \"*.ts\" \"*.md\"",
     "fmt:check": "oxfmt --check --ignore-path .gitignore src \"*.ts\" \"*.md\"",
     "lint": "oxlint --fix"
@@ -10,13 +12,19 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
     "@tauri-apps/cli": "^2.10.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.6",
     "@types/node": "25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.1.0",
+    "jsdom": "^30.0.1",
     "oxfmt": "^0.44.0",
     "oxlint": "^1.59.0",
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
+    "vitest": "^4.1.11",
     "wrangler": "^4.81.1"
   },
   "dependencies": {
