@@ -832,6 +832,13 @@ async fn refuse_rename(conn: &DatabaseConnection, post: &PostModel, slug: &str) 
 /// What is left is the case worth having: a draft whose title was wrong, or
 /// whose slug was derived from a title since changed, corrected before anybody
 /// has seen it.
+///
+/// The body moves before the row, under the same lock the publish paths take,
+/// and either both move or neither does. A row pointing at a name the body is
+/// not under is not a cosmetic mismatch here: `read_post_markdown` would find
+/// nothing, a post eligible to be renamed has nothing in R2 to fall back to,
+/// and the empty document that results is what the next save writes over the
+/// post.
 #[tauri::command]
 pub async fn rename_post_slug(
     app: tauri::AppHandle,
@@ -849,29 +856,61 @@ pub async fn rename_post_slug(
         return Ok(post);
     }
 
+    // Held across the check and the write. Without it the answer can go stale
+    // between them: a publish or a schedule starting after `refuse_rename` says
+    // yes would upload this post's objects under the old slug while the row
+    // moves to the new one, and nothing afterwards would notice. The editor's
+    // `enqueueWrite` does not help — it orders one component's calls, not the
+    // MCP server's or anything else's.
+    //
+    // The same lock `save`, `schedule_post` and `read_post_markdown` take around
+    // the moment a body and its row have to agree.
+    let _guard = lock_body_commits().await;
+
     refuse_rename(conn.inner(), &post, &slug).await?;
 
     let old = post.slug.clone();
-    let renamed = db::update::<PostModel>(
+    let dir = app.path().app_data_dir().map_err(AppError::AppDataDir)?.join("posts");
+    let from = dir.join(format!("{old}.md"));
+    let to = dir.join(format!("{slug}.md"));
+
+    // The body moves first, and failing to move it refuses the rename.
+    //
+    // The other order loses text. `read_post_markdown` looks under the row's
+    // slug, and a post eligible to be renamed has never been pushed — so there
+    // is nothing in R2 to fall back to. A renamed row over a body still under
+    // the old name gives an editor with an empty document, and the next save
+    // writes that emptiness over the post. A refused rename costs an error
+    // message; this costs the text.
+    //
+    // `NotFound` is not a failure: a post that has never been opened on this
+    // machine has no cached body, and there is nothing to move.
+    let moved = match tokio::fs::rename(&from, &to).await {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(AppError::io("Failed to move the post's cached body", e)),
+    };
+
+    let renamed = match db::update::<PostModel>(
         conn.inner(),
         PostModel { slug: slug.clone(), updated_at: now_ts(), ..post },
     )
-    .await?;
-
-    // The cached body is named for the slug. Moved after the row, and best
-    // effort: a post that has never been pushed has nothing in R2 to re-fetch,
-    // so a file that cannot be moved leaves its text on disk under the old name
-    // and the editor showing an empty body. That is recoverable and visible.
-    // Failing the rename here would not be: the row is already written, and
-    // there is no second name for a post to have.
-    if let Ok(dir) = app.path().app_data_dir() {
-        let dir = dir.join("posts");
-        if let Err(e) =
-            tokio::fs::rename(dir.join(format!("{old}.md")), dir.join(format!("{slug}.md"))).await
-        {
-            log::warn!("Renamed post {id} to `{slug}` but could not move its cached body: {e}");
+    .await
+    {
+        Ok(renamed) => renamed,
+        Err(e) => {
+            // Put the body back under the name the row still has, or the post is
+            // left in exactly the state the ordering above exists to prevent.
+            if moved {
+                if let Err(back) = tokio::fs::rename(&to, &from).await {
+                    log::error!(
+                        "Rename of post {id} failed and its body is stranded at `{slug}.md`: {back}"
+                    );
+                }
+            }
+            return Err(e);
         }
-    }
+    };
 
     Ok(renamed)
 }

@@ -163,8 +163,13 @@ pub enum AppError {
 
     /// Scheduling uploads the body and images when the schedule is set, not when
     /// the post goes live, so a scheduled post is in R2 already.
+    ///
+    /// Deliberately does not suggest cancelling. `cancel_schedule` keeps the row
+    /// and marks it `cancelled` rather than deleting it, and cancelling takes
+    /// nothing back out of R2 — so following that advice would return the same
+    /// refusal, which is worse than no advice.
     #[error(
-        "`{0}` is scheduled, and scheduling has already uploaded it. Cancel the schedule to          rename it."
+        "`{0}` is scheduled, and scheduling has already uploaded its body and images under          this slug. Cancelling the schedule does not take them back, so the slug stays as it is."
     )]
     SlugFixedBySchedule(String),
 
