@@ -1,4 +1,4 @@
-/// Tests for the editor's thumbnail control.
+/// Tests for the editor's thumbnail control and its pre-publish check.
 ///
 /// The command behind it shipped registered and unreachable, so the thing worth
 /// pinning is that it is reachable — and that the two states around it are
@@ -76,6 +76,10 @@ const backend = (over: Record<string, unknown> = {}) => {
         return '# A post\n';
       case 'stage_post_thumbnail':
         return null;
+      case 'check_post_before_publish':
+        return [];
+      case 'save_post':
+        return { id: 7, slug: 'a-post', title: 'A post', published: true };
       default:
         return [];
     }
@@ -145,5 +149,100 @@ describe('the thumbnail control', () => {
     await userEvent.click(button);
 
     expect(await screen.findByText(/R2 rejected the upload/)).toBeInTheDocument();
+  });
+});
+
+const publish = async () => {
+  const button = await screen.findByRole('button', { name: 'Publish' });
+  await waitFor(() => expect(button).toBeEnabled());
+  await userEvent.click(button);
+};
+
+const calls = (command: string) => invoke.mock.calls.filter((c) => c[0] === command);
+
+describe('the pre-publish check', () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    openPost(7);
+  });
+
+  it('publishes with no extra step when there is nothing to say', async () => {
+    backend();
+    render(<PostEditor />);
+    await publish();
+
+    await waitFor(() => expect(calls('save_post').length).toBe(1));
+    expect(screen.queryByText(/Worth a look/)).not.toBeInTheDocument();
+  });
+
+  it('holds the publish and says what it found', async () => {
+    backend({ check_post_before_publish: [{ kind: 'no_excerpt' }] });
+    render(<PostEditor />);
+    await publish();
+
+    expect(await screen.findByText(/Worth a look/)).toBeInTheDocument();
+    expect(screen.getByText(/No excerpt/)).toBeInTheDocument();
+    // Held, not refused — nothing has gone up.
+    expect(calls('save_post')).toHaveLength(0);
+  });
+
+  it('names the reference that would publish as a dead link', async () => {
+    backend({
+      check_post_before_publish: [{ kind: 'dead_asset', reference: 'assets/gone.png' }],
+    });
+    render(<PostEditor />);
+    await publish();
+
+    expect(await screen.findByText('assets/gone.png')).toBeInTheDocument();
+  });
+
+  /// The whole point: a warning is not a refusal.
+  it('publishes anyway when the author says so, and does not ask twice', async () => {
+    backend({ check_post_before_publish: [{ kind: 'no_excerpt' }] });
+    render(<PostEditor />);
+    await publish();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Publish anyway' }));
+
+    await waitFor(() => expect(calls('save_post').length).toBe(1));
+    // Checked once. Asking again on the way past would be an argument.
+    expect(calls('check_post_before_publish')).toHaveLength(1);
+  });
+
+  it('lets the author go back without publishing', async () => {
+    backend({ check_post_before_publish: [{ kind: 'no_excerpt' }] });
+    render(<PostEditor />);
+    await publish();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Go back' }));
+
+    await waitFor(() => expect(screen.queryByText(/Worth a look/)).not.toBeInTheDocument());
+    expect(calls('save_post')).toHaveLength(0);
+  });
+
+  /// A check that cannot run must not stand between somebody and publishing.
+  it('publishes when the check itself fails', async () => {
+    backend();
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'check_post_before_publish') throw 'no credentials configured';
+      if (command === 'get_post') {
+        return {
+          title: 'A post',
+          tags: '["rust"]',
+          slug: 'a-post',
+          published: false,
+          series_id: null,
+          series_order: null,
+        };
+      }
+      if (command === 'read_post_markdown') return '# A post\n';
+      if (command === 'save_post') return { id: 7, slug: 'a-post', title: 'A post', published: true };
+      return [];
+    });
+    render(<PostEditor />);
+    await publish();
+
+    await waitFor(() => expect(calls('save_post').length).toBe(1));
+    expect(screen.queryByText(/Worth a look/)).not.toBeInTheDocument();
   });
 });

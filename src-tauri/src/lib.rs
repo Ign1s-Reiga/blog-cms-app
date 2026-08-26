@@ -145,6 +145,7 @@ pub fn run() {
             commands::read_post_markdown,
             commands::save_post,
             commands::publish_stored_post,
+            commands::check_post_before_publish,
             commands::autosave_post,
             // Revision history (local snapshots + rollback)
             commands::list_revisions,
