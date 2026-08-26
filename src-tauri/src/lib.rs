@@ -158,6 +158,7 @@ pub fn run() {
             commands::stage_media_from_library,
             // Post thumbnail
             imaging::set_post_thumbnail,
+            imaging::stage_post_thumbnail,
             // MCP server (local endpoint + guarded publish approvals)
             mcp::mcp_status,
             mcp::mcp_configure,

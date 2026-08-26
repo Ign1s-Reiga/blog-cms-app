@@ -204,6 +204,49 @@ pub async fn set_post_thumbnail(app: tauri::AppHandle, slug: String) -> AppResul
     Ok(key)
 }
 
+/// Fetch the post's thumbnail and stage it where the webview may read it.
+///
+/// `Ok(None)` means the post has no thumbnail — a plain fact about a post that
+/// has not been given one, not a failure.
+///
+/// Staged rather than linked. The webview's `img-src` allows `asset:` and
+/// nothing remote, so the R2 object cannot be shown by URL however public it
+/// is; and thumbnails are uploaded straight to R2 without passing through the
+/// media cache, so there is no local copy to point at either. This puts one
+/// inside `$APPDATA/assets`, which is in the asset protocol's scope, the same
+/// way `stage_media_from_library` does for the editor's image picker.
+#[tauri::command]
+pub async fn stage_post_thumbnail(app: tauri::AppHandle, slug: String) -> AppResult<Option<String>> {
+    if !media_keys::is_safe_slug(&slug) {
+        return Err(AppError::InvalidSlug(slug));
+    }
+
+    let (client, config) = cf()?;
+    let key = media_keys::thumbnail_key(&config.thumbnail_key_pattern, &slug, "avif");
+    let Some(bytes) = cloudflare::download_bytes_from_r2(&client, &config, &key).await? else {
+        return Ok(None);
+    };
+
+    let assets_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(AppError::AppDataDir)?
+        .join("assets");
+    tokio::fs::create_dir_all(&assets_dir)
+        .await
+        .map_err(|e| AppError::io("Failed to create assets dir", e))?;
+
+    // A fresh name per fetch. Writing over a fixed one would leave the webview
+    // showing the previous image from its own cache after a replacement, which
+    // is the moment the preview most needs to be right.
+    let staged_name = format!("{}.avif", uuid::Uuid::new_v4());
+    tokio::fs::write(assets_dir.join(&staged_name), &bytes)
+        .await
+        .map_err(|e| AppError::io("Failed to stage thumbnail", e))?;
+
+    Ok(Some(format!("assets/{staged_name}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
