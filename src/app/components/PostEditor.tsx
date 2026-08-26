@@ -241,6 +241,17 @@ export function PostEditor() {
   const [seriesId, setSeriesId] = useState<number | null>(null);
   const [seriesOrder, setSeriesOrder] = useState('');
   const [seriesError, setSeriesError] = useState<string | null>(null);
+  /// The post's thumbnail — the card image the blog derives from the slug.
+  ///
+  /// Like series filing, and for the same reason: it is not part of
+  /// `content_hash`, so it is written the moment it is chosen rather than
+  /// waiting for a Save that would report the post as edited when none of its
+  /// text changed. Unlike series, it lives only in R2 — nothing about it is on
+  /// the post's row — so what is held here is a staged copy to look at, not the
+  /// value itself.
+  const [thumbnail, setThumbnail] = useState<string | null>(null);
+  const [thumbnailBusy, setThumbnailBusy] = useState(false);
+  const [thumbnailError, setThumbnailError] = useState<string | null>(null);
   /// The filing as it stands, for the save that gives a new post its id —
   /// there is nothing to write it to until then.
   const seriesRef = useRef<{ id: number | null; order: number | null }>({ id: null, order: null });
@@ -1226,6 +1237,49 @@ export function PostEditor() {
     }
   };
 
+  /// Fetch the thumbnail and hand the webview something it is allowed to show.
+  ///
+  /// Quiet on failure. This runs whenever a post is opened, and a library with
+  /// no credentials configured — or a post that simply has no thumbnail — is not
+  /// a thing to put an error in front of somebody about. Setting one says so
+  /// out loud; looking for one does not.
+  const loadThumbnail = useCallback(async (forSlug: string) => {
+    if (!isTauri()) return;
+    try {
+      const rel = await invoke<string | null>('stage_post_thumbnail', { slug: forSlug });
+      setThumbnail(rel === null ? null : convertFileSrc(await join(await appDataDir(), rel)));
+    } catch {
+      setThumbnail(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    // A post that has never been saved has no slug, and the thumbnail's key is
+    // derived from the slug alone — there is nowhere for one to be yet.
+    if (slug === null) {
+      setThumbnail(null);
+      return;
+    }
+    void loadThumbnail(slug);
+  }, [slug, loadThumbnail]);
+
+  const applyThumbnail = async () => {
+    if (slug === null || thumbnailBusy || !isTauri()) return;
+    setThumbnailBusy(true);
+    setThumbnailError(null);
+    try {
+      await enqueueWrite(() => invoke('set_post_thumbnail', { slug }));
+      await loadThumbnail(slug);
+    } catch (err) {
+      const msg = String(err);
+      // Dismissing the file dialog is not a failure — the same distinction the
+      // posts list draws around `export_post`.
+      if (msg !== 'cancelled') setThumbnailError(msg);
+    } finally {
+      setThumbnailBusy(false);
+    }
+  };
+
   // ── Shared fields, composed differently per layout mode below ────────────────
 
   const titleField = (
@@ -1321,6 +1375,41 @@ export function PostEditor() {
       )}
 
       {seriesError && <span className='truncate text-[11px] text-red-600 dark:text-red-400'>{seriesError}</span>}
+    </div>
+  );
+
+  const thumbnailField = (
+    <div className='flex items-center gap-2 px-4 pb-2 shrink-0'>
+      <ImagePlus size={11} strokeWidth={1.8} className='text-zinc-300 dark:text-zinc-700 shrink-0' />
+      {thumbnail !== null && (
+        // `asset:` URL from the local staging directory, not a remote image
+        // next/image could optimise. The media library and picker carry the
+        // same exemption for the same reason.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={thumbnail}
+          alt='Current thumbnail'
+          className='h-[20px] w-[36px] shrink-0 rounded-[2px] border border-zinc-200 object-cover dark:border-white/[0.08]'
+        />
+      )}
+      <button
+        type='button'
+        onClick={() => void applyThumbnail()}
+        disabled={slug === null || thumbnailBusy}
+        // Said rather than left to be guessed: a disabled control with no
+        // reason on it reads as broken.
+        title={slug === null ? 'Save the post first — a thumbnail is stored under its slug' : undefined}
+        className={[
+          'text-[12px] font-medium transition-colors active:scale-95',
+          slug === null || thumbnailBusy
+            ? 'cursor-not-allowed text-zinc-300 dark:text-zinc-700'
+            : 'cursor-pointer text-zinc-500 hover:text-zinc-800 dark:text-zinc-500 dark:hover:text-zinc-200',
+        ].join(' ')}
+      >
+        {thumbnailBusy ? 'Uploading…' : thumbnail !== null ? 'Replace thumbnail' : 'Set thumbnail'}
+      </button>
+
+      {thumbnailError && <span className='truncate text-[11px] text-red-600 dark:text-red-400'>{thumbnailError}</span>}
     </div>
   );
 
@@ -1633,6 +1722,7 @@ export function PostEditor() {
             {titleField}
             {tagsField}
             {seriesField}
+            {thumbnailField}
           </div>
           {divider}
           <div className='flex-1 min-h-0 flex'>
@@ -1647,6 +1737,7 @@ export function PostEditor() {
           {titleField}
           {tagsField}
           {seriesField}
+          {thumbnailField}
           {divider}
           {mode === 'write' ? (
             editor
