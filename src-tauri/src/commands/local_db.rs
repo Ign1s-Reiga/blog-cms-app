@@ -780,6 +780,141 @@ async fn retag(
     Ok(TagRenamed { changed, skipped })
 }
 
+/// Whether `post` may be renamed to `slug`, and why not when it may not.
+///
+/// Split out so it is the same code the tests ask. Held together in one place
+/// for the same reason `retag`'s guarantees are: the reasons are easy to state
+/// and easy to leave one of out.
+async fn refuse_rename(conn: &DatabaseConnection, post: &PostModel, slug: &str) -> AppResult<()> {
+    refuse_if_trashed(conn, post).await?;
+
+    if post.published {
+        return Err(AppError::SlugFixedByPublication(post.slug.clone()));
+    }
+    if db::schedule_get(conn, &post.slug).await?.is_some() {
+        // A schedule uploads the body and images at the moment it is set, not
+        // when the post goes live — see `schedule_post` — so this post's objects
+        // are already in R2 under the old slug even though the row reads
+        // unpublished.
+        return Err(AppError::SlugFixedBySchedule(post.slug.clone()));
+    }
+    if db::sync_get(conn, post.id).await?.is_some_and(|row| row.synced_hash.is_some()) {
+        // Published once and taken down again still leaves the objects behind.
+        return Err(AppError::SlugFixedByPublication(post.slug.clone()));
+    }
+
+    // `slug` is unique in the table, and the trash keeps its rows there — so a
+    // collision with a trashed post is a real collision, and letting the update
+    // fail would surface as a raw constraint error.
+    if db::post_by_slug(conn, slug).await?.is_some() {
+        return Err(AppError::SlugTaken(slug.to_string()));
+    }
+
+    Ok(())
+}
+
+/// Give a post a different slug.
+///
+/// Only while nothing of it has left this machine. The slug is not merely the
+/// row's key: it is the R2 body's key (`posts/<slug>.md`), the thumbnail's, and
+/// the prefix every one of the post's images sits under — and publishing
+/// rewrites body image references into absolute URLs with the slug baked in. A
+/// rename after any of that has happened is a move of several objects plus a
+/// rewrite of the text pointing at them, and it strands every link anybody has
+/// already followed. That is a larger piece of work with a question in front of
+/// it — whether the blog can be made to redirect the old URL — and this is
+/// deliberately not it.
+///
+/// So: refused for a post that is published, scheduled, or that has ever been
+/// pushed. Each is asked separately because each is a different reason, and
+/// "you cannot rename this" without saying why is not an answer.
+///
+/// What is left is the case worth having: a draft whose title was wrong, or
+/// whose slug was derived from a title since changed, corrected before anybody
+/// has seen it.
+///
+/// The body moves before the row, under the same lock the publish paths take,
+/// and either both move or neither does. A row pointing at a name the body is
+/// not under is not a cosmetic mismatch here: `read_post_markdown` would find
+/// nothing, a post eligible to be renamed has nothing in R2 to fall back to,
+/// and the empty document that results is what the next save writes over the
+/// post.
+#[tauri::command]
+pub async fn rename_post_slug(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+    slug: String,
+) -> AppResult<PostModel> {
+    let slug = slug.trim().to_string();
+    if !media_keys::is_safe_slug(&slug) {
+        return Err(AppError::InvalidSlug(slug));
+    }
+
+    let post = db::get::<PostModel>(conn.inner(), id).await?.ok_or(AppError::PostNotFound(id))?;
+    if post.slug == slug {
+        return Ok(post);
+    }
+
+    // Held across the check and the write. Without it the answer can go stale
+    // between them: a publish or a schedule starting after `refuse_rename` says
+    // yes would upload this post's objects under the old slug while the row
+    // moves to the new one, and nothing afterwards would notice. The editor's
+    // `enqueueWrite` does not help — it orders one component's calls, not the
+    // MCP server's or anything else's.
+    //
+    // The same lock `save`, `schedule_post` and `read_post_markdown` take around
+    // the moment a body and its row have to agree.
+    let _guard = lock_body_commits().await;
+
+    refuse_rename(conn.inner(), &post, &slug).await?;
+
+    let old = post.slug.clone();
+    let dir = app.path().app_data_dir().map_err(AppError::AppDataDir)?.join("posts");
+    let from = dir.join(format!("{old}.md"));
+    let to = dir.join(format!("{slug}.md"));
+
+    // The body moves first, and failing to move it refuses the rename.
+    //
+    // The other order loses text. `read_post_markdown` looks under the row's
+    // slug, and a post eligible to be renamed has never been pushed — so there
+    // is nothing in R2 to fall back to. A renamed row over a body still under
+    // the old name gives an editor with an empty document, and the next save
+    // writes that emptiness over the post. A refused rename costs an error
+    // message; this costs the text.
+    //
+    // `NotFound` is not a failure: a post that has never been opened on this
+    // machine has no cached body, and there is nothing to move.
+    let moved = match tokio::fs::rename(&from, &to).await {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(AppError::io("Failed to move the post's cached body", e)),
+    };
+
+    let renamed = match db::update::<PostModel>(
+        conn.inner(),
+        PostModel { slug: slug.clone(), updated_at: now_ts(), ..post },
+    )
+    .await
+    {
+        Ok(renamed) => renamed,
+        Err(e) => {
+            // Put the body back under the name the row still has, or the post is
+            // left in exactly the state the ordering above exists to prevent.
+            if moved {
+                if let Err(back) = tokio::fs::rename(&to, &from).await {
+                    log::error!(
+                        "Rename of post {id} failed and its body is stranded at `{slug}.md`: {back}"
+                    );
+                }
+            }
+            return Err(e);
+        }
+    };
+
+    Ok(renamed)
+}
+
 // ── Posts: local SQLite ─────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1713,5 +1848,115 @@ mod tag_sweep_tests {
             out.skipped.is_empty(),
             "a post that needed no edit was reported as one the edit could not be recorded for"
         );
+    }
+}
+
+/// Tests for the slug rename.
+///
+/// The value here is in the refusals. Renaming a draft is a column update;
+/// renaming something whose objects are already in R2 under the old name is the
+/// bug this exists to prevent, and each way a post can have got there is asked
+/// about separately.
+#[cfg(test)]
+mod rename_slug_tests {
+    use super::*;
+    use crate::db::connect_in_memory;
+    use crate::entities::{post, post_schedule};
+
+    fn a_post(slug: &str, published: bool) -> post::Model {
+        post::Model {
+            id: 0,
+            slug: slug.to_string(),
+            title: slug.to_string(),
+            excerpt: None,
+            tags: None,
+            published,
+            published_at: None,
+            series_id: None,
+            series_order: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The command's own guard, asked directly. Only the cached-body move is
+    /// left out, which needs an `AppHandle` — it is best effort and logged
+    /// either way, and nothing about it can refuse a rename.
+    async fn refusal_for(conn: &DatabaseConnection, id: i32, to: &str) -> Option<String> {
+        let post = db::get::<PostModel>(conn, id).await.unwrap().unwrap();
+        match refuse_rename(conn, &post, to).await {
+            Ok(()) => None,
+            Err(AppError::SlugFixedByPublication(_)) => Some("published".into()),
+            Err(AppError::SlugFixedBySchedule(_)) => Some("scheduled".into()),
+            Err(AppError::SlugTaken(_)) => Some("taken".into()),
+            Err(e) => Some(format!("unexpected: {e}")),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_draft_that_has_never_left_this_machine_may_be_renamed() {
+        let conn = connect_in_memory().await.unwrap();
+        let post = db::create::<post::Model>(&conn, a_post("typoo", false)).await.unwrap();
+        // Edited locally, never pushed — `synced_hash` stays `None`.
+        db::sync_set_local(&conn, post.id, "local".to_string()).await.unwrap();
+
+        assert_eq!(refusal_for(&conn, post.id, "typo").await, None);
+    }
+
+    #[tokio::test]
+    async fn a_published_post_is_refused() {
+        let conn = connect_in_memory().await.unwrap();
+        let post = db::create::<post::Model>(&conn, a_post("live", true)).await.unwrap();
+
+        assert_eq!(refusal_for(&conn, post.id, "different").await.as_deref(), Some("published"));
+    }
+
+    /// Scheduling uploads the body and images when the schedule is set, not when
+    /// the post goes live, so a scheduled post is in R2 already even though its
+    /// row still reads unpublished.
+    #[tokio::test]
+    async fn a_scheduled_post_is_refused_even_though_it_is_not_published() {
+        let conn = connect_in_memory().await.unwrap();
+        let post = db::create::<post::Model>(&conn, a_post("pending", false)).await.unwrap();
+        db::schedule_set(
+            &conn,
+            post_schedule::Model {
+                slug: "pending".to_string(),
+                publish_at: 100,
+                state: post_schedule::PENDING.to_string(),
+                error: None,
+                updated_at: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!db::get::<PostModel>(&conn, post.id).await.unwrap().unwrap().published);
+        assert_eq!(refusal_for(&conn, post.id, "different").await.as_deref(), Some("scheduled"));
+    }
+
+    /// Published once and taken down again: the row reads unpublished, and the
+    /// objects are still in R2 under the old slug.
+    #[tokio::test]
+    async fn a_post_that_was_pushed_and_unpublished_is_refused() {
+        let conn = connect_in_memory().await.unwrap();
+        let post = db::create::<post::Model>(&conn, a_post("was-live", false)).await.unwrap();
+        db::sync_agree(&conn, post.id, "pushed".to_string(), Some(100), 100).await.unwrap();
+
+        // Same refusal as a live post, and the same reason: its objects are in R2.
+        assert_eq!(refusal_for(&conn, post.id, "different").await.as_deref(), Some("published"));
+    }
+
+    /// The trash keeps its rows in the posts table, so its slugs are still
+    /// taken — a collision there would otherwise surface as a raw constraint
+    /// error from the update.
+    #[tokio::test]
+    async fn a_slug_held_by_a_trashed_post_is_refused() {
+        let conn = connect_in_memory().await.unwrap();
+        let draft = db::create::<post::Model>(&conn, a_post("draft", false)).await.unwrap();
+        let binned = db::create::<post::Model>(&conn, a_post("wanted", false)).await.unwrap();
+        db::trash_set(&conn, binned.id, 100).await.unwrap();
+
+        assert_eq!(refusal_for(&conn, draft.id, "wanted").await.as_deref(), Some("taken"));
     }
 }
