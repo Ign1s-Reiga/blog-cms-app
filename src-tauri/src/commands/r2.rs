@@ -610,6 +610,72 @@ pub(crate) async fn read_markdown(
     }
 }
 
+/// Something worth knowing before a post goes live.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PublishWarning {
+    /// The body points at a staged asset that is not on this machine. Publishing
+    /// does not fail on this — `read_staged_asset` skips what it cannot resolve,
+    /// deliberately, so one stale image cannot make a post unpublishable — but
+    /// the reference goes up untouched and readers get a dead link. The skip is
+    /// right; doing it without saying so is what this is for.
+    DeadAsset { reference: String },
+    /// No excerpt. It is the card text and the meta description, and a post
+    /// published without one is usually an oversight rather than a decision.
+    NoExcerpt,
+}
+
+/// Look over a post as it stands, before it is published.
+///
+/// Warnings, never refusals. The author knows things this does not, and a
+/// publish path that argues with them is worse than one that stays quiet — so
+/// this returns what it found and decides nothing. An empty list is the ordinary
+/// answer.
+///
+/// Local data only. Nothing here reaches the network: a check that is slow, or
+/// that fails for reasons having nothing to do with the post, is a check people
+/// learn to skip.
+///
+/// Deliberately not checking internal links. Telling a link to a post from a
+/// link to `/about` needs the blog's URL shape, and this app does not know it —
+/// `traffic.rs` says why, and attributes a path to a post by its last segment
+/// precisely because it cannot do better. Guessing here would warn about pages
+/// that are perfectly real, and a check that cries wolf costs more than no check.
+#[tauri::command]
+pub async fn check_post_before_publish(
+    app: tauri::AppHandle,
+    conn: State<'_, DatabaseConnection>,
+    id: i32,
+    body: String,
+) -> AppResult<Vec<PublishWarning>> {
+    let post = db::get::<PostModel>(conn.inner(), id)
+        .await?
+        .ok_or(AppError::PostNotFound(id))?;
+
+    let mut warnings = Vec::new();
+
+    if post.excerpt.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        warnings.push(PublishWarning::NoExcerpt);
+    }
+
+    // The body is passed in rather than read from the cache. The caller is about
+    // to publish *its* text, and the cache still holds whatever was last written
+    // — checking that would inspect a version nobody is publishing, and miss an
+    // image reference typed a moment ago.
+    let assets_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(AppError::AppDataDir)?
+        .join("assets");
+    for reference in extract_asset_refs(&body) {
+        if read_staged_asset(&assets_dir, &reference).await.is_none() {
+            warnings.push(PublishWarning::DeadAsset { reference });
+        }
+    }
+
+    Ok(warnings)
+}
+
 /// Save a post from the editor: persist its metadata + Markdown locally, and —
 /// when `published` — upload the body to R2 and upsert the metadata to D1.
 ///

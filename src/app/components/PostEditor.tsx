@@ -176,6 +176,9 @@ type LocalSaveState = { kind: 'idle' } | { kind: 'saving' } | { kind: 'saved' } 
 /// enough that ordinary typing is one write rather than one per word.
 const AUTOSAVE_DELAY_MS = 1500;
 
+/// Mirrors `PublishWarning` in `src-tauri/src/commands/r2.rs`.
+type PublishWarning = { kind: 'dead_asset'; reference: string } | { kind: 'no_excerpt' };
+
 /// Mirrors `ScheduleView` in `src-tauri/src/commands/r2.rs`.
 type Schedule = {
   slug: string;
@@ -252,6 +255,13 @@ export function PostEditor() {
   const [thumbnail, setThumbnail] = useState<string | null>(null);
   const [thumbnailBusy, setThumbnailBusy] = useState(false);
   const [thumbnailError, setThumbnailError] = useState<string | null>(null);
+  /// What a pre-publish check found, held while the author decides whether to go
+  /// ahead.
+  ///
+  /// Non-null means a publish was asked for and is waiting on an answer, not
+  /// that anything is wrong with the post — every one of these is a warning the
+  /// author is free to overrule.
+  const [publishWarnings, setPublishWarnings] = useState<PublishWarning[] | null>(null);
   /// The filing as it stands, for the save that gives a new post its id —
   /// there is nothing to write it to until then.
   const seriesRef = useRef<{ id: number | null; order: number | null }>({ id: null, order: null });
@@ -690,7 +700,7 @@ export function PostEditor() {
 
   // Save the post: `publish=false` keeps it a local draft; `publish=true` also
   // pushes the body to R2 and metadata to D1 (see the `save_post` command).
-  const handleSave = async (publish: boolean) => {
+  const handleSave = async (publish: boolean, checked = false) => {
     if (saveState.kind === 'saving') return;
     // Nothing may be written while the body is still on its way in: until the
     // load completes the editor holds a real title over an empty one, and saving
@@ -701,6 +711,34 @@ export function PostEditor() {
     if (loadingRef.current) return;
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
+
+    // Look the post over before it goes live, once. `checked` is the answer
+    // coming back from the panel below: the author has read what was found and
+    // said go ahead, and asking again from there would be an argument rather
+    // than a check.
+    //
+    // Only on publish, and only for a post that already exists — a first save
+    // has no id to check against, and it is the publish that cannot be taken
+    // back locally, not the save.
+    if (publish && !checked && postIdRef.current !== null) {
+      try {
+        const found = await invoke<PublishWarning[]>('check_post_before_publish', {
+          id: postIdRef.current,
+          // The editor's text, not what is on disk: this save is about to
+          // publish what is on screen.
+          body,
+        });
+        if (found.length > 0) {
+          setPublishWarnings(found);
+          return;
+        }
+      } catch {
+        // A check that cannot run is not a reason to stand between somebody and
+        // publishing their post. Nothing here is load-bearing.
+      }
+    }
+    setPublishWarnings(null);
+
     // Take the write from autosave: a pending debounce firing straight after
     // this would be a second write of text this one has already stored.
     if (autosaveTimer.current !== null) {
@@ -1413,6 +1451,48 @@ export function PostEditor() {
     </div>
   );
 
+  /// What the check found, and the way past it.
+  ///
+  /// Deliberately not a modal. Nothing here is an error, and a dialog demanding
+  /// to be dismissed would make a note read like a refusal — the author can go
+  /// on editing with this on screen, fix what they meant to fix, and press
+  /// Publish again.
+  const publishWarningsPanel = publishWarnings !== null && (
+    <div className='mx-4 mb-2 shrink-0 rounded-[6px] border border-amber-200 bg-amber-50/60 px-3 py-2 dark:border-amber-900/40 dark:bg-amber-950/20'>
+      <p className='text-[12px] font-medium text-amber-800 dark:text-amber-400'>Worth a look before this goes live</p>
+      <ul className='mt-1 space-y-[2px]'>
+        {publishWarnings.map((w, i) => (
+          <li key={i} className='text-[12px] leading-[1.6] text-amber-700 dark:text-amber-500'>
+            {w.kind === 'no_excerpt' ? (
+              <>No excerpt — it is the card text and the meta description.</>
+            ) : (
+              <>
+                <span className='font-mono'>{w.reference}</span> is not on this machine. It will publish as a dead link.
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+      <div className='mt-2 flex items-center gap-2'>
+        <Button
+          size='sm'
+          variant='ghost'
+          onClick={() => setPublishWarnings(null)}
+          className='h-[24px] px-2 rounded-[4px] text-[12px]'
+        >
+          Go back
+        </Button>
+        <Button
+          size='sm'
+          onClick={() => void handleSave(true, true)}
+          className='h-[24px] px-2 rounded-[4px] text-[12px] font-semibold'
+        >
+          Publish anyway
+        </Button>
+      </div>
+    </div>
+  );
+
   const divider = <Separator className='bg-zinc-100 dark:bg-white/[0.04] mx-4 mb-2 w-[calc(100%-2rem)]' />;
 
   const editor = (
@@ -1723,6 +1803,7 @@ export function PostEditor() {
             {tagsField}
             {seriesField}
             {thumbnailField}
+            {publishWarningsPanel}
           </div>
           {divider}
           <div className='flex-1 min-h-0 flex'>
@@ -1738,6 +1819,7 @@ export function PostEditor() {
           {tagsField}
           {seriesField}
           {thumbnailField}
+          {publishWarningsPanel}
           {divider}
           {mode === 'write' ? (
             editor
