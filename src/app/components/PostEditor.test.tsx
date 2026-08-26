@@ -1,4 +1,5 @@
-/// Tests for the editor's thumbnail control and its pre-publish check.
+/// Tests for the editor's thumbnail control, its pre-publish check, and its
+/// slug field.
 ///
 /// The command behind it shipped registered and unreachable, so the thing worth
 /// pinning is that it is reachable — and that the two states around it are
@@ -78,6 +79,8 @@ const backend = (over: Record<string, unknown> = {}) => {
         return null;
       case 'check_post_before_publish':
         return [];
+      case 'rename_post_slug':
+        return { slug: 'renamed' };
       case 'save_post':
         return { id: 7, slug: 'a-post', title: 'A post', published: true };
       default:
@@ -244,5 +247,91 @@ describe('the pre-publish check', () => {
 
     await waitFor(() => expect(calls('save_post').length).toBe(1));
     expect(screen.queryByText(/Worth a look/)).not.toBeInTheDocument();
+  });
+});
+
+/// The slug tests need a post whose slug is worth correcting; the fixture the
+/// others share is `a-post`.
+const slugPost = {
+  title: 'A post',
+  tags: '["rust"]',
+  slug: 'typoo',
+  published: false,
+  series_id: null,
+  series_order: null,
+};
+
+describe('the slug field', () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    openPost(7);
+  });
+
+  it('shows the post’s slug', async () => {
+    backend({ get_post: slugPost });
+    render(<PostEditor />);
+    expect(await screen.findByLabelText('Slug')).toHaveValue('typoo');
+  });
+
+  it('renames on blur, once', async () => {
+    backend({ get_post: slugPost, rename_post_slug: { slug: 'typo' } });
+    render(<PostEditor />);
+
+    const field = await screen.findByLabelText('Slug');
+    await waitFor(() => expect(field).toHaveValue('typoo'));
+    await userEvent.clear(field);
+    await userEvent.type(field, 'typo');
+    await userEvent.tab();
+
+    await waitFor(() => expect(calls('rename_post_slug')).toHaveLength(1));
+    expect(calls('rename_post_slug')[0][1]).toMatchObject({ id: 7, slug: 'typo' });
+    await waitFor(() => expect(field).toHaveValue('typo'));
+  });
+
+  /// Typing is not renaming. Every keystroke reaching the backend would rename
+  /// the post to each prefix of what was meant.
+  it('does not rename while the slug is being typed', async () => {
+    backend({ get_post: slugPost, rename_post_slug: { slug: 'typo' } });
+    render(<PostEditor />);
+
+    const field = await screen.findByLabelText('Slug');
+    await waitFor(() => expect(field).toHaveValue('typoo'));
+    await userEvent.clear(field);
+    await userEvent.type(field, 'typo');
+
+    expect(calls('rename_post_slug')).toHaveLength(0);
+  });
+
+  it('does not call the backend when the slug is unchanged', async () => {
+    backend({ get_post: slugPost });
+    render(<PostEditor />);
+
+    const field = await screen.findByLabelText('Slug');
+    await waitFor(() => expect(field).toHaveValue('typoo'));
+    await userEvent.click(field);
+    await userEvent.tab();
+
+    expect(calls('rename_post_slug')).toHaveLength(0);
+  });
+
+  /// How a published post is protected: the backend refuses and says why. The
+  /// box must go back to the slug the post actually has — leaving the refused
+  /// text there would show a slug that does not exist next to the reason it
+  /// cannot.
+  it('puts the real slug back when the rename is refused, and says why', async () => {
+    backend({
+      get_post: slugPost,
+      rename_post_slug: rejects('`typoo` has already been published, so its slug is what readers use.'),
+    });
+    render(<PostEditor />);
+
+    const field = await screen.findByLabelText('Slug');
+    await waitFor(() => expect(field).toHaveValue('typoo'));
+    await userEvent.clear(field);
+    await userEvent.type(field, 'something-else');
+    await userEvent.tab();
+
+    expect(await screen.findByText(/already been published/)).toBeInTheDocument();
+    await waitFor(() => expect(field).toHaveValue('typoo'));
   });
 });

@@ -148,6 +148,26 @@ pub enum AppError {
     #[error("Invalid post slug: {0}")]
     InvalidSlug(String),
 
+    /// The slug asked for belongs to another post. Unique in the table, and the
+    /// trash keeps its rows there, so a trashed post holds its slug too.
+    #[error("Another post already uses the slug `{0}`")]
+    SlugTaken(String),
+
+    /// The post's objects are already in R2 under its current slug, so changing
+    /// it here would leave the row and the bucket disagreeing — and strand every
+    /// link already pointing at it.
+    #[error(
+        "`{0}` has already been published, so its slug is what readers and its images are          filed under. Renaming a live post is not something this can do yet."
+    )]
+    SlugFixedByPublication(String),
+
+    /// Scheduling uploads the body and images when the schedule is set, not when
+    /// the post goes live, so a scheduled post is in R2 already.
+    #[error(
+        "`{0}` is scheduled, and scheduling has already uploaded it. Cancel the schedule to          rename it."
+    )]
+    SlugFixedBySchedule(String),
+
     /// The post's Markdown is not cached on this machine and there are no
     /// credentials to fetch it with — so its body is unknown, which is a
     /// different fact from it being empty.

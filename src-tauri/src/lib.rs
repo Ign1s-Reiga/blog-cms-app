@@ -93,6 +93,7 @@ pub fn run() {
             commands::cache_bodies,
             commands::list_tags,
             commands::rename_tag,
+            commands::rename_post_slug,
             commands::add_tag_to_posts,
             commands::remove_tag_from_posts,
             imaging::stage_image,

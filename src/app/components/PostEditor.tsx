@@ -262,6 +262,14 @@ export function PostEditor() {
   /// that anything is wrong with the post — every one of these is a warning the
   /// author is free to overrule.
   const [publishWarnings, setPublishWarnings] = useState<PublishWarning[] | null>(null);
+  /// The slug as it is being typed, and what the backend said if it refused.
+  ///
+  /// Editable only while nothing of the post has left this machine — the slug is
+  /// the key its body, thumbnail and images are filed under in R2, so once any
+  /// of that is up there, renaming here would leave the row and the bucket
+  /// disagreeing. The backend decides; this holds what it answered.
+  const [slugDraft, setSlugDraft] = useState('');
+  const [slugError, setSlugError] = useState<string | null>(null);
   /// The filing as it stands, for the save that gives a new post its id —
   /// there is nothing to write it to until then.
   const seriesRef = useRef<{ id: number | null; order: number | null }>({ id: null, order: null });
@@ -399,6 +407,7 @@ export function PostEditor() {
         // edits nobody made.
         persisted.current = { title: post.title, tags: parseTags(post.tags), body: md };
         setSlug(post.slug);
+        setSlugDraft(post.slug);
         loaded = true;
         const state = await readSyncState(invoke, id);
         if (keepGoing()) setSync(state);
@@ -776,6 +785,7 @@ export function PostEditor() {
       setPostId(saved.id);
       postIdRef.current = saved.id;
       setSlug(saved.slug);
+      setSlugDraft(saved.slug);
       // Point the URL at the saved post so a refresh / next save targets it.
       window.history.replaceState(null, '', `/posts/edit?id=${saved.id}`);
       // Re-read rather than assume: a publish that reached the cloud clears the
@@ -1318,6 +1328,31 @@ export function PostEditor() {
     }
   };
 
+  /// Write a new slug, on blur rather than per keystroke — every character typed
+  /// would otherwise be a rename, and `my-post` would pass through being `m`.
+  const applySlug = async () => {
+    const next = slugDraft.trim();
+    if (postIdRef.current === null || slug === null || next === slug || !isTauri()) return;
+    if (next === '') {
+      setSlugDraft(slug);
+      setSlugError(null);
+      return;
+    }
+    setSlugError(null);
+    try {
+      const renamed = await enqueueWrite(() =>
+        invoke<{ slug: string }>('rename_post_slug', { id: postIdRef.current, slug: next }),
+      );
+      setSlug(renamed.slug);
+      setSlugDraft(renamed.slug);
+    } catch (err) {
+      // Put back what the post actually has. Leaving the refused text in the box
+      // would show a slug the post does not have, next to the reason it cannot.
+      setSlugDraft(slug);
+      setSlugError(String(err));
+    }
+  };
+
   // ── Shared fields, composed differently per layout mode below ────────────────
 
   const titleField = (
@@ -1490,6 +1525,33 @@ export function PostEditor() {
           Publish anyway
         </Button>
       </div>
+    </div>
+  );
+
+  const slugField = slug !== null && (
+    <div className='flex items-center gap-2 px-4 pb-2 shrink-0'>
+      <Link2 size={11} strokeWidth={1.8} className='text-zinc-300 dark:text-zinc-700 shrink-0' />
+      <input
+        type='text'
+        aria-label='Slug'
+        value={slugDraft}
+        onChange={(e) => setSlugDraft(e.target.value)}
+        onBlur={() => void applySlug()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+          if (e.key === 'Escape') {
+            setSlugDraft(slug);
+            setSlugError(null);
+          }
+        }}
+        spellCheck={false}
+        className={[
+          'max-w-[280px] flex-1 text-[12px] font-medium',
+          'text-zinc-500 dark:text-zinc-500',
+          'bg-transparent border-none outline-none focus:ring-0',
+        ].join(' ')}
+      />
+      {slugError && <span className='truncate text-[11px] text-red-600 dark:text-red-400'>{slugError}</span>}
     </div>
   );
 
@@ -1804,6 +1866,7 @@ export function PostEditor() {
             {seriesField}
             {thumbnailField}
             {publishWarningsPanel}
+            {slugField}
           </div>
           {divider}
           <div className='flex-1 min-h-0 flex'>
@@ -1820,6 +1883,7 @@ export function PostEditor() {
           {seriesField}
           {thumbnailField}
           {publishWarningsPanel}
+          {slugField}
           {divider}
           {mode === 'write' ? (
             editor
