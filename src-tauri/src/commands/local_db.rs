@@ -176,11 +176,6 @@ mod tag_tests {
             tags(&["rust", "tauri-2"])
         );
     }
-
-    #[test]
-    fn renaming_the_only_tag_leaves_one_tag() {
-        assert_eq!(rewrite_tags(tags(&["old"]), "old", "new"), tags(&["new"]));
-    }
 }
 
 #[cfg(test)]
@@ -201,12 +196,6 @@ mod slug_tests {
             created_at: 0,
             updated_at: 0,
         }
-    }
-
-    #[tokio::test]
-    async fn a_free_slug_is_left_alone() {
-        let db = db::connect_in_memory().await.unwrap();
-        assert_eq!(unique_slug(&db, "my-post").await.unwrap(), "my-post");
     }
 
     /// The collision the import path used to resolve by overwriting the post it

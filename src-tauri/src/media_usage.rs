@@ -533,7 +533,7 @@ mod tests {
         let digest = "a".repeat(64);
         let known = library(&[&digest]);
         let found = published_digests(
-            &format!("https://cdn.example.com/posts/beef/{digest}.avif"),
+            &format!("https://cdn.example.com/posts/my-post/beef{digest}.avif"),
             &known,
         );
         assert!(found.contains(&digest), "the digest was missed next to a hex slug");
