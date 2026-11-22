@@ -395,4 +395,18 @@ describe('the excerpt field', () => {
 
     expect(field).toHaveValue('One line about it!');
   });
+
+  /// Enter is not the only way in. A pasted break is joined the way the save
+  /// joins it, so the field never shows two lines that will be stored as one.
+  it('joins a pasted line break, as it will be stored', async () => {
+    backend({ get_post: withExcerpt });
+    render(<PostEditor />);
+
+    const field = await screen.findByRole('textbox', { name: 'Excerpt' });
+    await waitFor(() => expect(field).toHaveValue('One line about it'));
+    await userEvent.clear(field);
+    await userEvent.paste('Line one \r\n  Line two');
+
+    expect(field).toHaveValue('Line one Line two');
+  });
 });
