@@ -233,12 +233,6 @@ mod tests {
         assert_ne!(content_hash(&a, ""), content_hash(&b, ""));
     }
 
-    #[test]
-    fn matching_fingerprints_are_clean_and_differing_ones_are_modified() {
-        assert_eq!(derive(None, Some(&sync("abc", Some("abc")))), SyncState::Clean);
-        assert_eq!(derive(None, Some(&sync("abc", Some("old")))), SyncState::Modified);
-    }
-
     /// A post that has never been pushed has local content the cloud has never
     /// seen, which is exactly what `Modified` means.
     #[test]

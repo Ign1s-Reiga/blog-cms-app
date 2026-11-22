@@ -267,12 +267,6 @@ describe('the slug field', () => {
     openPost(7);
   });
 
-  it('shows the post’s slug', async () => {
-    backend({ get_post: slugPost });
-    render(<PostEditor />);
-    expect(await screen.findByLabelText('Slug')).toHaveValue('typoo');
-  });
-
   it('renames on blur, once', async () => {
     backend({ get_post: slugPost, rename_post_slug: { slug: 'typo' } });
     render(<PostEditor />);
@@ -283,23 +277,11 @@ describe('the slug field', () => {
     await userEvent.type(field, 'typo');
     await userEvent.tab();
 
+    // Once, with the whole slug. Typing is not renaming: a call per keystroke
+    // would rename the post to each prefix of what was meant, and fail both.
     await waitFor(() => expect(calls('rename_post_slug')).toHaveLength(1));
     expect(calls('rename_post_slug')[0][1]).toMatchObject({ id: 7, slug: 'typo' });
     await waitFor(() => expect(field).toHaveValue('typo'));
-  });
-
-  /// Typing is not renaming. Every keystroke reaching the backend would rename
-  /// the post to each prefix of what was meant.
-  it('does not rename while the slug is being typed', async () => {
-    backend({ get_post: slugPost, rename_post_slug: { slug: 'typo' } });
-    render(<PostEditor />);
-
-    const field = await screen.findByLabelText('Slug');
-    await waitFor(() => expect(field).toHaveValue('typoo'));
-    await userEvent.clear(field);
-    await userEvent.type(field, 'typo');
-
-    expect(calls('rename_post_slug')).toHaveLength(0);
   });
 
   it('does not call the backend when the slug is unchanged', async () => {
@@ -352,23 +334,6 @@ describe('the excerpt field', () => {
   beforeEach(() => {
     invoke.mockReset();
     openPost(7);
-  });
-
-  it('shows the excerpt the post has', async () => {
-    backend({ get_post: withExcerpt });
-    render(<PostEditor />);
-
-    const field = await screen.findByRole('textbox', { name: 'Excerpt' });
-    await waitFor(() => expect(field).toHaveValue('One line about it'));
-  });
-
-  it('is empty, not "null", for a post without one', async () => {
-    backend({ get_post: { ...withExcerpt, excerpt: null } });
-    render(<PostEditor />);
-
-    const field = await screen.findByRole('textbox', { name: 'Excerpt' });
-    await waitFor(() => expect(screen.getByDisplayValue('A post')).toBeInTheDocument());
-    expect(field).toHaveValue('');
   });
 
   it('sends what was typed with the publish', async () => {

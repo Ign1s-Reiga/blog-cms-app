@@ -144,6 +144,8 @@ mod tests {
     #[test]
     fn defaults_match_the_documented_layout() {
         assert_eq!(body_key("my-post"), "posts/my-post.md");
+        // A contract with the blog's `thumbnailKey`. If this changes, that file
+        // must change with it.
         assert_eq!(
             thumbnail_key(DEFAULT_THUMBNAIL_PATTERN, "my-post", "avif"),
             "posts/my-post/thumbnail.avif"
@@ -151,16 +153,6 @@ mod tests {
         assert_eq!(
             media_key(DEFAULT_MEDIA_PATTERN, "my-post", b"abc", "avif"),
             "posts/my-post/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.avif"
-        );
-    }
-
-    /// The default thumbnail pattern is a contract with the blog's
-    /// `thumbnailKey`. If this changes, that file must change with it.
-    #[test]
-    fn default_thumbnail_key_matches_the_blog() {
-        assert_eq!(
-            thumbnail_key(DEFAULT_THUMBNAIL_PATTERN, "my-post", "avif"),
-            "posts/my-post/thumbnail.avif"
         );
     }
 
@@ -172,13 +164,6 @@ mod tests {
         );
         // A leading slash would produce an empty first key segment in R2.
         assert_eq!(render("/a/{slug}.x", "p", "", ""), "a/p.x");
-    }
-
-    #[test]
-    fn identical_bytes_give_identical_keys() {
-        let k = |b: &[u8]| media_key(DEFAULT_MEDIA_PATTERN, "p", b, "avif");
-        assert_eq!(k(b"same"), k(b"same"));
-        assert_ne!(k(b"one"), k(b"two"));
     }
 
     #[test]

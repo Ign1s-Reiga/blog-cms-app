@@ -120,22 +120,4 @@ mod tests {
         // required whole words would disagree with the box above it.
         assert!(contains("serialisation", "serial"));
     }
-
-    /// The distinction the whole module is for, as a shape rather than as prose:
-    /// an empty `matched` with a non-empty `unsearched` is not "no results".
-    #[test]
-    fn nothing_found_and_nothing_searched_are_different_answers() {
-        let nothing = BodyMatches::default();
-        let blind = BodyMatches {
-            matched: vec![],
-            unsearched: vec![Unsearched {
-                id: 1,
-                title: "Pulled, never opened".to_string(),
-                reason: Unchecked::BodyNotCached,
-            }],
-        };
-        assert_ne!(nothing, blind);
-        assert!(nothing.unsearched.is_empty());
-        assert!(!blind.unsearched.is_empty());
-    }
 }

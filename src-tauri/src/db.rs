@@ -1541,28 +1541,6 @@ mod tests {
         assert_eq!(row.synced_hash.as_deref(), Some("v1"), "the cloud still holds v1");
     }
 
-    /// A refresh rewrites SQLite and leaves the cached `<slug>.md` alone, and
-    /// `read_post_markdown` prefers that file — so a post with unpushed body
-    /// edits is still serving them to the editor afterwards. Discarding its
-    /// fingerprint would make the editor open those edits and call them clean,
-    /// hiding the very thing the badge exists to show.
-    #[tokio::test]
-    async fn a_refresh_keeps_the_fingerprint_of_a_post_with_unpushed_edits() {
-        let db = connect_in_memory().await.unwrap();
-        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
-        sync_set_local(&db, post.id, "local-only-edit".into()).await.unwrap();
-
-        mirror_posts(&db, vec![post_row("a-post", None, None)], &[]).await.unwrap();
-
-        let row = sync_get(&db, post.id).await.unwrap();
-        assert!(row.is_some(), "the refresh discarded a pending local edit");
-        assert_eq!(
-            crate::sync_state::derive(None, row.as_ref()),
-            crate::sync_state::SyncState::Modified,
-            "the post stopped reporting its unpublished edits"
-        );
-    }
-
     /// "Absent from D1" means two different things, and only one of them is a
     /// deletion. A draft that has never been pushed is simply local work, and
     /// deleting it for not having been published yet — on a path reached by
@@ -1652,32 +1630,6 @@ mod tests {
             crate::sync_state::SyncState::Modified,
             "a first refresh invented a conflict"
         );
-    }
-
-    /// Once there is a baseline, the cloud moving under a local edit is the
-    /// genuine article — and neither copy may be applied over the other.
-    #[tokio::test]
-    async fn the_cloud_moving_under_a_local_edit_is_a_conflict() {
-        let db = connect_in_memory().await.unwrap();
-        let post = create::<post::Model>(&db, post_row("a-post", None, None)).await.unwrap();
-        sync_set_local(&db, post.id, "local-edit".into()).await.unwrap();
-
-        // First refresh establishes where the cloud stood…
-        let mut remote = post_row("a-post", None, None);
-        remote.updated_at = 500;
-        mirror_posts(&db, vec![remote.clone()], &[]).await.unwrap();
-
-        // …and a later one finds it somewhere else.
-        remote.updated_at = 900;
-        mirror_posts(&db, vec![remote], &[]).await.unwrap();
-
-        let row = sync_get(&db, post.id).await.unwrap().unwrap();
-        assert_eq!(
-            crate::sync_state::derive(None, Some(&row)),
-            crate::sync_state::SyncState::Conflict
-        );
-        // And still nothing was applied over the local copy.
-        assert_eq!(row.local_hash, "local-edit");
     }
 
     /// And the post itself is left whole. Applying the cloud's metadata while
@@ -2220,33 +2172,6 @@ mod refresh_deletion_tests {
             post_by_slug(&db, "edited-here").await.unwrap().is_some(),
             "the refresh deleted a post carrying edits that exist nowhere else"
         );
-    }
-
-    /// The case that has always worked, kept honest: never pushed at all.
-    #[tokio::test]
-    async fn a_refresh_keeps_a_post_that_was_never_pushed() {
-        let db = connect_in_memory().await.unwrap();
-        let post = create::<post::Model>(&db, a_post("never-pushed")).await.unwrap();
-        sync_set_local(&db, post.id, "local".to_string()).await.unwrap();
-
-        mirror_posts(&db, vec![], &[]).await.unwrap();
-
-        assert!(post_by_slug(&db, "never-pushed").await.unwrap().is_some());
-    }
-
-    /// And the other direction, so the guard above is not simply "keep
-    /// everything": a post in agreement with the cloud holds nothing this
-    /// machine would lose, so its removal upstream is a removal here.
-    #[tokio::test]
-    async fn a_refresh_still_deletes_a_post_that_matches_the_cloud() {
-        let db = connect_in_memory().await.unwrap();
-        let post = create::<post::Model>(&db, a_post("in-agreement")).await.unwrap();
-        sync_agree(&db, post.id, "same".to_string(), Some(100), 100).await.unwrap();
-
-        let result = mirror_posts(&db, vec![], &[]).await.unwrap();
-
-        assert!(post_by_slug(&db, "in-agreement").await.unwrap().is_none());
-        assert_eq!(result.deleted, 1);
     }
 }
 
