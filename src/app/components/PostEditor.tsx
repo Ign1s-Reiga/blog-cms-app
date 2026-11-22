@@ -748,7 +748,8 @@ export function PostEditor() {
         const found = await invoke<PublishWarning[]>('check_post_before_publish', {
           id: postIdRef.current,
           // The editor's text, not what is on disk: this save is about to
-          // publish what is on screen.
+          // publish what is on screen, and autosave may not have caught up.
+          excerpt,
           body,
         });
         if (found.length > 0) {
@@ -1389,12 +1390,20 @@ export function PostEditor() {
   /// The card text and meta description. A textarea that sizes to its content:
   /// usually one line, but a sentence that runs long should wrap where it can be
   /// read rather than scroll out of sight inside a single-line input.
+  ///
+  /// Enter does not break the line. The excerpt is stored as one line, so a
+  /// break typed here would be on screen and then gone once saved. An Enter
+  /// that is confirming an IME composition is left alone — blocking it would
+  /// make the field unusable in Japanese, Chinese and Korean.
   const excerptField = (
     <textarea
       aria-label='Excerpt'
       rows={1}
       value={excerpt}
       onChange={(e) => setExcerpt(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && !e.nativeEvent.isComposing) e.preventDefault();
+      }}
       placeholder='Excerpt — the card text and meta description'
       className={[
         'w-full px-4 pt-1 pb-1 resize-none field-sizing-content',

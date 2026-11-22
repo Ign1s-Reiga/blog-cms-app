@@ -367,4 +367,32 @@ describe('the excerpt field', () => {
     await waitFor(() => expect(calls('autosave_post').length).toBe(1), { timeout: 4000 });
     expect(calls('autosave_post')[0][1]).toMatchObject({ excerpt: 'One line about it!' });
   });
+
+  /// Publishing within autosave's delay is the ordinary case, so the check has
+  /// to judge the excerpt on screen. Judging the stored one warned about an
+  /// excerpt just typed, and said nothing about one just cleared.
+  it('is checked as it is on screen, not as it was last saved', async () => {
+    backend({ get_post: { ...withExcerpt, excerpt: null } });
+    render(<PostEditor />);
+
+    const field = await screen.findByRole('textbox', { name: 'Excerpt' });
+    await waitFor(() => expect(screen.getByDisplayValue('A post')).toBeInTheDocument());
+    await userEvent.type(field, 'Written at last');
+    await publish();
+
+    await waitFor(() => expect(calls('check_post_before_publish').length).toBe(1));
+    expect(calls('check_post_before_publish')[0][1]).toMatchObject({ excerpt: 'Written at last' });
+  });
+
+  /// One line, as it will be stored.
+  it('does not take a line break from Enter', async () => {
+    backend({ get_post: withExcerpt });
+    render(<PostEditor />);
+
+    const field = await screen.findByRole('textbox', { name: 'Excerpt' });
+    await waitFor(() => expect(field).toHaveValue('One line about it'));
+    await userEvent.type(field, '{Enter}!');
+
+    expect(field).toHaveValue('One line about it!');
+  });
 });
