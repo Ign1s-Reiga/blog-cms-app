@@ -214,10 +214,16 @@ function localInputValue(date: Date): string {
 }
 
 /// The editor's content, as compared against what is already stored.
-type Content = { title: string; tags: string; body: string };
+///
+/// The excerpt is in here, not beside the series and thumbnail: it is part of
+/// `content_hash`, so editing it is an edit to the post and goes through the
+/// same autosave and Save as the text.
+type Content = { title: string; excerpt: string; tags: string; body: string };
+
+const EMPTY_CONTENT: Content = { title: '', excerpt: '', tags: '', body: '' };
 
 function sameContent(a: Content, b: Content): boolean {
-  return a.title === b.title && a.tags === b.tags && a.body === b.body;
+  return a.title === b.title && a.excerpt === b.excerpt && a.tags === b.tags && a.body === b.body;
 }
 
 // ─── PostEditor ───────────────────────────────────────────────────────────────
@@ -228,6 +234,7 @@ type SeriesOption = { id: number; title: string };
 
 export function PostEditor() {
   const [title, setTitle] = useState('');
+  const [excerpt, setExcerpt] = useState('');
   const [tags, setTags] = useState('');
   const [body, setBody] = useState('');
 
@@ -284,9 +291,9 @@ export function PostEditor() {
 
   /// The content last known to be on disk. Autosave compares against this, so
   /// typing a character and deleting it again writes nothing.
-  const persisted = useRef<Content>({ title: '', tags: '', body: '' });
+  const persisted = useRef<Content>(EMPTY_CONTENT);
   /// The content as it is right now.
-  const latest = useRef<Content>({ title: '', tags: '', body: '' });
+  const latest = useRef<Content>(EMPTY_CONTENT);
   /// The post id as it is right now — a new post gains one mid-session, and the
   /// unmount flush has to write to it rather than create a second post.
   const postIdRef = useRef<number | null>(null);
@@ -385,6 +392,7 @@ export function PostEditor() {
       try {
         const post = await invoke<{
           title: string;
+          excerpt: string | null;
           tags: string | null;
           slug: string;
           published: boolean;
@@ -393,6 +401,7 @@ export function PostEditor() {
         } | null>('get_post', { id });
         if (!post || !keepGoing()) return;
         setTitle(post.title);
+        setExcerpt(post.excerpt ?? '');
         setTags(parseTags(post.tags));
         setLive(post.published);
         setSeriesId(post.series_id);
@@ -405,7 +414,12 @@ export function PostEditor() {
         // do until something changes. Without this, opening a post would write
         // it straight back — and, for a published post, report unpublished
         // edits nobody made.
-        persisted.current = { title: post.title, tags: parseTags(post.tags), body: md };
+        persisted.current = {
+          title: post.title,
+          excerpt: post.excerpt ?? '',
+          tags: parseTags(post.tags),
+          body: md,
+        };
         setSlug(post.slug);
         setSlugDraft(post.slug);
         loaded = true;
@@ -598,8 +612,8 @@ export function PostEditor() {
   // The values the flush reads. Kept in refs because it can run from a timer or
   // from the editor closing, neither of which renders first.
   useEffect(() => {
-    latest.current = { title, tags, body };
-  }, [title, tags, body]);
+    latest.current = { title, excerpt, tags, body };
+  }, [title, excerpt, tags, body]);
 
   useEffect(() => {
     postIdRef.current = postId;
@@ -615,7 +629,7 @@ export function PostEditor() {
     // re-runs this once the load is done, so an edit made during it is not
     // forgotten either.
     if (loadingRef.current) return;
-    if (sameContent({ title, tags, body }, persisted.current)) return;
+    if (sameContent({ title, excerpt, tags, body }, persisted.current)) return;
     // "Saved locally" was about the previous content, and this content is not
     // on disk yet — least of all during continuous typing, where the message
     // would otherwise stand unchanged for as long as somebody keeps writing,
@@ -630,7 +644,7 @@ export function PostEditor() {
       clearTimeout(timer);
       if (autosaveTimer.current === timer) autosaveTimer.current = null;
     };
-  }, [title, tags, body, loadEpoch, persistLocally]);
+  }, [title, excerpt, tags, body, loadEpoch, persistLocally]);
 
   // Leaving the editor with a debounce still pending would lose whatever was
   // typed in the last second and a half. Both exits are covered: navigating
@@ -760,7 +774,7 @@ export function PostEditor() {
       // What is being saved, captured before the await so the baseline recorded
       // below is the text that actually went to disk rather than whatever has
       // been typed since.
-      const content: Content = { title, tags, body };
+      const content: Content = { title, excerpt, tags, body };
       // Behind any autosave already in flight, and — through the ref rather
       // than the state — aimed at the post autosave may have just created.
       // Reading the state here would send `id: null` for a post that exists,
@@ -1372,6 +1386,27 @@ export function PostEditor() {
     />
   );
 
+  /// The card text and meta description. A textarea that sizes to its content:
+  /// usually one line, but a sentence that runs long should wrap where it can be
+  /// read rather than scroll out of sight inside a single-line input.
+  const excerptField = (
+    <textarea
+      aria-label='Excerpt'
+      rows={1}
+      value={excerpt}
+      onChange={(e) => setExcerpt(e.target.value)}
+      placeholder='Excerpt — the card text and meta description'
+      className={[
+        'w-full px-4 pt-1 pb-1 resize-none field-sizing-content',
+        'text-[14px] leading-relaxed',
+        'text-zinc-600 dark:text-zinc-400',
+        'placeholder:text-zinc-300 dark:placeholder:text-zinc-700',
+        'bg-transparent border-none outline-none focus:ring-0',
+        'shrink-0',
+      ].join(' ')}
+    />
+  );
+
   const tagsField = (
     <div className='flex items-center gap-2 px-4 py-2 shrink-0'>
       <Tag size={11} strokeWidth={1.8} className='text-zinc-300 dark:text-zinc-700 shrink-0' />
@@ -1862,6 +1897,7 @@ export function PostEditor() {
         <div className='flex-1 min-h-0 flex flex-col w-full'>
           <div className='shrink-0 w-full'>
             {titleField}
+            {excerptField}
             {tagsField}
             {seriesField}
             {thumbnailField}
@@ -1879,6 +1915,7 @@ export function PostEditor() {
       ) : (
         <div className='flex-1 min-h-0 flex flex-col max-w-[760px] w-full mx-auto px-2'>
           {titleField}
+          {excerptField}
           {tagsField}
           {seriesField}
           {thumbnailField}

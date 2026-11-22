@@ -335,3 +335,71 @@ describe('the slug field', () => {
     await waitFor(() => expect(field).toHaveValue('typoo'));
   });
 });
+
+/// The publish check has warned about a missing excerpt since #146, and until
+/// this field there was nowhere to write one.
+describe('the excerpt field', () => {
+  const withExcerpt = {
+    title: 'A post',
+    excerpt: 'One line about it',
+    tags: '["rust"]',
+    slug: 'a-post',
+    published: true,
+    series_id: null,
+    series_order: null,
+  };
+
+  beforeEach(() => {
+    invoke.mockReset();
+    openPost(7);
+  });
+
+  it('shows the excerpt the post has', async () => {
+    backend({ get_post: withExcerpt });
+    render(<PostEditor />);
+
+    const field = await screen.findByRole('textbox', { name: 'Excerpt' });
+    await waitFor(() => expect(field).toHaveValue('One line about it'));
+  });
+
+  it('is empty, not "null", for a post without one', async () => {
+    backend({ get_post: { ...withExcerpt, excerpt: null } });
+    render(<PostEditor />);
+
+    const field = await screen.findByRole('textbox', { name: 'Excerpt' });
+    await waitFor(() => expect(screen.getByDisplayValue('A post')).toBeInTheDocument());
+    expect(field).toHaveValue('');
+  });
+
+  it('sends what was typed with the publish', async () => {
+    backend({ get_post: { ...withExcerpt, excerpt: null } });
+    render(<PostEditor />);
+
+    const field = await screen.findByRole('textbox', { name: 'Excerpt' });
+    await waitFor(() => expect(screen.getByDisplayValue('A post')).toBeInTheDocument());
+    await userEvent.type(field, 'Written at last');
+    await publish();
+
+    await waitFor(() => expect(calls('save_post').length).toBe(1));
+    expect(calls('save_post')[0][1]).toMatchObject({ excerpt: 'Written at last' });
+  });
+
+  /// Both halves of the baseline. If the excerpt loaded on screen but not into
+  /// what autosave compares against, opening a live post with an excerpt would
+  /// write it straight back and report unpublished edits nobody made. And if it
+  /// were left out of the comparison altogether, editing only the excerpt would
+  /// never be saved.
+  it('is not written back on open, and is autosaved once edited', { timeout: 10_000 }, async () => {
+    backend({ get_post: withExcerpt });
+    render(<PostEditor />);
+
+    const field = await screen.findByRole('textbox', { name: 'Excerpt' });
+    await waitFor(() => expect(field).toHaveValue('One line about it'));
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    expect(calls('autosave_post')).toHaveLength(0);
+
+    await userEvent.type(field, '!');
+    await waitFor(() => expect(calls('autosave_post').length).toBe(1), { timeout: 4000 });
+    expect(calls('autosave_post')[0][1]).toMatchObject({ excerpt: 'One line about it!' });
+  });
+});

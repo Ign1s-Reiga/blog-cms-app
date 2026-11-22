@@ -680,10 +680,16 @@ pub async fn check_post_before_publish(
 /// when `published` — upload the body to R2 and upsert the metadata to D1.
 ///
 /// A new post (`id` is `None`) is created and its generated row is returned; an
-/// existing post is updated in place, preserving its slug, created date, excerpt
-/// and series membership. `tags` is a comma-separated string. A publish that
+/// existing post is updated in place, preserving its slug, created date and
+/// series membership. `tags` is a comma-separated string. A publish that
 /// can't reach the cloud leaves the post saved locally and staged `sync_failed`,
 /// returning an error.
+///
+/// `excerpt` is optional where the title and tags are not, because this command
+/// has callers besides the editor. The editor always sends one, and a blank one
+/// clears it. The MCP server's approved publish sends none, and the row's is
+/// kept: it reads the row and then the body, and an excerpt carried across that
+/// gap could revert an edit made during it — #125, for one more column.
 ///
 /// `published` asks for this save to *publish*; it is not a statement about
 /// whether the post is live. A live post saved with `published: false` stays
@@ -701,12 +707,14 @@ pub async fn save_post(
     id: Option<i32>,
     title: String,
     tags: String,
+    excerpt: Option<String>,
     body: String,
     published: bool,
     series: Option<NewPostSeries>,
 ) -> AppResult<PostModel> {
     let origin = if published { post_revision::PUBLISH } else { post_revision::SAVE };
-    save(&app, conn.inner(), id, Some(title), Some(tags), body, published, origin, series).await
+    let fields = EditorFields { title: Some(title), tags: Some(tags), excerpt };
+    save(&app, conn.inner(), id, fields, body, published, origin, series).await
 }
 
 /// Publish a post the library already holds, exactly as it is stored.
@@ -750,7 +758,22 @@ pub async fn publish_stored_post(
     // anything is published rather than after.
     let body = read_markdown(&app, conn.inner(), post.slug.clone()).await?;
 
-    save(&app, conn.inner(), Some(id), None, None, body, true, post_revision::PUBLISH, None).await
+    save(&app, conn.inner(), Some(id), EditorFields::default(), body, true, post_revision::PUBLISH, None).await
+}
+
+/// The fields the editor shows the author and sends back with its text.
+///
+/// Each is `None` for a save that is not carrying an edit to it — a publish of
+/// what is already stored — and `save` then keeps what the row holds. Grouped
+/// because they share that rule: an excerpt added as one more positional
+/// `Option<String>` beside two others is a transposition waiting to happen.
+#[derive(Debug, Default)]
+pub(crate) struct EditorFields {
+    pub title: Option<String>,
+    /// Comma-separated, as typed.
+    pub tags: Option<String>,
+    /// Blank clears it.
+    pub excerpt: Option<String>,
 }
 
 /// The series a **brand-new** post is being filed into, carried by the save
@@ -778,6 +801,8 @@ pub struct NewPostSeries {
 /// snapshots coalesce — see [`crate::revisions::AUTOSAVE_COALESCE_SECS`]. A
 /// flush every couple of seconds recorded as an ordinary save would push the
 /// version somebody actually wants out of a fifty-row history within the hour.
+// The IPC contract again — see `save_post`.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn autosave_post(
     app: tauri::AppHandle,
@@ -785,11 +810,12 @@ pub async fn autosave_post(
     id: Option<i32>,
     title: String,
     tags: String,
+    excerpt: String,
     body: String,
     series: Option<NewPostSeries>,
 ) -> AppResult<PostModel> {
-    save(&app, conn.inner(), id, Some(title), Some(tags), body, false, post_revision::AUTOSAVE, series)
-        .await
+    let fields = EditorFields { title: Some(title), tags: Some(tags), excerpt: Some(excerpt) };
+    save(&app, conn.inner(), id, fields, body, false, post_revision::AUTOSAVE, series).await
 }
 
 /// What a save needs besides the database: somewhere to put the body, a place to
@@ -848,7 +874,7 @@ impl SaveEnv for tauri::AppHandle {
 /// The save itself, shared by the editor's Save/Publish buttons and its
 /// autosave. `origin` is the history entry this save's snapshot is filed under.
 ///
-/// `title` and `tags` are `None` for a save that is not carrying an edit to
+/// The [`EditorFields`] are `None` for a save that is not carrying an edit to
 /// them — a publish of what is already stored. They are then taken from the row
 /// this function reads for itself, which is the only way to be sure they are
 /// the current ones: a caller reading them beforehand has to hold them across
@@ -860,16 +886,16 @@ async fn save(
     env: &impl SaveEnv,
     conn: &DatabaseConnection,
     id: Option<i32>,
-    title: Option<String>,
-    tags: Option<String>,
+    fields: EditorFields,
     body: String,
     published: bool,
     origin: &'static str,
     series: Option<NewPostSeries>,
 ) -> AppResult<PostModel> {
     let now = now_ts();
+    let EditorFields { title, tags, excerpt } = fields;
 
-    // Start from the existing row (preserving slug/created_at/series/excerpt) or
+    // Start from the existing row (preserving slug/created_at/series) or
     // build a fresh one for a new post. The untouched row is kept: it is what
     // `restore_metadata` writes back if the body cannot be moved into place.
     let previous = match id {
@@ -940,6 +966,14 @@ async fn save(
     }
     if let Some(tags) = tags {
         model.tags = Some(tags_to_json(&tags));
+    }
+    // Trimmed, and nothing at all when nothing is left. The excerpt is the card
+    // text and the meta description, so a stray newline from the field would
+    // travel to both — and a whitespace-only one would pass for an excerpt
+    // everywhere except `check_post_before_publish`, which trims before asking.
+    if let Some(excerpt) = excerpt {
+        let excerpt = excerpt.trim();
+        model.excerpt = (!excerpt.is_empty()).then(|| excerpt.to_string());
     }
     // Saving locally never takes a live post off the blog. `published` describes
     // the *cloud's* copy, which a local save does not touch — the old version
@@ -2312,21 +2346,24 @@ mod save_tests {
     /// back, and `save` writes every column — so a title or tag set changed
     /// since the list last loaded was reverted, and published. The fix was
     /// `None` meaning "keep what the row has"; this is what holds it to that.
+    ///
+    /// The excerpt is held to it too. Before the editor could set one, `save`
+    /// never wrote the column at all, so nothing could revert it; now that a
+    /// save can, a publish of what is stored must still leave it alone.
     #[tokio::test(flavor = "multi_thread")]
-    async fn none_keeps_the_title_and_tags_the_row_already_has() {
+    async fn none_keeps_the_title_tags_and_excerpt_the_row_already_has() {
         let conn = connect_in_memory().await.unwrap();
         let dir = TempDir::new();
         let env = FakeEnv::in_dir(&dir);
-        let post = db::create::<post::Model>(&conn, a_post("post", "Stored title", &["rust"]))
-            .await
-            .unwrap();
+        let mut stored = a_post("post", "Stored title", &["rust"]);
+        stored.excerpt = Some("Stored excerpt".to_string());
+        let post = db::create::<post::Model>(&conn, stored).await.unwrap();
 
         let saved = save(
             &env,
             &conn,
             Some(post.id),
-            None,
-            None,
+            EditorFields::default(),
             "# Body\n".to_string(),
             false,
             post_revision::SAVE,
@@ -2341,12 +2378,17 @@ mod save_tests {
         let reread = db::get::<PostModel>(&conn, post.id).await.unwrap().unwrap();
         assert_eq!(reread.title, "Stored title", "the stored title was overwritten by a save that carried none");
         assert_eq!(tags_of(&reread), vec!["rust".to_string()]);
+        assert_eq!(
+            reread.excerpt.as_deref(),
+            Some("Stored excerpt"),
+            "the stored excerpt was overwritten by a save that carried none"
+        );
     }
 
     /// The other direction, so the `Option` is pinned both ways and the editor's
     /// own Save cannot be quietly turned into a no-op later.
     #[tokio::test(flavor = "multi_thread")]
-    async fn some_overwrites_the_title_and_tags() {
+    async fn some_overwrites_the_title_tags_and_excerpt() {
         let conn = connect_in_memory().await.unwrap();
         let dir = TempDir::new();
         let env = FakeEnv::in_dir(&dir);
@@ -2358,8 +2400,11 @@ mod save_tests {
             &env,
             &conn,
             Some(post.id),
-            Some("Edited title".to_string()),
-            Some("rust, tauri".to_string()),
+            EditorFields {
+                title: Some("Edited title".to_string()),
+                tags: Some("rust, tauri".to_string()),
+                excerpt: Some("Edited excerpt".to_string()),
+            },
             "# Body\n".to_string(),
             false,
             post_revision::SAVE,
@@ -2370,9 +2415,53 @@ mod save_tests {
 
         assert_eq!(saved.title, "Edited title");
         assert_eq!(tags_of(&saved), vec!["rust".to_string(), "tauri".to_string()]);
+        assert_eq!(saved.excerpt.as_deref(), Some("Edited excerpt"));
     }
 
-    /// The short-circuit the two tests above depend on: a save that is not
+    /// Emptying the field is how an excerpt is removed, and it must come out as
+    /// no excerpt rather than an empty one. Whitespace counts as empty, and is
+    /// trimmed from anything else: the text goes into a meta description.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_blank_excerpt_clears_it_and_the_rest_are_trimmed() {
+        let conn = connect_in_memory().await.unwrap();
+        let dir = TempDir::new();
+        let env = FakeEnv::in_dir(&dir);
+        let mut stored = a_post("post", "Stored title", &[]);
+        stored.excerpt = Some("Stored excerpt".to_string());
+        let post = db::create::<post::Model>(&conn, stored).await.unwrap();
+
+        let with = |excerpt: &str| EditorFields { excerpt: Some(excerpt.to_string()), ..EditorFields::default() };
+
+        let saved = save(
+            &env,
+            &conn,
+            Some(post.id),
+            with(" \n "),
+            "# Body\n".to_string(),
+            false,
+            post_revision::SAVE,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.excerpt, None);
+
+        let saved = save(
+            &env,
+            &conn,
+            Some(post.id),
+            with("  One line about it\n"),
+            "# Body\n".to_string(),
+            false,
+            post_revision::SAVE,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.excerpt.as_deref(), Some("One line about it"));
+    }
+
+    /// The short-circuit the tests above depend on: a save that is not
     /// publishing must not reach the cloud. If this ever fails, the tests here
     /// are quietly exercising a fake of R2 and D1 rather than avoiding them.
     #[tokio::test(flavor = "multi_thread")]
@@ -2384,7 +2473,8 @@ mod save_tests {
             .await
             .unwrap();
 
-        save(&env, &conn, Some(post.id), None, None, "# Body\n".to_string(), false, post_revision::SAVE, None)
+        let fields = EditorFields::default();
+        save(&env, &conn, Some(post.id), fields, "# Body\n".to_string(), false, post_revision::SAVE, None)
             .await
             .unwrap();
 
@@ -2404,8 +2494,7 @@ mod save_tests {
             &env,
             &conn,
             Some(post.id),
-            None,
-            None,
+            EditorFields::default(),
             "# Written\n".to_string(),
             false,
             post_revision::SAVE,

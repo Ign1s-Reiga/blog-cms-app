@@ -307,6 +307,8 @@ impl BlogMcp {
             None,
             title,
             tags_to_csv(&params.tags),
+            // No excerpt: the tool takes none, and a new post starts without one.
+            None,
             params.body,
             false,
             // An agent's draft is filed by a person afterwards, from the editor
