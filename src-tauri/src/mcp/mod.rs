@@ -467,6 +467,10 @@ pub async fn mcp_approve_publish(
             Some(post.id),
             post.title,
             tags,
+            // Left as the row has it. This request has nothing to say about the
+            // excerpt, and `post` was read before the body fetch above, so
+            // sending its copy back would revert an edit made in between.
+            None,
             body,
             true,
             // Only read when a save creates the post. This one always names an

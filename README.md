@@ -20,6 +20,8 @@ served.
 
 - **Markdown editor** with a live split preview, formatting toolbar, list continuation, tab
   indentation, and drag-and-drop images.
+- **Excerpt** under the title — the card text and meta description. It is part of the post like
+  the title is, so it is autosaved, versioned and published with the rest.
 - **Autosave** to this machine while you type. It saves the body only and carries no publish flag,
   so no timer can push anything live.
 - **Revision history** — every edit snapshots the previous version first, and any snapshot can be
