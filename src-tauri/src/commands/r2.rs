@@ -625,6 +625,18 @@ pub enum PublishWarning {
     NoExcerpt,
 }
 
+/// An excerpt as it is stored: one line, single-spaced, and nothing at all when
+/// nothing is left.
+///
+/// It is the card text and the meta description, and neither has a use for a
+/// line break — one pasted into the field would travel to both. Trimming only
+/// the ends left those inside. A whitespace-only excerpt is no excerpt, so it
+/// cannot pass for one anywhere.
+fn normalize_excerpt(excerpt: &str) -> Option<String> {
+    let excerpt = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!excerpt.is_empty()).then_some(excerpt)
+}
+
 /// Look over a post as it stands, before it is published.
 ///
 /// Warnings, never refusals. The author knows things this does not, and a
@@ -646,22 +658,28 @@ pub async fn check_post_before_publish(
     app: tauri::AppHandle,
     conn: State<'_, DatabaseConnection>,
     id: i32,
+    excerpt: String,
     body: String,
 ) -> AppResult<Vec<PublishWarning>> {
-    let post = db::get::<PostModel>(conn.inner(), id)
-        .await?
-        .ok_or(AppError::PostNotFound(id))?;
+    if db::get::<PostModel>(conn.inner(), id).await?.is_none() {
+        return Err(AppError::PostNotFound(id));
+    }
 
     let mut warnings = Vec::new();
 
-    if post.excerpt.as_deref().map(str::trim).unwrap_or("").is_empty() {
+    // The excerpt and the body are both passed in rather than read from what is
+    // stored. The caller is about to publish *its* text, and the row and the
+    // cache still hold whatever autosave last wrote — checking those would
+    // inspect a version nobody is publishing: warn about an excerpt typed a
+    // moment ago, say nothing about one just cleared, and miss an image
+    // reference that has not been flushed yet.
+    //
+    // Judged as `save` will store it, so the two cannot disagree about whether
+    // there is one.
+    if normalize_excerpt(&excerpt).is_none() {
         warnings.push(PublishWarning::NoExcerpt);
     }
 
-    // The body is passed in rather than read from the cache. The caller is about
-    // to publish *its* text, and the cache still holds whatever was last written
-    // — checking that would inspect a version nobody is publishing, and miss an
-    // image reference typed a moment ago.
     let assets_dir = app
         .path()
         .app_data_dir()
@@ -967,13 +985,8 @@ async fn save(
     if let Some(tags) = tags {
         model.tags = Some(tags_to_json(&tags));
     }
-    // Trimmed, and nothing at all when nothing is left. The excerpt is the card
-    // text and the meta description, so a stray newline from the field would
-    // travel to both — and a whitespace-only one would pass for an excerpt
-    // everywhere except `check_post_before_publish`, which trims before asking.
     if let Some(excerpt) = excerpt {
-        let excerpt = excerpt.trim();
-        model.excerpt = (!excerpt.is_empty()).then(|| excerpt.to_string());
+        model.excerpt = normalize_excerpt(&excerpt);
     }
     // Saving locally never takes a live post off the blog. `published` describes
     // the *cloud's* copy, which a local save does not touch — the old version
@@ -2419,10 +2432,11 @@ mod save_tests {
     }
 
     /// Emptying the field is how an excerpt is removed, and it must come out as
-    /// no excerpt rather than an empty one. Whitespace counts as empty, and is
-    /// trimmed from anything else: the text goes into a meta description.
+    /// no excerpt rather than an empty one. Whitespace counts as empty, and
+    /// anything else is stored as one single-spaced line — a break inside it,
+    /// not only at the ends, would reach the card and the meta description.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_blank_excerpt_clears_it_and_the_rest_are_trimmed() {
+    async fn a_blank_excerpt_clears_it_and_the_rest_is_one_line() {
         let conn = connect_in_memory().await.unwrap();
         let dir = TempDir::new();
         let env = FakeEnv::in_dir(&dir);
@@ -2450,7 +2464,7 @@ mod save_tests {
             &env,
             &conn,
             Some(post.id),
-            with("  One line about it\n"),
+            with("  One line\nabout \r\n  it\n"),
             "# Body\n".to_string(),
             false,
             post_revision::SAVE,
