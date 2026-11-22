@@ -625,16 +625,31 @@ pub enum PublishWarning {
     NoExcerpt,
 }
 
-/// An excerpt as it is stored: one line, single-spaced, and nothing at all when
-/// nothing is left.
+/// An excerpt as it is stored: one line, and nothing at all when nothing is
+/// left.
 ///
 /// It is the card text and the meta description, and neither has a use for a
-/// line break — one pasted into the field would travel to both. Trimming only
-/// the ends left those inside. A whitespace-only excerpt is no excerpt, so it
-/// cannot pass for one anywhere.
+/// line break — one pasted into the field would travel to both. So each break,
+/// with the ASCII spaces and tabs either side of it, becomes one space, and the
+/// ends are trimmed of the same.
+///
+/// Line breaks and ASCII blanks only. Every other space is the author's: a
+/// full-width space (U+3000) between Japanese phrases, a non-breaking space
+/// holding `10 km` together, a deliberate double space. Collapsing all Unicode
+/// whitespace, as `split_whitespace` does, rewrote those into plain spaces —
+/// silently, and on the blog.
+///
+/// Blankness is judged by any whitespace, though: an excerpt of nothing but
+/// full-width spaces is still no excerpt, and must not pass for one anywhere.
 fn normalize_excerpt(excerpt: &str) -> Option<String> {
-    let excerpt = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!excerpt.is_empty()).then_some(excerpt)
+    let blank = |c: char| c == ' ' || c == '\t';
+    let excerpt = excerpt
+        .split(['\r', '\n'])
+        .map(|line| line.trim_matches(blank))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!excerpt.trim().is_empty()).then_some(excerpt)
 }
 
 /// Look over a post as it stands, before it is published.
@@ -2433,8 +2448,8 @@ mod save_tests {
 
     /// Emptying the field is how an excerpt is removed, and it must come out as
     /// no excerpt rather than an empty one. Whitespace counts as empty, and
-    /// anything else is stored as one single-spaced line — a break inside it,
-    /// not only at the ends, would reach the card and the meta description.
+    /// anything else is stored as one line — a break inside it, not only at the
+    /// ends, would reach the card and the meta description.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_blank_excerpt_clears_it_and_the_rest_is_one_line() {
         let conn = connect_in_memory().await.unwrap();
@@ -2473,6 +2488,22 @@ mod save_tests {
         .await
         .unwrap();
         assert_eq!(saved.excerpt.as_deref(), Some("One line about it"));
+    }
+
+    /// Only line breaks are the field's to remove. Every other space is the
+    /// author's, and 1.10.0 rewrote them: a full-width space between Japanese
+    /// phrases and a non-breaking one inside `10 km` both went up to the blog as
+    /// plain spaces.
+    #[test]
+    fn an_excerpt_keeps_every_space_but_a_line_break() {
+        let kept = "ブログ\u{3000}更新のお知らせ、10\u{00A0}km  先";
+        assert_eq!(normalize_excerpt(kept).as_deref(), Some(kept));
+
+        // A lone carriage return is a break too, not only `\n` and `\r\n`.
+        assert_eq!(normalize_excerpt("one\rtwo").as_deref(), Some("one two"));
+
+        // Blank is blank whatever the space: this is not an excerpt.
+        assert_eq!(normalize_excerpt("\u{3000}\u{00A0} \n"), None);
     }
 
     /// The short-circuit the tests above depend on: a save that is not

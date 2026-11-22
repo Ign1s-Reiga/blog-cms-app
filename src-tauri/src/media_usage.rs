@@ -536,7 +536,7 @@ mod tests {
             &format!("https://cdn.example.com/posts/my-post/beef{digest}.avif"),
             &known,
         );
-        assert!(found.contains(&digest), "the digest was missed next to a hex slug");
+        assert!(found.contains(&digest), "the digest was missed behind a hex prefix");
     }
 
     /// Every window is *looked up* rather than kept, so a body full of hex — a

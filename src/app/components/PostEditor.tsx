@@ -1395,12 +1395,15 @@ export function PostEditor() {
   /// break typed here would be on screen and then gone once saved. An Enter
   /// that is confirming an IME composition is left alone — blocking it would
   /// make the field unusable in Japanese, Chinese and Korean.
+  ///
+  /// A break that arrives some other way — pasted, dropped — is joined as
+  /// `normalize_excerpt` joins it, so the field shows what will be stored.
   const excerptField = (
     <textarea
       aria-label='Excerpt'
       rows={1}
       value={excerpt}
-      onChange={(e) => setExcerpt(e.target.value)}
+      onChange={(e) => setExcerpt(e.target.value.replace(/[ \t]*[\r\n]+[ \t]*/g, ' '))}
       onKeyDown={(e) => {
         if (e.key === 'Enter' && !e.nativeEvent.isComposing) e.preventDefault();
       }}
