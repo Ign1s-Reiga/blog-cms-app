@@ -93,6 +93,9 @@ export function BulkActions({
   const [tag, setTag] = useState('');
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<(BulkOutcome & { action: BulkAction }) | null>(null);
+  /// A run that failed as a whole, rather than post by post. Shown in the
+  /// dialog, which stays open so it can be tried again or cancelled.
+  const [runError, setRunError] = useState<string | null>(null);
   const tagInput = useRef<HTMLInputElement>(null);
   const returnFocus = useReturnFocus();
 
@@ -113,11 +116,14 @@ export function BulkActions({
     // the tag field reaches this without going through the button.
     if ((pending === 'addTag' || pending === 'removeTag') && tag.trim() === '') return;
     setBusy(true);
+    setRunError(null);
     try {
       const result = await onRun(pending, tag.trim());
       setOutcome({ ...result, action: pending });
       setPending(null);
       setTag('');
+    } catch (err) {
+      setRunError(String(err));
     } finally {
       setBusy(false);
     }
@@ -168,7 +174,10 @@ export function BulkActions({
       <AlertDialog
         open={pending !== null}
         onOpenChange={(next) => {
-          if (!next && !busy) setPending(null);
+          if (!next && !busy) {
+            setPending(null);
+            setRunError(null);
+          }
         }}
       >
         <AlertDialogContent
@@ -209,6 +218,12 @@ export function BulkActions({
               {REACHES_READERS[shown] && (
                 <p className='mt-2 text-label leading-[1.6] text-warning'>
                   This one reaches Cloudflare, once per post.
+                </p>
+              )}
+
+              {runError && (
+                <p role='alert' className='mt-3 text-meta leading-[1.6] text-pretty text-destructive'>
+                  Could not run this: {runError}
                 </p>
               )}
 

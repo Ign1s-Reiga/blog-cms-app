@@ -2,7 +2,7 @@
 /// rule as the confirm button: no tag, no run. The field is focused as the
 /// dialog opens, so an Enter straight away is the easy mistake.
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BulkActions } from './BulkActions';
 
@@ -37,5 +37,19 @@ describe('bulk tag actions', () => {
 
     await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
     expect(opener).toHaveFocus();
+  });
+
+  it('says so in the dialog when the run fails as a whole', async () => {
+    const onRun = vi.fn(async () => {
+      throw 'database is locked';
+    });
+    render(<BulkActions selected={[1, 2]} onClear={() => {}} onRun={onRun} inTrash={false} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Publish' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Publish' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('database is locked');
+    expect(dialog).toBeInTheDocument();
   });
 });
