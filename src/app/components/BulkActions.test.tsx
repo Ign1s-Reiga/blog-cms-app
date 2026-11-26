@@ -2,7 +2,7 @@
 /// rule as the confirm button: no tag, no run. The field is focused as the
 /// dialog opens, so an Enter straight away is the easy mistake.
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BulkActions } from './BulkActions';
 
@@ -23,5 +23,33 @@ describe('bulk tag actions', () => {
 
     await userEvent.type(field, 'rust{Enter}');
     expect(onRun).toHaveBeenCalledWith('addTag', 'rust');
+  });
+
+  /// Opened from state, with no trigger, so it is on this component to hand
+  /// focus back — Radix alone would drop it on the page body.
+  it('gives focus back to the button that opened it', async () => {
+    render(<BulkActions selected={[1, 2]} onClear={() => {}} onRun={vi.fn(async () => ok)} inTrash={false} />);
+
+    const opener = screen.getByRole('button', { name: 'Publish' });
+    await userEvent.click(opener);
+    await screen.findByRole('alertdialog');
+    await userEvent.keyboard('{Escape}');
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(opener).toHaveFocus();
+  });
+
+  it('says so in the dialog when the run fails as a whole', async () => {
+    const onRun = vi.fn(async () => {
+      throw 'database is locked';
+    });
+    render(<BulkActions selected={[1, 2]} onClear={() => {}} onRun={onRun} inTrash={false} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Publish' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Publish' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('database is locked');
+    expect(dialog).toBeInTheDocument();
   });
 });

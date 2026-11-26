@@ -35,20 +35,33 @@ function SyncAction({
   const [busy, setBusy] = useState(false);
   const guard = useRef(false);
   const button = useRef<HTMLButtonElement>(null);
+  /// Whether this control is still on screen. A launch-time run that outlives
+  /// it belongs to a shell that is gone, and has no one to report to.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const trigger = useCallback(
     async (clicked: boolean) => {
       if (guard.current) return;
       guard.current = true;
+      // `AuthGate` renders the app inert while it asks for credentials. Read it
+      // as the run starts, not when it fails: signing in meanwhile remounts the
+      // shell, and by then this button is detached and would no longer say it
+      // had been behind the login — so a pull that had no credentials would
+      // report its failure into the session that does.
+      const behindLogin = button.current?.closest('[inert]') != null;
       setBusy(true);
       try {
         await run();
         if (clicked) toast.success(done);
       } catch (err) {
         console.error(`${label} failed:`, err);
-        // `AuthGate` renders the app inert while it asks for credentials.
-        const behindLogin = button.current?.closest('[inert]') != null;
-        if (clicked || !behindLogin) toast.error(failed, { description: String(err) });
+        if (clicked || (!behindLogin && mounted.current)) toast.error(failed, { description: String(err) });
       } finally {
         guard.current = false;
         setBusy(false);

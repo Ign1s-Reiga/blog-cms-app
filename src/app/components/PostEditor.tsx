@@ -1102,6 +1102,15 @@ export function PostEditor() {
       setMenu(null);
       if (hadFocus) returnToEditor();
     };
+    // A scroll or resize closes the menu too, but must not put the selection
+    // back: setting it scrolls the textarea to the caret, undoing the very
+    // scroll that closed the menu. Focus alone is enough — a textarea keeps its
+    // selection while it is blurred.
+    const dismiss = () => {
+      const hadFocus = menuRef.current?.contains(document.activeElement) ?? false;
+      setMenu(null);
+      if (hadFocus) textareaRef.current?.focus({ preventScroll: true });
+    };
     const onPointerDown = (e: PointerEvent) => {
       if (!menuRef.current?.contains(e.target as Node)) {
         setMenu(null);
@@ -1122,14 +1131,14 @@ export function PostEditor() {
     // author's pointer.
     const onScroll = (e: Event) => {
       if (e.target === previewPaneRef.current) return;
-      close();
+      dismiss();
     };
-    window.addEventListener('resize', close);
+    window.addEventListener('resize', dismiss);
     window.addEventListener('scroll', onScroll, true);
     return () => {
       window.removeEventListener('pointerdown', onPointerDown, true);
       window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('resize', close);
+      window.removeEventListener('resize', dismiss);
       window.removeEventListener('scroll', onScroll, true);
     };
   }, [menu]);
@@ -1595,7 +1604,9 @@ export function PostEditor() {
         }}
         className={cn(
           'text-meta font-medium max-w-[240px]',
-          seriesId === null ? 'text-muted-foreground' : 'text-muted-foreground',
+          // "No series" reads as a placeholder, dimmer than a chosen series, at the
+          // same strength as the title field's placeholder.
+          seriesId === null ? 'text-muted-foreground/70' : 'text-muted-foreground',
           INLINE_FIELD,
           'cursor-pointer',
         )}

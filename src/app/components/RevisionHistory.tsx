@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { History, Loader2, RotateCcw, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import { useReturnFocus } from '@/lib/useReturnFocus';
 import { cn } from '@/lib/utils';
 
 /// One entry as `list_revisions` returns it (see `RevisionSummary` in
@@ -108,6 +109,7 @@ export function RevisionHistory({
   const [selected, setSelected] = useState<Revision | null>(null);
   const [loading, setLoading] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const returnFocus = useReturnFocus();
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -189,6 +191,7 @@ export function RevisionHistory({
       }}
     >
       <DialogContent
+        {...returnFocus}
         showCloseButton={false}
         onEscapeKeyDown={(e) => {
           if (restoring) e.preventDefault();
