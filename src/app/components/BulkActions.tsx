@@ -107,6 +107,9 @@ export function BulkActions({
 
   const confirm = async () => {
     if (!pending || busy) return;
+    // The same rule that disables the confirm button, here because Enter in
+    // the tag field reaches this without going through the button.
+    if ((pending === 'addTag' || pending === 'removeTag') && tag.trim() === '') return;
     setBusy(true);
     try {
       const result = await onRun(pending, tag.trim());

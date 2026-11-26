@@ -1115,13 +1115,22 @@ export function PostEditor() {
     };
     window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('keydown', onKeyDown);
+    // A scroll closes the menu because it moves the text the menu points at.
+    // The split view's preview pane is the exception: the menu is anchored to
+    // the source, and scroll sync moves the preview on its own whenever it
+    // re-renders or an image loads, which would close the menu under the
+    // author's pointer.
+    const onScroll = (e: Event) => {
+      if (e.target === previewPaneRef.current) return;
+      close();
+    };
     window.addEventListener('resize', close);
-    window.addEventListener('scroll', close, true);
+    window.addEventListener('scroll', onScroll, true);
     return () => {
       window.removeEventListener('pointerdown', onPointerDown, true);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('resize', close);
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('scroll', onScroll, true);
     };
   }, [menu]);
 
@@ -2065,8 +2074,10 @@ export function PostEditor() {
       {/* Both copies changed, and either answer throws one of them away, so the
           choice is spelled out on screen rather than left to a tooltip. Neither
           button is styled as the safe one. Keeping the cloud's copy is not
-          confirmed: the local text is saved to History first, so it can be
-          restored, and naming that here is the reassurance. */}
+          confirmed: the copy saved on this machine goes to History first, so it
+          can be restored, and naming that here is the reassurance. It is the
+          *saved* copy — `resolve` cancels a pending autosave rather than
+          flushing it — so the wording says "last saved", not "current". */}
       {saveState.kind === 'idle' && sync === 'conflict' && (
         <div
           role='region'
@@ -2078,7 +2089,7 @@ export function PostEditor() {
             <p>
               <span className='font-medium text-foreground'>Keep mine</span> discards the cloud change; your edits stay
               unpublished until you publish them. <span className='font-medium text-foreground'>Keep cloud</span>{' '}
-              replaces what is on screen; your current text is saved in History.
+              replaces what is on screen; the version last saved here is kept in History.
             </p>
           </div>
           <div className='flex items-center gap-2 shrink-0'>

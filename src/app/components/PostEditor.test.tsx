@@ -6,7 +6,7 @@
 /// right: a post with no slug yet has nowhere to put a thumbnail, and a
 /// dismissed file dialog is not a failure.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const invoke = vi.fn();
@@ -408,5 +408,37 @@ describe('the excerpt field', () => {
     await userEvent.paste('Line one \r\n  Line two');
 
     expect(field).toHaveValue('Line one Line two');
+  });
+});
+
+describe('the format menu', () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    openPost(7);
+  });
+
+  /// Split view's scroll sync moves the preview on its own when it re-renders
+  /// or an image loads. The menu points at the source, so that scroll must not
+  /// close it — but scrolling the source, which moves the text under it, must.
+  it('stays open when the preview scrolls, and closes when the source does', async () => {
+    backend();
+    render(<PostEditor />);
+
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Body' })).toHaveValue('# A post\n'));
+    await userEvent.click(screen.getByRole('radio', { name: 'Split' }));
+    // Split mounts its own source pane, so look the field up again.
+    const body = screen.getByRole('textbox', { name: 'Body' });
+    const preview = (await screen.findByRole('heading', { name: 'A post' })).closest('.overflow-y-auto');
+    expect(preview).not.toBeNull();
+
+    (body as HTMLTextAreaElement).setSelectionRange(2, 6);
+    fireEvent.contextMenu(body);
+    expect(screen.getByRole('menu', { name: 'Format selection' })).toBeInTheDocument();
+
+    fireEvent.scroll(preview!);
+    expect(screen.getByRole('menu', { name: 'Format selection' })).toBeInTheDocument();
+
+    fireEvent.scroll(body);
+    expect(screen.queryByRole('menu', { name: 'Format selection' })).not.toBeInTheDocument();
   });
 });
