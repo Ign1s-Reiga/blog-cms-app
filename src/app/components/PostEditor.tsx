@@ -1115,13 +1115,22 @@ export function PostEditor() {
     };
     window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('keydown', onKeyDown);
+    // A scroll closes the menu because it moves the text the menu points at.
+    // The split view's preview pane is the exception: the menu is anchored to
+    // the source, and scroll sync moves the preview on its own whenever it
+    // re-renders or an image loads, which would close the menu under the
+    // author's pointer.
+    const onScroll = (e: Event) => {
+      if (e.target === previewPaneRef.current) return;
+      close();
+    };
     window.addEventListener('resize', close);
-    window.addEventListener('scroll', close, true);
+    window.addEventListener('scroll', onScroll, true);
     return () => {
       window.removeEventListener('pointerdown', onPointerDown, true);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('resize', close);
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('scroll', onScroll, true);
     };
   }, [menu]);
 
