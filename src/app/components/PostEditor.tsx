@@ -2065,8 +2065,10 @@ export function PostEditor() {
       {/* Both copies changed, and either answer throws one of them away, so the
           choice is spelled out on screen rather than left to a tooltip. Neither
           button is styled as the safe one. Keeping the cloud's copy is not
-          confirmed: the local text is saved to History first, so it can be
-          restored, and naming that here is the reassurance. */}
+          confirmed: the copy saved on this machine goes to History first, so it
+          can be restored, and naming that here is the reassurance. It is the
+          *saved* copy — `resolve` cancels a pending autosave rather than
+          flushing it — so the wording says "last saved", not "current". */}
       {saveState.kind === 'idle' && sync === 'conflict' && (
         <div
           role='region'
@@ -2078,7 +2080,7 @@ export function PostEditor() {
             <p>
               <span className='font-medium text-foreground'>Keep mine</span> discards the cloud change; your edits stay
               unpublished until you publish them. <span className='font-medium text-foreground'>Keep cloud</span>{' '}
-              replaces what is on screen; your current text is saved in History.
+              replaces what is on screen; the version last saved here is kept in History.
             </p>
           </div>
           <div className='flex items-center gap-2 shrink-0'>
