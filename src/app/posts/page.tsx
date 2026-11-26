@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { BulkActions, type BulkAction, type BulkOutcome } from '@/components/BulkActions';
 import { onPostsRefreshed } from '@/lib/sync';
+import { useReturnFocus } from '@/lib/useReturnFocus';
 import { cn } from '@/lib/utils';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -217,6 +218,7 @@ export default function PostsPage() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [trashed, setTrashed] = useState<TrashedPost[]>([]);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  const deleteFocus = useReturnFocus();
   /// The deletion the confirmation is worded for, held past `pendingDelete`
   /// going back to null. The dialog animates out after it closes, and wording
   /// it from `pendingDelete` would blank it for the length of that animation.
@@ -1160,7 +1162,9 @@ export default function PostsPage() {
             if (!next) setPendingDelete(null);
           }}
         >
-          <AlertDialogContent className='block w-full rounded-[8px] border border-border bg-card p-4 ring-0 data-[size=default]:max-w-[min(440px,calc(100%-3rem))] data-[size=default]:sm:max-w-[min(440px,calc(100%-3rem))]'>
+          <AlertDialogContent
+            {...deleteFocus}
+            className='block w-full rounded-[8px] border border-border bg-card p-4 ring-0 data-[size=default]:max-w-[min(440px,calc(100%-3rem))] data-[size=default]:sm:max-w-[min(440px,calc(100%-3rem))]'>
             {shownDelete && (
               <>
                 <AlertDialogTitle className='text-ui font-semibold text-foreground'>

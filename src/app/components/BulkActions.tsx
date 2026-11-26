@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { useReturnFocus } from '@/lib/useReturnFocus';
 import { cn } from '@/lib/utils';
 
 /// What a bulk run did to each post it touched.
@@ -93,6 +94,7 @@ export function BulkActions({
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<(BulkOutcome & { action: BulkAction }) | null>(null);
   const tagInput = useRef<HTMLInputElement>(null);
+  const returnFocus = useReturnFocus();
 
   // The action the confirmation is worded for, held past `pending` going back
   // to null. The dialog animates out after it is closed, and rendering its
@@ -170,7 +172,9 @@ export function BulkActions({
         }}
       >
         <AlertDialogContent
+          onCloseAutoFocus={returnFocus.onCloseAutoFocus}
           onOpenAutoFocus={(e) => {
+            returnFocus.onOpenAutoFocus();
             // A tag action cannot go ahead without a name, so the field is
             // where the work starts. Everything else starts on Cancel.
             if (shown === 'addTag' || shown === 'removeTag') {

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { isVideo } from '@/lib/media';
+import { useReturnFocus } from '@/lib/useReturnFocus';
 import { cn } from '@/lib/utils';
 
 export interface MediaEntry {
@@ -52,6 +53,7 @@ export function MediaPicker({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const returnFocus = useReturnFocus();
 
   const load = useCallback(async () => {
     const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
@@ -106,6 +108,7 @@ export function MediaPicker({
       }}
     >
       <DialogContent
+        {...returnFocus}
         showCloseButton={false}
         aria-describedby={undefined}
         className='flex max-h-[70vh] w-full max-w-[min(620px,calc(100%-3rem))] flex-col gap-0 rounded-[8px] border border-border bg-card p-0 ring-0 sm:max-w-[min(620px,calc(100%-3rem))]'
