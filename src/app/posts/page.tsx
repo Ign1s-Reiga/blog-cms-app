@@ -9,10 +9,20 @@ import { StatusPill } from '@/components/StatusPill';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { BulkActions, type BulkAction, type BulkOutcome } from '@/components/BulkActions';
 import { onPostsRefreshed } from '@/lib/sync';
+import { cn } from '@/lib/utils';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -207,6 +217,11 @@ export default function PostsPage() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [trashed, setTrashed] = useState<TrashedPost[]>([]);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  /// The deletion the confirmation is worded for, held past `pendingDelete`
+  /// going back to null. The dialog animates out after it closes, and wording
+  /// it from `pendingDelete` would blank it for the length of that animation.
+  const [shownDelete, setShownDelete] = useState<PendingDelete | null>(pendingDelete);
+  if (pendingDelete !== null && pendingDelete !== shownDelete) setShownDelete(pendingDelete);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   /// A trash, unpublish or schedule action that was refused or failed.
@@ -630,40 +645,44 @@ export default function PostsPage() {
 
   return (
     <main className='flex-1 overflow-y-auto p-6'>
+      {/* The breadcrumb names the page visually; this names it for outline navigation. */}
+      <h1 className='sr-only'>Posts</h1>
       <div className='space-y-4 w-full'>
-        {/* Toolbar */}
-        <div className='flex items-center justify-between gap-4'>
+        {/* Toolbar. Wraps rather than overflows: with eight tabs, the trash
+            view's extra button and enlarged text it can outgrow one row. */}
+        <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-2'>
           {/* Left: tabs + search */}
-          <div className='flex items-center gap-3'>
+          <div className='flex flex-1 min-w-0 items-center gap-3'>
             {/* Segmented tabs */}
             <Tabs value={filter} onValueChange={(v) => setFilter(v as FilterId)}>
-              <TabsList className='h-[32px] gap-px rounded-[7px] border border-zinc-200 dark:border-white/[0.07] bg-zinc-100 dark:bg-white/[0.04] p-[3px]'>
+              <TabsList className='h-[32px] gap-px rounded-[7px] border border-border bg-muted p-[3px]'>
                 {tabs.map(({ id, label, count }) => (
                   <TabsTrigger
                     key={id}
                     value={id}
-                    className='h-[26px] gap-1.5 rounded-[5px] px-3 text-[12px] font-semibold text-zinc-500 dark:text-zinc-500 data-active:text-zinc-800 dark:data-active:text-zinc-100'
+                    className='h-[26px] gap-1.5 rounded-[5px] px-3 text-meta font-semibold text-muted-foreground data-active:text-foreground'
                   >
                     {label}
-                    <span className='text-[10px] font-bold tabular-nums text-zinc-400 dark:text-zinc-500'>{count}</span>
+                    <span className='text-label font-bold tabular-nums text-muted-foreground'>{count}</span>
                   </TabsTrigger>
                 ))}
               </TabsList>
             </Tabs>
 
             {/* Search */}
-            <div className='relative'>
+            <div className='relative flex-1 min-w-[180px] max-w-[280px]'>
               <Search
                 size={13}
                 strokeWidth={1.8}
-                className='absolute left-[9px] top-1/2 -translate-y-1/2 z-10 text-zinc-400 dark:text-zinc-600 pointer-events-none'
+                className='absolute left-[9px] top-1/2 -translate-y-1/2 z-10 text-muted-foreground pointer-events-none'
               />
               <Input
                 type='text'
                 placeholder='Search posts, tags, text…'
+                aria-label='Search posts'
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className='h-[30px] w-[200px] pl-[28px] pr-[26px] text-[12px] rounded-[6px] border-zinc-200 dark:border-white/[0.08] bg-zinc-50 dark:bg-white/[0.04]'
+                className='h-[30px] w-full pl-[28px] pr-[26px] text-meta rounded-[6px] border-border bg-muted/50'
               />
               {/* While this is spinning, the rows are matched on titles and tags
                   alone — so an empty list is not yet an answer about the text. */}
@@ -672,7 +691,7 @@ export default function PostsPage() {
                   size={12}
                   strokeWidth={2}
                   aria-label='Searching post text'
-                  className='absolute right-[9px] top-1/2 -translate-y-1/2 animate-spin text-zinc-400 dark:text-zinc-600'
+                  className='absolute right-[9px] top-1/2 -translate-y-1/2 animate-spin text-muted-foreground'
                 />
               )}
             </div>
@@ -687,7 +706,7 @@ export default function PostsPage() {
                 variant='outline'
                 size='sm'
                 onClick={() => setPendingDelete({ kind: 'all', count: trashed.length })}
-                className='h-[30px] px-3 gap-[6px] rounded-[6px] text-[13px] font-semibold text-red-600 border-red-200 hover:bg-red-50 dark:text-red-400 dark:border-red-500/20 dark:hover:bg-red-500/[0.08]'
+                className='h-[30px] px-3 gap-[6px] rounded-[6px] text-ui font-semibold text-destructive border-destructive/30 hover:bg-destructive/10'
               >
                 <Trash2 size={13} strokeWidth={2} />
                 Empty trash
@@ -700,7 +719,7 @@ export default function PostsPage() {
               size='sm'
               onClick={handleImportArticle}
               disabled={importStatus.kind === 'loading'}
-              className='h-[30px] px-3 gap-[6px] rounded-[6px] text-[13px] font-semibold text-zinc-600 dark:text-zinc-400'
+              className='h-[30px] px-3 gap-[6px] rounded-[6px] text-ui font-semibold text-body'
             >
               <Import size={13} strokeWidth={2} />
               {importStatus.kind === 'loading' ? 'Importing…' : 'Import Article'}
@@ -710,7 +729,7 @@ export default function PostsPage() {
             <Button
               asChild
               size='sm'
-              className='h-[30px] px-3 gap-[6px] rounded-[6px] text-[13px] font-semibold shadow-[0_1px_2px_rgba(0,0,0,0.12)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.18)] dark:hover:shadow-[0_2px_8px_rgba(0,0,0,0.5)]'
+              className='h-[30px] px-3 gap-[6px] rounded-[6px] text-ui font-semibold shadow-[0_1px_2px_rgba(0,0,0,0.12)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.18)] dark:hover:shadow-[0_2px_8px_rgba(0,0,0,0.5)]'
             >
               <Link href='/posts/new'>
                 <Plus size={13} strokeWidth={2.5} />
@@ -724,10 +743,8 @@ export default function PostsPage() {
             are refusals somebody needs to read and act on — a post that cannot
             be trashed until its scheduled publication is cancelled, say. */}
         {actionError && (
-          <Alert className='items-center rounded-[6px] px-3 py-2 border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/[0.08] dark:text-red-400'>
-            <AlertDescription className='text-[12px] font-medium text-red-700 dark:text-red-400'>
-              {actionError}
-            </AlertDescription>
+          <Alert className='items-center rounded-[6px] px-3 py-2 border-destructive/30 bg-destructive/10 text-destructive'>
+            <AlertDescription className='text-meta font-medium text-destructive'>{actionError}</AlertDescription>
           </Alert>
         )}
 
@@ -735,16 +752,16 @@ export default function PostsPage() {
         {importStatus.kind !== 'idle' &&
           importStatus.kind !== 'loading' &&
           (importStatus.kind === 'success' ? (
-            <Alert className='items-center rounded-[6px] px-3 py-2 border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/[0.08] dark:text-emerald-400'>
+            <Alert className='items-center rounded-[6px] px-3 py-2 border-success/30 bg-success/10 text-success'>
               <CheckCircle2 size={13} strokeWidth={2} className='size-3.5' />
-              <AlertDescription className='text-[12px] font-medium text-emerald-700 dark:text-emerald-400'>
+              <AlertDescription className='text-meta font-medium text-success'>
                 <span className='font-semibold'>&ldquo;{importStatus.title}&rdquo;</span> imported as a draft. Publish
                 it to send it to the cloud.
               </AlertDescription>
             </Alert>
           ) : (
-            <Alert className='items-center rounded-[6px] px-3 py-2 border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/[0.08] dark:text-red-400'>
-              <AlertDescription className='text-[12px] font-medium text-red-700 dark:text-red-400'>
+            <Alert className='items-center rounded-[6px] px-3 py-2 border-destructive/30 bg-destructive/10 text-destructive'>
+              <AlertDescription className='text-meta font-medium text-destructive'>
                 <span className='font-bold'>Error:</span> {importStatus.message}
               </AlertDescription>
             </Alert>
@@ -754,8 +771,8 @@ export default function PostsPage() {
             result over unsearched posts is not "not found" — it is "not
             looked", and only this says which. */}
         {bodyMatches && bodyMatches.query === search.trim() && bodyMatches.unsearched.length > 0 && (
-          <Alert className='items-center rounded-[6px] px-3 py-2 border-zinc-200 bg-zinc-50 dark:border-white/[0.08] dark:bg-white/[0.03]'>
-            <AlertDescription className='flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-zinc-600 dark:text-zinc-400'>
+          <Alert className='items-center rounded-[6px] px-3 py-2 border-border bg-muted/50'>
+            <AlertDescription className='flex flex-wrap items-center gap-x-1.5 gap-y-1 text-meta text-body'>
               <span>
                 {bodyMatches.unsearched.length} post{bodyMatches.unsearched.length === 1 ? '' : 's'} could not be
                 searched
@@ -765,8 +782,7 @@ export default function PostsPage() {
                     {bodyMatches.unsearched.map((u, i) => (
                       <span key={u.id}>
                         {i > 0 && ', '}
-                        <span className='font-medium text-zinc-700 dark:text-zinc-300'>{u.title}</span> (
-                        {UNSEARCHED_REASON[u.reason]})
+                        <span className='font-medium text-body'>{u.title}</span> ({UNSEARCHED_REASON[u.reason]})
                       </span>
                     ))}
                   </>
@@ -777,7 +793,7 @@ export default function PostsPage() {
                 type='button'
                 onClick={() => void fillSearchGaps()}
                 disabled={fillingGaps}
-                className='rounded-[4px] px-1.5 py-0.5 font-medium text-zinc-700 underline underline-offset-2 transition-colors hover:bg-zinc-100 disabled:opacity-60 dark:text-zinc-300 dark:hover:bg-white/[0.06]'
+                className='rounded-[4px] px-1.5 py-0.5 font-medium text-body underline underline-offset-2 transition-colors hover:bg-muted disabled:opacity-60'
               >
                 {fillingGaps ? 'Fetching…' : 'Fetch them and search again'}
               </button>
@@ -793,11 +809,11 @@ export default function PostsPage() {
         />
 
         {tagFilter !== null && (
-          <div className='flex items-center gap-2 text-[12px] text-zinc-600 dark:text-zinc-400'>
+          <div className='flex items-center gap-2 text-meta text-body'>
             <span>Tagged</span>
             <Badge
               variant='outline'
-              className='h-auto rounded-[4px] border-zinc-200 bg-zinc-100 px-[6px] py-[2px] font-mono text-[10px] font-semibold text-zinc-600 dark:border-white/[0.07] dark:bg-white/[0.05] dark:text-zinc-400'
+              className='h-auto rounded-[4px] border-border bg-muted px-[6px] py-[2px] font-mono text-label font-semibold text-body'
             >
               {tagFilter}
             </Badge>
@@ -808,7 +824,7 @@ export default function PostsPage() {
                 // Take it out of the URL too, or a reload puts it back.
                 router.replace('/posts');
               }}
-              className='rounded-[4px] px-1.5 py-0.5 text-[11px] font-medium underline underline-offset-2 transition-colors hover:bg-zinc-100 dark:hover:bg-white/[0.06]'
+              className='rounded-[4px] px-1.5 py-0.5 text-label font-medium underline underline-offset-2 transition-colors hover:bg-muted'
             >
               Clear
             </button>
@@ -816,11 +832,11 @@ export default function PostsPage() {
         )}
 
         {exportStatus.kind === 'success' && (
-          <Alert className='items-center rounded-[6px] px-3 py-2 border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/[0.08] dark:text-emerald-400'>
+          <Alert className='items-center rounded-[6px] px-3 py-2 border-success/30 bg-success/10 text-success'>
             <CheckCircle2 size={13} strokeWidth={2} className='size-3.5' />
-            <AlertDescription className='text-[12px] font-medium text-emerald-700 dark:text-emerald-400'>
+            <AlertDescription className='text-meta font-medium text-success'>
               <span className='font-semibold'>&ldquo;{exportStatus.slug}&rdquo;</span> written to{' '}
-              <span className='font-mono text-[11px]'>{exportStatus.path}</span>.
+              <span className='font-mono text-label'>{exportStatus.path}</span>.
               {/* The file and the blog disagree, and only the app knows it. */}
               {exportStatus.unpublishedEdits &&
                 ' It includes edits that have not been published, so it is ahead of what readers are being served.'}
@@ -829,8 +845,8 @@ export default function PostsPage() {
         )}
 
         {exportStatus.kind === 'error' && (
-          <Alert className='items-center rounded-[6px] px-3 py-2 border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/[0.08] dark:text-red-400'>
-            <AlertDescription className='text-[12px] font-medium text-red-700 dark:text-red-400'>
+          <Alert className='items-center rounded-[6px] px-3 py-2 border-destructive/30 bg-destructive/10 text-destructive'>
+            <AlertDescription className='text-meta font-medium text-destructive'>
               <span className='font-bold'>Export failed:</span> {exportStatus.message}
             </AlertDescription>
           </Alert>
@@ -841,37 +857,36 @@ export default function PostsPage() {
             `list_posts` by the backend, which is what keeps them out of every
             other screen as well. */}
         {filter === 'trash' ? (
-          <div className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] overflow-hidden'>
-            <div className='grid grid-cols-[1fr_auto] sm:grid-cols-[1fr_120px_90px_100px_180px] gap-0 border-b border-zinc-200 dark:border-white/[0.07] bg-zinc-50 dark:bg-white/[0.02] px-4 py-[8px]'>
+          <div className='rounded-[8px] border border-border overflow-hidden'>
+            <div className='grid grid-cols-[1fr_auto] sm:grid-cols-[1fr_120px_90px_100px_180px] gap-0 border-b border-border bg-muted/50 px-4 py-[8px]'>
               {['Title', 'Tags', 'Status', 'Trashed', ''].map((h, i) => (
                 <span
                   key={h || 'actions'}
-                  className={[
-                    'text-[10px] font-bold uppercase tracking-[0.1em] text-zinc-400 dark:text-zinc-600',
+                  className={cn(
+                    'text-label font-bold uppercase tracking-[0.1em] text-muted-foreground',
                     i === 1 || i === 2 || i === 3 ? 'hidden sm:block' : '',
                     i === 4 ? 'hidden sm:block text-right' : '',
-                  ].join(' ')}
+                  )}
                 >
                   {h}
                 </span>
               ))}
             </div>
 
-            <div className='bg-white dark:bg-[#161616] divide-y divide-zinc-100 dark:divide-white/[0.04]'>
+            <div className='bg-card divide-y divide-border/60'>
               {visibleTrash.map((post) => (
                 <div
                   key={post.id}
                   className='grid grid-cols-[1fr_auto] sm:grid-cols-[1fr_120px_90px_100px_180px] items-center gap-0 px-4 py-[10px]'
                 >
                   <div className='flex items-center gap-2.5 min-w-0 pr-4'>
-                    <input
-                      type='checkbox'
+                    <Checkbox
                       checked={selected.has(post.id)}
-                      onChange={() => toggleSelected(post.id)}
+                      onCheckedChange={() => toggleSelected(post.id)}
                       aria-label={`Select ${post.title}`}
-                      className='size-[13px] shrink-0 cursor-pointer accent-zinc-600 dark:accent-zinc-400'
+                      className='cursor-pointer'
                     />
-                    <span className='text-[13px] font-medium text-zinc-500 dark:text-zinc-500 truncate line-through decoration-zinc-300 dark:decoration-zinc-700'>
+                    <span className='text-ui font-medium text-muted-foreground truncate line-through decoration-muted-foreground/40'>
                       {post.title}
                     </span>
                   </div>
@@ -881,7 +896,7 @@ export default function PostsPage() {
                       <Badge
                         key={t}
                         variant='outline'
-                        className='h-auto px-[6px] py-[2px] rounded-[4px] text-[10px] font-mono font-semibold bg-zinc-100 dark:bg-white/[0.05] border-zinc-200 dark:border-white/[0.07] text-zinc-500 dark:text-zinc-500'
+                        className='h-auto px-[6px] py-[2px] rounded-[4px] text-label font-mono font-semibold bg-muted border-border text-muted-foreground'
                       >
                         {t}
                       </Badge>
@@ -896,15 +911,15 @@ export default function PostsPage() {
                         ? 'Still published on the blog — deleting it here does not take it down'
                         : 'Never published'
                     }
-                    className={[
-                      'hidden sm:block text-[11px] font-medium',
-                      post.live ? 'text-amber-600 dark:text-amber-500' : 'text-zinc-400 dark:text-zinc-600',
-                    ].join(' ')}
+                    className={cn(
+                      'hidden sm:block text-label font-medium',
+                      post.live ? 'text-warning' : 'text-muted-foreground',
+                    )}
                   >
                     {post.live ? 'Still live' : 'Draft'}
                   </span>
 
-                  <span className='hidden sm:block text-[11px] font-mono tracking-tight text-zinc-400 dark:text-zinc-600'>
+                  <span className='hidden sm:block text-label font-mono tracking-tight text-muted-foreground'>
                     {post.trashedAt}
                   </span>
 
@@ -913,7 +928,8 @@ export default function PostsPage() {
                       variant='outline'
                       size='sm'
                       onClick={() => void runPostCommand('restore_post', { id: post.id })}
-                      className='h-[26px] px-2 gap-1.5 rounded-[5px] text-[12px] font-semibold text-zinc-600 dark:text-zinc-400'
+                      aria-label={`Restore ${post.title}`}
+                      className='h-[26px] px-2 gap-1.5 rounded-[5px] text-meta font-semibold text-body'
                     >
                       <RotateCcw size={12} strokeWidth={2} />
                       Restore
@@ -922,7 +938,8 @@ export default function PostsPage() {
                       variant='ghost'
                       size='sm'
                       onClick={() => setPendingDelete({ kind: 'one', id: post.id, title: post.title })}
-                      className='h-[26px] px-2 rounded-[5px] text-[12px] font-semibold text-zinc-400 hover:text-red-600 dark:hover:text-red-400'
+                      aria-label={`Delete forever: ${post.title}`}
+                      className='h-[26px] px-2 rounded-[5px] text-meta font-semibold text-muted-foreground hover:text-destructive'
                     >
                       Delete forever
                     </Button>
@@ -932,8 +949,8 @@ export default function PostsPage() {
             </div>
 
             {visibleTrash.length === 0 && (
-              <div className='bg-white dark:bg-[#161616] py-16 text-center'>
-                <p className='text-[13px] text-zinc-400 dark:text-zinc-600'>
+              <div className='bg-card py-16 text-center'>
+                <p className='text-ui text-muted-foreground'>
                   {loading
                     ? 'Loading trash…'
                     : trashed.length === 0
@@ -946,18 +963,18 @@ export default function PostsPage() {
         ) : (
           <>
             {/* Table */}
-            <div className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] overflow-hidden'>
+            <div className='rounded-[8px] border border-border overflow-hidden'>
               {/* Head */}
-              <div className='grid grid-cols-[1fr_auto_auto_auto] sm:grid-cols-[1fr_120px_90px_100px_80px] gap-0 border-b border-zinc-200 dark:border-white/[0.07] bg-zinc-50 dark:bg-white/[0.02] px-4 py-[8px]'>
+              <div className='grid grid-cols-[1fr_auto_auto_auto] sm:grid-cols-[1fr_120px_90px_100px_80px] gap-0 border-b border-border bg-muted/50 px-4 py-[8px]'>
                 {['Title', 'Tags', 'Status', 'Date', 'Views'].map((h, i) => (
                   <span
                     key={h}
-                    className={[
-                      'text-[10px] font-bold uppercase tracking-[0.1em] text-zinc-400 dark:text-zinc-600',
+                    className={cn(
+                      'text-label font-bold uppercase tracking-[0.1em] text-muted-foreground',
                       i === 4 ? 'text-right hidden sm:block' : '',
                       i === 1 ? 'hidden sm:block' : '',
                       i === 3 ? 'hidden sm:block' : '',
-                    ].join(' ')}
+                    )}
                   >
                     {h}
                   </span>
@@ -965,45 +982,41 @@ export default function PostsPage() {
               </div>
 
               {/* Rows */}
-              <div className='bg-white dark:bg-[#161616] divide-y divide-zinc-100 dark:divide-white/[0.04]'>
+              <div className='bg-card divide-y divide-border/60'>
                 {visible.map((post) => (
+                  // Not a button itself: the row holds a checkbox and three
+                  // buttons of its own, and a button containing controls is
+                  // read out as one flattened label with them lost inside it.
+                  // The title is the row's keyboard and screen-reader way in;
+                  // a click anywhere else on the row is a mouse convenience.
                   <div
                     key={post.id}
-                    role='button'
-                    tabIndex={0}
-                    onClick={() => router.push(`/posts/edit?id=${post.id}`)}
-                    onKeyDown={(e) => {
-                      // A key pressed on one of the row's own buttons belongs to
-                      // that button. Without this the row swallows it: the
-                      // `preventDefault` below stops the button activating at
-                      // all, and the row navigates instead — so unpublish and
-                      // trash were reachable by mouse but not by keyboard.
-                      // `stopPropagation` on their click handlers cannot help,
-                      // because the click they stop is the one that never
-                      // happens.
-                      if (e.target !== e.currentTarget) return;
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        router.push(`/posts/edit?id=${post.id}`);
-                      }
+                    onClick={(e) => {
+                      // A click on one of the row's own controls belongs to that
+                      // control. The title link navigates by itself, and pushing
+                      // here as well would put the editor in the history twice.
+                      if ((e.target as HTMLElement).closest('a, button, input')) return;
+                      router.push(`/posts/edit?id=${post.id}`);
                     }}
-                    className='group grid grid-cols-[1fr_auto_auto_auto] sm:grid-cols-[1fr_120px_90px_100px_80px] items-center gap-0 px-4 py-[10px] cursor-pointer hover:bg-zinc-50 dark:hover:bg-white/[0.02] transition-colors duration-100'
+                    className='group grid grid-cols-[1fr_auto_auto_auto] sm:grid-cols-[1fr_120px_90px_100px_80px] items-center gap-0 px-4 py-[10px] cursor-pointer hover:bg-muted/50 transition-colors duration-100'
                   >
                     <div className='flex items-center gap-2.5 min-w-0 pr-4'>
                       {/* Its own click target: ticking a row must not open it,
                           and the row's handler is on the whole grid. */}
-                      <input
-                        type='checkbox'
+                      <Checkbox
                         checked={selected.has(post.id)}
-                        onChange={() => toggleSelected(post.id)}
+                        onCheckedChange={() => toggleSelected(post.id)}
                         onClick={(e) => e.stopPropagation()}
                         aria-label={`Select ${post.title}`}
-                        className='size-[13px] shrink-0 cursor-pointer accent-zinc-600 dark:accent-zinc-400'
+                        className='cursor-pointer'
                       />
                       <StatusDot status={displayStatus(post)} />
-                      <span className='text-[13px] font-medium text-zinc-800 dark:text-zinc-200 truncate group-hover:text-zinc-900 dark:group-hover:text-white transition-colors duration-100'>
+                      <Link
+                        href={`/posts/edit?id=${post.id}`}
+                        className='text-ui font-medium text-foreground truncate rounded-[3px] outline-none group-hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 transition-colors duration-100'
+                      >
                         {post.title}
-                      </span>
+                      </Link>
                     </div>
 
                     <div className='hidden sm:flex gap-1 flex-wrap'>
@@ -1011,7 +1024,7 @@ export default function PostsPage() {
                         <Badge
                           key={t}
                           variant='outline'
-                          className='h-auto px-[6px] py-[2px] rounded-[4px] text-[10px] font-mono font-semibold bg-zinc-100 dark:bg-white/[0.05] border-zinc-200 dark:border-white/[0.07] text-zinc-500 dark:text-zinc-500'
+                          className='h-auto px-[6px] py-[2px] rounded-[4px] text-label font-mono font-semibold bg-muted border-border text-muted-foreground'
                         >
                           {t}
                         </Badge>
@@ -1028,18 +1041,18 @@ export default function PostsPage() {
                     {post.schedule?.state === 'scheduled' || post.schedule?.state === 'overdue' ? (
                       <span
                         title={`Publishes ${new Date(post.schedule.publish_at * 1000).toLocaleString()}`}
-                        className='hidden sm:block text-[11px] font-mono tracking-tight text-indigo-500 dark:text-indigo-400'
+                        className='hidden sm:block text-label font-mono tracking-tight text-indigo-500 dark:text-indigo-400'
                       >
                         → {formatScheduleTime(post.schedule.publish_at)}
                       </span>
                     ) : (
-                      <span className='hidden sm:block text-[11px] font-mono tracking-tight text-zinc-400 dark:text-zinc-600'>
+                      <span className='hidden sm:block text-label font-mono tracking-tight text-muted-foreground'>
                         {post.date}
                       </span>
                     )}
 
                     <div className='hidden sm:flex items-center justify-end gap-2'>
-                      <span className='text-[12px] font-mono tabular-nums text-zinc-400 dark:text-zinc-600'>
+                      <span className='text-meta font-mono tabular-nums text-muted-foreground'>
                         {post.views !== undefined ? post.views.toLocaleString() : '—'}
                       </span>
                       {/* No confirmation, by the rule the trash button
@@ -1064,7 +1077,7 @@ export default function PostsPage() {
                           void exportPost(post.id);
                         }}
                         disabled={exportStatus.kind === 'working'}
-                        className='shrink-0 p-1 rounded-[4px] text-zinc-300 dark:text-zinc-700 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-white/[0.06] disabled:opacity-40 transition-colors'
+                        className='shrink-0 p-1 rounded-[4px] text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-body hover:bg-muted disabled:opacity-40 transition-colors'
                       >
                         <Download size={13} strokeWidth={2} />
                       </button>
@@ -1077,7 +1090,7 @@ export default function PostsPage() {
                             e.stopPropagation();
                             void runPostCommand('unpublish_post', { postId: post.id });
                           }}
-                          className='shrink-0 p-1 rounded-[4px] text-zinc-300 dark:text-zinc-700 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-500/[0.1] transition-colors'
+                          className='shrink-0 p-1 rounded-[4px] text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-warning hover:bg-warning/10 transition-colors'
                         >
                           <EyeOff size={13} strokeWidth={2} />
                         </button>
@@ -1093,7 +1106,7 @@ export default function PostsPage() {
                           e.stopPropagation();
                           void runPostCommand('trash_post', { id: post.id });
                         }}
-                        className='shrink-0 p-1 rounded-[4px] text-zinc-300 dark:text-zinc-700 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/[0.1] transition-colors'
+                        className='shrink-0 p-1 rounded-[4px] text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-destructive hover:bg-destructive/10 transition-colors'
                       >
                         <Trash2 size={13} strokeWidth={2} />
                       </button>
@@ -1103,22 +1116,31 @@ export default function PostsPage() {
               </div>
 
               {visible.length === 0 && (
-                <div className='bg-white dark:bg-[#161616] py-16 text-center'>
-                  <p className='text-[13px] text-zinc-400 dark:text-zinc-600'>
-                    {loading
-                      ? 'Loading posts…'
-                      : loadError
-                        ? `Failed to load posts: ${loadError}`
+                <div className='bg-card py-16 text-center'>
+                  {/* The failure gets its own element with `role='alert'`, so
+                      it is announced when it appears rather than replacing the
+                      loading message in silence. */}
+                  {!loading && loadError ? (
+                    <p role='alert' className='text-ui text-muted-foreground'>
+                      Failed to load posts: {loadError}
+                    </p>
+                  ) : (
+                    <p className='text-ui text-muted-foreground'>
+                      {loading
+                        ? 'Loading posts…'
                         : posts.length === 0
-                          ? 'No posts yet.'
-                          : 'No posts match this filter.'}
-                  </p>
+                          ? 'No posts yet. Write one with New Post, or pull existing posts from the cloud.'
+                          : search.trim()
+                            ? `No posts in this view match “${search.trim()}”.`
+                            : 'No posts in this view.'}
+                    </p>
+                  )}
                 </div>
               )}
             </div>
 
             {visible.length > 0 && (
-              <p className='text-[11px] text-zinc-400 dark:text-zinc-600 px-1'>
+              <p className='text-label text-muted-foreground px-1'>
                 {visible.length} of {posts.length} posts
               </p>
             )}
@@ -1127,47 +1149,50 @@ export default function PostsPage() {
 
         {/* The one action in this app that cannot be walked back. Both wordings
             say what survives it, because "delete" here means the local copy and
-            not the article on the blog. */}
-        {pendingDelete && (
-          <div
-            role='dialog'
-            aria-modal='true'
-            aria-label='Confirm permanent deletion'
-            className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6'
-            onPointerDown={(e) => {
-              if (e.target === e.currentTarget) setPendingDelete(null);
-            }}
-          >
-            <div className='w-full max-w-[440px] rounded-[8px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616] p-4'>
-              <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>
-                {pendingDelete.kind === 'one'
-                  ? `Delete “${pendingDelete.title}” forever?`
-                  : `Empty the trash — ${pendingDelete.count} ${pendingDelete.count === 1 ? 'post' : 'posts'}?`}
-              </h2>
-              <p className='mt-1.5 text-[12px] leading-[1.6] text-zinc-500 dark:text-zinc-500'>
-                This removes the local copy, its Markdown, and its version history. There is no undo. Anything already
-                published stays on the blog until you unpublish it.
-              </p>
-              <div className='mt-4 flex items-center justify-end gap-2'>
-                <Button
-                  variant='outline'
-                  size='sm'
-                  onClick={() => setPendingDelete(null)}
-                  className='h-[28px] px-3 rounded-[5px] text-[12px] font-semibold'
-                >
-                  Cancel
-                </Button>
-                <Button
-                  size='sm'
-                  onClick={() => void confirmDelete()}
-                  className='h-[28px] px-3 rounded-[5px] text-[12px] font-semibold bg-red-600 text-white hover:bg-red-700 dark:bg-red-600 dark:hover:bg-red-700'
-                >
-                  {pendingDelete.kind === 'one' ? 'Delete forever' : 'Empty trash'}
-                </Button>
-              </div>
-            </div>
-          </div>
-        )}
+            not the article on the blog.
+
+            An alert dialog, so focus starts on Cancel — the safe choice is the
+            one a stray Enter lands on — and goes back to the button that asked
+            when it closes. */}
+        <AlertDialog
+          open={pendingDelete !== null}
+          onOpenChange={(next) => {
+            if (!next) setPendingDelete(null);
+          }}
+        >
+          <AlertDialogContent className='block w-full rounded-[8px] border border-border bg-card p-4 ring-0 data-[size=default]:max-w-[min(440px,calc(100%-3rem))] data-[size=default]:sm:max-w-[min(440px,calc(100%-3rem))]'>
+            {shownDelete && (
+              <>
+                <AlertDialogTitle className='text-ui font-semibold text-foreground'>
+                  {shownDelete.kind === 'one'
+                    ? `Delete “${shownDelete.title}” forever?`
+                    : `Empty the trash — ${shownDelete.count} ${shownDelete.count === 1 ? 'post' : 'posts'}?`}
+                </AlertDialogTitle>
+                <AlertDialogDescription className='mt-1.5 text-meta leading-[1.6] text-wrap text-muted-foreground md:text-wrap'>
+                  This removes the local copy, its Markdown, and its version history. There is no undo. Anything already
+                  published stays on the blog until you unpublish it.
+                </AlertDialogDescription>
+                <div className='mt-4 flex items-center justify-end gap-2'>
+                  <AlertDialogCancel
+                    variant='outline'
+                    size='sm'
+                    className='h-[28px] px-3 rounded-[5px] text-meta font-semibold'
+                  >
+                    Cancel
+                  </AlertDialogCancel>
+                  <AlertDialogAction
+                    variant='destructive'
+                    size='sm'
+                    onClick={() => void confirmDelete()}
+                    className='h-[28px] px-3 rounded-[5px] text-meta font-semibold'
+                  >
+                    {shownDelete.kind === 'one' ? 'Delete forever' : 'Empty trash'}
+                  </AlertDialogAction>
+                </div>
+              </>
+            )}
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </main>
   );

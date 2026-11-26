@@ -25,14 +25,12 @@ export function Breadcrumb() {
   const label = LABELS[pathname] ?? 'Page';
 
   return (
-    <BreadcrumbRoot className='text-[13px]'>
+    <BreadcrumbRoot className='text-ui'>
       <BreadcrumbList className='gap-[5px] sm:gap-[5px]'>
-        <BreadcrumbItem className='hidden sm:flex text-zinc-400 dark:text-zinc-600 font-medium'>
-          blog-cms
-        </BreadcrumbItem>
-        <BreadcrumbSeparator className='hidden sm:block text-zinc-300 dark:text-zinc-700' />
+        <BreadcrumbItem className='hidden sm:flex text-muted-foreground font-medium'>blog-cms</BreadcrumbItem>
+        <BreadcrumbSeparator className='hidden sm:block text-muted-foreground' />
         <BreadcrumbItem>
-          <BreadcrumbPage className='font-semibold text-zinc-800 dark:text-zinc-200'>{label}</BreadcrumbPage>
+          <BreadcrumbPage className='font-semibold text-foreground'>{label}</BreadcrumbPage>
         </BreadcrumbItem>
       </BreadcrumbList>
     </BreadcrumbRoot>

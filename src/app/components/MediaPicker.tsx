@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ImageOff, Loader2, Play, Search, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogClose, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { isVideo } from '@/lib/media';
 import { cn } from '@/lib/utils';
@@ -88,84 +89,79 @@ export function MediaPicker({
     if (!open) setQuery('');
   }, [open]);
 
-  // Escape closes, matching the editor's other transient surfaces.
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
-
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return q === '' ? items : items.filter((i) => i.name.toLowerCase().includes(q));
   }, [items, query]);
 
-  if (!open) return null;
-
+  // Built on the Dialog primitive rather than a hand-rolled overlay, because a
+  // modal has to own the keyboard while it is up: focus moves into it, Tab
+  // stays inside it, and closing hands focus back to the button that opened
+  // it. Escape and a click on the backdrop both arrive here as a close.
   return (
-    <div
-      role='dialog'
-      aria-modal='true'
-      aria-label='Select from Media library'
-      className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6'
-      onPointerDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onClose();
       }}
     >
-      <div className='flex max-h-[70vh] w-full max-w-[620px] flex-col rounded-[8px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616]'>
-        <div className='flex items-center justify-between gap-3 border-b border-zinc-100 dark:border-white/[0.05] px-4 py-3'>
-          <h2 className='shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className='flex max-h-[70vh] w-full max-w-[min(620px,calc(100%-3rem))] flex-col gap-0 rounded-[8px] border border-border bg-card p-0 ring-0 sm:max-w-[min(620px,calc(100%-3rem))]'
+      >
+        <div className='flex items-center justify-between gap-3 border-b border-border/60 px-4 py-3'>
+          <DialogTitle className='shrink-0 text-ui leading-normal font-semibold text-foreground'>
             Select from Media library
-          </h2>
+          </DialogTitle>
           <div className='flex items-center gap-2'>
             {items.length > 0 && (
               <div className='relative'>
                 <Search
                   size={12}
                   strokeWidth={2}
-                  className='pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-zinc-600'
+                  className='pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground'
                 />
                 <Input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder='Filter by name'
+                  aria-label='Filter media by name'
                   spellCheck={false}
-                  className='h-[28px] w-[160px] pl-6 text-[12px]'
+                  className='h-[28px] w-[160px] pl-6 text-meta'
                 />
               </div>
             )}
-            <Button
-              variant='ghost'
-              size='icon'
-              aria-label='Close'
-              onClick={onClose}
-              className='size-[26px] shrink-0 rounded-[5px] text-zinc-400 dark:text-zinc-500'
-            >
-              <X size={13} strokeWidth={2} />
-            </Button>
+            <DialogClose asChild>
+              <Button
+                variant='ghost'
+                size='icon'
+                aria-label='Close'
+                className='size-[26px] shrink-0 rounded-[5px] text-muted-foreground'
+              >
+                <X size={13} strokeWidth={2} />
+              </Button>
+            </DialogClose>
           </div>
         </div>
 
         <div className='min-h-[120px] flex-1 overflow-y-auto p-3'>
           {loading ? (
-            <p className='flex items-center gap-2 p-3 text-[12px] text-zinc-500 dark:text-zinc-500'>
+            <p className='flex items-center gap-2 p-3 text-meta text-muted-foreground'>
               <Loader2 size={13} strokeWidth={2} className='animate-spin' />
               Loading media…
             </p>
           ) : error ? (
-            <p className='p-3 text-[12px] text-red-600 dark:text-red-400'>{error}</p>
+            <p role='alert' className='p-3 text-meta text-destructive'>
+              {error}
+            </p>
           ) : items.length === 0 ? (
-            <p className='flex items-center gap-2 p-3 text-[12px] text-zinc-400 dark:text-zinc-600'>
+            <p className='flex items-center gap-2 p-3 text-meta text-muted-foreground'>
               <ImageOff size={13} strokeWidth={1.8} />
               Nothing in the library yet — upload from the Media page.
             </p>
           ) : visible.length === 0 ? (
-            <p className='p-3 text-[12px] text-zinc-400 dark:text-zinc-600'>
-              Nothing in the library matches “{query}”.
-            </p>
+            <p className='p-3 text-meta text-muted-foreground'>Nothing in the library matches “{query}”.</p>
           ) : (
             <ul className='grid grid-cols-2 gap-2 sm:grid-cols-3'>
               {visible.map((item) => (
@@ -175,12 +171,12 @@ export function MediaPicker({
                     title={item.name}
                     className={cn(
                       'w-full overflow-hidden rounded-[6px] border text-left',
-                      'border-zinc-200 dark:border-white/[0.07]',
-                      'hover:border-zinc-300 dark:hover:border-white/[0.14]',
+                      'border-border',
+                      'hover:border-input',
                       'active:scale-[0.98] transition-[border-color,transform] duration-100',
                     )}
                   >
-                    <span className='relative flex aspect-[4/3] items-center justify-center overflow-hidden bg-zinc-50 dark:bg-white/[0.02]'>
+                    <span className='relative flex aspect-[4/3] items-center justify-center overflow-hidden bg-muted/50'>
                       {item.video ? (
                         <>
                           {/* No `controls`: the tile is a preview to pick from,
@@ -197,11 +193,9 @@ export function MediaPicker({
                         <img src={item.src} alt={item.name} loading='lazy' className='size-full object-cover' />
                       )}
                     </span>
-                    <span className='block border-t border-zinc-100 px-2.5 py-1.5 dark:border-white/[0.05]'>
-                      <span className='block truncate font-mono text-[11px] text-zinc-700 dark:text-zinc-300'>
-                        {item.name}
-                      </span>
-                      <span className='mt-0.5 block text-[10px] tabular-nums text-zinc-400 dark:text-zinc-600'>
+                    <span className='block border-t border-border/60 px-2.5 py-1.5'>
+                      <span className='block truncate font-mono text-label text-body'>{item.name}</span>
+                      <span className='mt-0.5 block text-label tabular-nums text-muted-foreground'>
                         {formatBytes(item.size)}
                         {item.video && ' · video'}
                       </span>
@@ -212,7 +206,7 @@ export function MediaPicker({
             </ul>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

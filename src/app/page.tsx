@@ -15,11 +15,13 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import Link from 'next/link';
+import { toast } from 'sonner';
 import { SectionHeader } from '@/components/SectionHeader';
 import { StatusDot } from '@/components/StatusDot';
 import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { Card } from '@/components/ui/card';
 import { onPostsRefreshed, pullFromCloud, pushToCloud } from '@/lib/sync';
+import { cn } from '@/lib/utils';
 
 // ─── Data mapping ─────────────────────────────────────────────────────────────
 
@@ -65,11 +67,11 @@ function toPost(p: BackendPost): Post {
 
 const QUICK_CARD_CLASS = [
   'group flex items-start gap-3 p-4 text-left rounded-[8px]',
-  'bg-white dark:bg-[#161616]',
-  'border border-zinc-200 dark:border-white/[0.07]',
-  'hover:border-zinc-300 dark:hover:border-white/[0.12]',
+  'bg-card',
+  'border border-border',
+  'hover:border-input',
   'hover:shadow-[0_4px_16px_rgba(0,0,0,0.05)] dark:hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)]',
-  'active:scale-[0.975] active:translate-y-px active:shadow-none active:border-zinc-200 dark:active:border-white/[0.07] active:transition-none',
+  'active:scale-[0.975] active:translate-y-px active:shadow-none active:border-border active:transition-none',
   'disabled:opacity-60 disabled:cursor-wait disabled:active:scale-100',
   'transition-[border-color,box-shadow,transform] duration-150',
 ].join(' ');
@@ -77,17 +79,17 @@ const QUICK_CARD_CLASS = [
 function QuickActionInner({ Icon, label, desc }: { Icon: LucideIcon; label: string; desc: string }) {
   return (
     <>
-      <div className='p-1.75 rounded-md bg-zinc-50 dark:bg-white/[0.05] border border-zinc-100 dark:border-white/[0.06] group-hover:bg-zinc-100 dark:group-hover:bg-white/[0.08] transition-colors duration-150 shrink-0 mt-px'>
-        <Icon size={13} strokeWidth={2} className='text-zinc-500 dark:text-zinc-400' />
+      <div className='p-1.75 rounded-md bg-muted/50 border border-border/60 group-hover:bg-muted transition-colors duration-150 shrink-0 mt-px'>
+        <Icon size={13} strokeWidth={2} className='text-muted-foreground' />
       </div>
       <div className='flex-1 min-w-0'>
-        <p className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200 leading-none'>{label}</p>
-        <p className='text-[11px] text-zinc-400 dark:text-zinc-600 mt-1.25 leading-tight'>{desc}</p>
+        <p className='text-ui font-semibold text-foreground leading-none'>{label}</p>
+        <p className='text-label text-muted-foreground mt-1.25 leading-tight'>{desc}</p>
       </div>
       <ArrowUpRight
         size={13}
         strokeWidth={1.8}
-        className='shrink-0 text-zinc-300 dark:text-zinc-700 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 mt-px transition-colors duration-150'
+        className='shrink-0 text-muted-foreground group-hover:text-muted-foreground mt-px transition-colors duration-150'
       />
     </>
   );
@@ -131,8 +133,14 @@ export default function DashboardPage() {
     setSyncing((s) => ({ ...s, [which]: true }));
     try {
       await (which === 'pull' ? pullFromCloud() : pushToCloud());
+      // Said out loud because a sync that changed nothing on screen is
+      // otherwise indistinguishable from a click that did nothing.
+      toast.success(which === 'pull' ? 'Pulled posts from the cloud' : 'Pushed local posts to the cloud');
     } catch (err) {
       console.error(`${which} failed:`, err);
+      toast.error(which === 'pull' ? 'Could not pull posts from the cloud' : 'Could not push posts to the cloud', {
+        description: String(err),
+      });
     } finally {
       setSyncing((s) => ({ ...s, [which]: false }));
     }
@@ -163,6 +171,8 @@ export default function DashboardPage() {
 
   return (
     <main className='flex-1 overflow-y-auto p-6'>
+      {/* The breadcrumb names the page visually; this names it for outline navigation. */}
+      <h1 className='sr-only'>Dashboard</h1>
       <div className='space-y-10 w-full'>
         {/* Stats */}
         <section>
@@ -171,36 +181,34 @@ export default function DashboardPage() {
             {stats.map(({ label, value, Icon, delta, positive }) => (
               <Card
                 key={label}
-                className={[
+                className={cn(
                   'group relative flex flex-col justify-between',
                   'p-4 rounded-lg gap-0 ring-0',
-                  'bg-white dark:bg-[#161616]',
-                  'border border-zinc-200 dark:border-white/[0.07]',
-                  'hover:border-zinc-300 dark:hover:border-white/12',
+                  'bg-card',
+                  'border border-border',
+                  'hover:border-input',
                   'hover:shadow-[0_4px_20px_rgba(0,0,0,0.06)] dark:hover:shadow-[0_4px_20px_rgba(0,0,0,0.4)]',
                   'transition-[border-color,box-shadow] duration-200',
-                ].join(' ')}
+                )}
               >
                 <div className='flex items-center justify-between gap-2'>
-                  <span className='text-[10px] font-bold text-zinc-400 dark:text-zinc-600 uppercase tracking-widest'>
-                    {label}
-                  </span>
-                  <div className='p-1.25 rounded-[5px] bg-zinc-50 dark:bg-white/4 border border-zinc-100 dark:border-white/6'>
-                    <Icon size={12} strokeWidth={1.8} className='text-zinc-400 dark:text-zinc-600' />
+                  <span className='text-label font-bold text-muted-foreground uppercase tracking-widest'>{label}</span>
+                  <div className='p-1.25 rounded-[5px] bg-muted/50 border border-border/60'>
+                    <Icon size={12} strokeWidth={1.8} className='text-muted-foreground' />
                   </div>
                 </div>
 
-                <p className='mt-3 text-[28px] font-bold tracking-tight leading-none text-zinc-900 dark:text-zinc-50 tabular-nums'>
+                <p className='mt-3 text-[28px] font-bold tracking-tight leading-none text-foreground tabular-nums'>
                   {loading ? '—' : value}
                 </p>
 
-                <div className='mt-3 pt-3 border-t border-zinc-100 dark:border-white/4 flex items-center gap-1'>
-                  {positive && <TrendingUp size={11} strokeWidth={2} className='text-emerald-500 shrink-0' />}
+                <div className='mt-3 pt-3 border-t border-border/60 flex items-center gap-1'>
+                  {positive && <TrendingUp size={11} strokeWidth={2} className='text-success shrink-0' />}
                   <span
-                    className={[
-                      'text-[11px] font-medium leading-none',
-                      positive ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-400 dark:text-zinc-600',
-                    ].join(' ')}
+                    className={cn(
+                      'text-label font-medium leading-none',
+                      positive ? 'text-success' : 'text-muted-foreground',
+                    )}
                   >
                     {loading ? '…' : delta}
                   </span>
@@ -218,7 +226,7 @@ export default function DashboardPage() {
             action={
               <Link
                 href='/posts'
-                className='flex items-center gap-0.75 text-[11px] font-semibold text-zinc-400 dark:text-zinc-600 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors duration-100 active:scale-95 shrink-0'
+                className='flex items-center gap-0.75 text-label font-semibold text-muted-foreground hover:text-body transition-colors duration-100 active:scale-95 shrink-0'
               >
                 View all <ArrowUpRight size={11} strokeWidth={2} />
               </Link>
@@ -227,36 +235,39 @@ export default function DashboardPage() {
             Recent Posts
           </SectionHeader>
 
-          <div className='rounded-lg border border-zinc-200 dark:border-white/[0.07] overflow-hidden bg-white dark:bg-[#161616]'>
+          <div className='rounded-lg border border-border overflow-hidden bg-card'>
             {recent.length === 0 ? (
               <div className='py-12 text-center'>
-                <p className='text-[13px] text-zinc-400 dark:text-zinc-600'>
-                  {loading ? 'Loading posts…' : 'No posts yet.'}
+                <p className='text-ui text-muted-foreground'>
+                  {loading ? 'Loading posts…' : 'No posts yet. Write one, or pull existing posts from the cloud below.'}
                 </p>
               </div>
             ) : (
               recent.map((post, i) => (
                 <div
                   key={post.id}
-                  className={[
+                  className={cn(
                     'group flex items-center gap-3 px-4 py-2.75',
-                    'hover:bg-zinc-50 dark:hover:bg-white/3',
+                    'hover:bg-muted/50',
                     'transition-colors duration-100',
-                    i < recent.length - 1 ? 'border-b border-zinc-100 dark:border-white/4' : '',
-                  ].join(' ')}
+                    i < recent.length - 1 ? 'border-b border-border/60' : '',
+                  )}
                 >
                   <StatusDot status={post.status} />
 
                   <div className='flex-1 min-w-0'>
-                    <p className='text-[13px] font-medium text-zinc-800 dark:text-zinc-200 truncate leading-none group-hover:text-zinc-900 dark:group-hover:text-white transition-colors duration-100'>
+                    <p className='text-ui font-medium text-foreground truncate leading-none group-hover:text-foreground transition-colors duration-100'>
                       {post.title}
                     </p>
                     <div className='flex items-center gap-2 mt-1.25'>
-                      <span className='text-[11px] font-mono text-zinc-400 dark:text-zinc-600 tracking-tight'>
-                        {post.date}
+                      {/* The dot's colour is not something everyone can tell
+                          apart, so the status is also written out. */}
+                      <span className='text-label text-muted-foreground'>
+                        {post.status === 'published' ? 'Published' : 'Draft'}
                       </span>
+                      <span className='text-label font-mono text-muted-foreground tracking-tight'>· {post.date}</span>
                       {post.tags.map((t) => (
-                        <span key={t} className='text-[11px] text-zinc-400 dark:text-zinc-600'>
+                        <span key={t} className='text-label text-muted-foreground'>
                           · {t}
                         </span>
                       ))}
@@ -266,7 +277,7 @@ export default function DashboardPage() {
                   <ArrowUpRight
                     size={13}
                     strokeWidth={1.8}
-                    className='shrink-0 text-zinc-300 dark:text-zinc-700 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 transition-colors duration-100'
+                    className='shrink-0 text-muted-foreground group-hover:text-muted-foreground transition-colors duration-100'
                   />
                 </div>
               ))

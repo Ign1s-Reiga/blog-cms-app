@@ -1,7 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { EyeOff, Loader2, RotateCcw, Send, Tag, Trash2, X } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -85,6 +92,14 @@ export function BulkActions({
   const [tag, setTag] = useState('');
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<(BulkOutcome & { action: BulkAction }) | null>(null);
+  const tagInput = useRef<HTMLInputElement>(null);
+
+  // The action the confirmation is worded for, held past `pending` going back
+  // to null. The dialog animates out after it is closed, and rendering its
+  // contents from `pending` would blank them — or crash on `LABEL[null]` —
+  // for the length of that animation.
+  const [shown, setShown] = useState<BulkAction | null>(pending);
+  if (pending !== null && pending !== shown) setShown(pending);
 
   if (selected.length === 0 && outcome === null) return null;
 
@@ -106,9 +121,9 @@ export function BulkActions({
   return (
     <>
       {selected.length > 0 && (
-        <div className='flex flex-wrap items-center gap-2 rounded-[6px] border border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.03]'>
-          <span className='text-[12px] font-medium text-zinc-700 dark:text-zinc-300'>{selected.length} selected</span>
-          <span className='text-zinc-300 dark:text-zinc-700'>·</span>
+        <div className='flex flex-wrap items-center gap-2 rounded-[6px] border border-border bg-muted/50 px-3 py-2'>
+          <span className='text-meta font-medium text-body'>{selected.length} selected</span>
+          <span className='text-muted-foreground'>·</span>
           {actions.map((action) => (
             <Button
               key={action}
@@ -116,8 +131,8 @@ export function BulkActions({
               size='sm'
               onClick={() => setPending(action)}
               className={cn(
-                'h-[26px] gap-1.5 px-2 text-[11px] font-medium',
-                action === 'trash' && 'text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/[0.1]',
+                'h-[26px] gap-1.5 px-2 text-label font-medium',
+                action === 'trash' && 'text-destructive hover:bg-destructive/10',
               )}
             >
               {action === 'trash' && <Trash2 size={11} strokeWidth={2} />}
@@ -131,84 +146,98 @@ export function BulkActions({
           <button
             type='button'
             onClick={onClear}
-            className='ml-auto rounded-[4px] px-1.5 py-0.5 text-[11px] text-zinc-500 underline underline-offset-2 transition-colors hover:bg-zinc-100 dark:text-zinc-500 dark:hover:bg-white/[0.06]'
+            className='ml-auto rounded-[4px] px-1.5 py-0.5 text-label text-muted-foreground underline underline-offset-2 transition-colors hover:bg-muted'
           >
             Clear selection
           </button>
         </div>
       )}
 
-      {/* One confirmation for the batch, stating the count and the effect. */}
-      {pending && (
-        <div
-          role='dialog'
-          aria-modal='true'
-          aria-label={`Confirm ${LABEL[pending].toLowerCase()}`}
-          className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6'
-          onPointerDown={(e) => {
-            if (e.target === e.currentTarget && !busy) setPending(null);
+      {/* One confirmation for the batch, stating the count and the effect.
+
+          An alert dialog, so focus starts on Cancel rather than on the action
+          and comes back to the bar when it closes. Nothing closes it while a
+          run is in flight: the outcome lands in this component, and closing
+          early would hand back a bar that looks idle while posts are still
+          being changed. */}
+      <AlertDialog
+        open={pending !== null}
+        onOpenChange={(next) => {
+          if (!next && !busy) setPending(null);
+        }}
+      >
+        <AlertDialogContent
+          onOpenAutoFocus={(e) => {
+            // A tag action cannot go ahead without a name, so the field is
+            // where the work starts. Everything else starts on Cancel.
+            if (shown === 'addTag' || shown === 'removeTag') {
+              e.preventDefault();
+              tagInput.current?.focus();
+            }
           }}
+          className='block w-full rounded-[8px] border border-border bg-card p-4 ring-0 data-[size=default]:max-w-[min(480px,calc(100%-3rem))] data-[size=default]:sm:max-w-[min(480px,calc(100%-3rem))]'
         >
-          <div className='w-full max-w-[480px] rounded-[8px] border border-zinc-200 bg-white p-4 dark:border-white/[0.08] dark:bg-[#161616]'>
-            <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>{LABEL[pending]}</h2>
-            <p className='mt-2 text-[12px] leading-[1.6] text-zinc-600 dark:text-zinc-400'>
-              {describe(pending, selected.length, tag.trim() || '…')}
-            </p>
+          {shown && (
+            <>
+              <AlertDialogTitle className='text-ui font-semibold text-foreground'>{LABEL[shown]}</AlertDialogTitle>
+              <AlertDialogDescription className='mt-2 text-meta leading-[1.6] text-wrap text-body md:text-wrap'>
+                {describe(shown, selected.length, tag.trim() || '…')}
+              </AlertDialogDescription>
 
-            {(pending === 'addTag' || pending === 'removeTag') && (
-              <Input
-                autoFocus
-                value={tag}
-                onChange={(e) => setTag(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void confirm();
-                }}
-                placeholder='Tag name'
-                spellCheck={false}
-                className='mt-3 h-[30px] font-mono text-[12px]'
-              />
-            )}
+              {(shown === 'addTag' || shown === 'removeTag') && (
+                <Input
+                  ref={tagInput}
+                  value={tag}
+                  onChange={(e) => setTag(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void confirm();
+                  }}
+                  placeholder='Tag name'
+                  aria-label='Tag name'
+                  spellCheck={false}
+                  className='mt-3 h-[30px] font-mono text-meta'
+                />
+              )}
 
-            {REACHES_READERS[pending] && (
-              <p className='mt-2 text-[11px] leading-[1.6] text-amber-600 dark:text-amber-500'>
-                This one reaches Cloudflare, once per post.
-              </p>
-            )}
+              {REACHES_READERS[shown] && (
+                <p className='mt-2 text-label leading-[1.6] text-warning'>
+                  This one reaches Cloudflare, once per post.
+                </p>
+              )}
 
-            <div className='mt-4 flex items-center justify-end gap-2'>
-              <Button
-                variant='ghost'
-                size='sm'
-                onClick={() => setPending(null)}
-                disabled={busy}
-                className='h-[30px] text-[12px]'
-              >
-                Cancel
-              </Button>
-              <Button
-                size='sm'
-                onClick={() => void confirm()}
-                disabled={busy || ((pending === 'addTag' || pending === 'removeTag') && tag.trim() === '')}
-                className={cn(
-                  'h-[30px] gap-1.5 text-[12px] font-semibold',
-                  pending === 'trash' && 'bg-red-600 text-white hover:bg-red-700 dark:bg-red-600 dark:hover:bg-red-700',
-                )}
-              >
-                {busy && <Loader2 size={12} strokeWidth={2} className='animate-spin' />}
-                {busy ? 'Working…' : LABEL[pending]}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+              <div className='mt-4 flex items-center justify-end gap-2'>
+                <AlertDialogCancel variant='ghost' size='sm' disabled={busy} className='h-[30px] text-meta'>
+                  Cancel
+                </AlertDialogCancel>
+                {/* A plain button, not `AlertDialogAction`: that one closes the
+                    dialog on click, and this has to stay up until the run is
+                    done. */}
+                <Button
+                  size='sm'
+                  variant={shown === 'trash' ? 'destructive' : 'default'}
+                  onClick={() => void confirm()}
+                  disabled={busy || ((shown === 'addTag' || shown === 'removeTag') && tag.trim() === '')}
+                  className='h-[30px] gap-1.5 text-meta font-semibold'
+                >
+                  {busy && <Loader2 size={12} strokeWidth={2} className='animate-spin' />}
+                  {busy ? 'Working…' : LABEL[shown]}
+                </Button>
+              </div>
+            </>
+          )}
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* What happened, per post where it did not work. Nothing is rolled back:
           the posts that succeeded stay done, and the ones that did not are
           named rather than folded into a count. */}
       {outcome && (
-        <div className='space-y-2'>
-          <div className='flex items-start gap-2 rounded-[6px] border border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-white/[0.08] dark:bg-white/[0.03]'>
-            <p className='flex-1 text-[12px] text-zinc-600 dark:text-zinc-400'>
+        // A status region, so the result is read out once the dialog that
+        // started the run has closed — without it, a screen reader user hears
+        // focus come back and nothing about what was done.
+        <div role='status' className='space-y-2'>
+          <div className='flex items-start gap-2 rounded-[6px] border border-border bg-muted/50 px-3 py-2'>
+            <p className='flex-1 text-meta text-body'>
               {LABEL[outcome.action]}: {outcome.done} done
               {outcome.failed.length > 0 && `, ${outcome.failed.length} failed`}
               {outcome.skipped.length > 0 && `, ${outcome.skipped.length} left alone`}.
@@ -217,20 +246,20 @@ export function BulkActions({
               type='button'
               onClick={() => setOutcome(null)}
               aria-label='Dismiss'
-              className='shrink-0 rounded-[4px] p-0.5 text-zinc-400 transition-colors hover:bg-zinc-100 dark:text-zinc-500 dark:hover:bg-white/[0.06]'
+              className='shrink-0 rounded-[4px] p-0.5 text-muted-foreground transition-colors hover:bg-muted'
             >
               <X size={12} strokeWidth={2} />
             </button>
           </div>
 
           {outcome.failed.map((f) => (
-            <p key={f.id} className='px-3 text-[11px] leading-[1.6] text-red-600 dark:text-red-400'>
+            <p key={f.id} className='px-3 text-label leading-[1.6] text-destructive'>
               <span className='font-medium'>{f.title}</span>: {f.message}
             </p>
           ))}
 
           {outcome.skipped.filter((p) => p.reason === 'body_not_cached').length > 0 && (
-            <p className='px-3 text-[11px] leading-[1.6] text-amber-600 dark:text-amber-500'>
+            <p className='px-3 text-label leading-[1.6] text-warning'>
               Left unchanged because their text is not on this machine, so the edit could not be recorded and the next
               refresh would undo it:{' '}
               {outcome.skipped
@@ -246,7 +275,7 @@ export function BulkActions({
           )}
 
           {outcome.skipped.filter((p) => p.reason === 'body_stale').length > 0 && (
-            <p className='px-3 text-[11px] leading-[1.6] text-amber-600 dark:text-amber-500'>
+            <p className='px-3 text-label leading-[1.6] text-warning'>
               Left unchanged because the copy of their text here is behind the cloud&apos;s. Recording an edit against
               it would put this machine&apos;s older text forward as the newer one:{' '}
               {outcome.skipped

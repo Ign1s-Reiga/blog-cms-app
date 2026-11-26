@@ -1,9 +1,18 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FileWarning, Trash2, Upload } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { isVideo } from '@/lib/media';
 import { cn } from '@/lib/utils';
 
@@ -93,6 +102,13 @@ export default function MediaPage() {
   /// is "what uses this", the other "delete it anyway?".
   const [inspecting, setInspecting] = useState<MediaItem | null>(null);
   const [confirming, setConfirming] = useState<MediaItem | null>(null);
+  /// A forced delete in flight. The confirmation stays up until it settles, so
+  /// a slow R2 call cannot be dismissed into looking like it never happened.
+  const [deleting, setDeleting] = useState(false);
+  /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
+  /// trigger — both open from buttons inside a tile — so without this a
+  /// keyboard user would be dropped at the top of the document.
+  const returnFocus = useRef<HTMLElement | null>(null);
   /// Posts whose Markdown is not on this machine. While there are any, nothing
   /// here can prove an object is unused — see `withUsage`.
   const [uncheckedPosts, setUncheckedPosts] = useState<UncheckedPost[]>([]);
@@ -170,6 +186,7 @@ export default function MediaPage() {
   const handleDelete = async (item: MediaItem, force: boolean) => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
+    setDeleting(true);
     try {
       await invoke('delete_media', { key: item.key, force });
       setItems((prev) => prev.filter((i) => i.key !== item.key));
@@ -177,6 +194,8 @@ export default function MediaPage() {
     } catch (e) {
       setError(String(e));
       setConfirming(null);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -188,7 +207,22 @@ export default function MediaPage() {
       void handleDelete(item, false);
       return;
     }
+    returnFocus.current = document.activeElement as HTMLElement | null;
     setConfirming(item);
+  };
+
+  const inspect = (item: MediaItem) => {
+    returnFocus.current = document.activeElement as HTMLElement | null;
+    setInspecting(item);
+  };
+
+  /// Radix sends focus back to a dialog's trigger, and these have none, so this
+  /// sends it to the button that opened them instead. A tile deleted in the
+  /// meantime has taken that button with it, and there is nothing to return to.
+  const restoreFocus = (e: Event) => {
+    e.preventDefault();
+    if (returnFocus.current?.isConnected) returnFocus.current.focus();
+    returnFocus.current = null;
   };
 
   return (
@@ -197,8 +231,8 @@ export default function MediaPage() {
         {/* Toolbar */}
         <div className='flex items-center justify-between gap-4'>
           <div className='flex items-baseline gap-2'>
-            <h1 className='text-[15px] font-semibold text-zinc-800 dark:text-zinc-200'>Media Library</h1>
-            <span className='text-[12px] text-zinc-400 dark:text-zinc-600'>
+            <h1 className='text-title font-semibold tracking-tight text-balance text-foreground'>Media Library</h1>
+            <span className='text-meta text-muted-foreground'>
               {items.length} {items.length === 1 ? 'file' : 'files'}
             </span>
           </div>
@@ -206,7 +240,7 @@ export default function MediaPage() {
             size='sm'
             onClick={handleUpload}
             disabled={busy}
-            className='h-[30px] px-3 gap-[6px] rounded-[6px] text-[13px] font-semibold'
+            className='h-[30px] px-3 gap-[6px] rounded-[6px] text-ui font-semibold'
           >
             <Upload size={13} strokeWidth={2} />
             {busy ? 'Uploading…' : 'Upload'}
@@ -216,7 +250,7 @@ export default function MediaPage() {
         {/* Why some tiles say "usage unknown". Without this the label looks
             like a bug rather than a fact about what is on this machine. */}
         {uncheckedPosts.length > 0 && (
-          <div className='rounded-[6px] px-3 py-2 border border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/[0.08] dark:text-amber-400 text-[12px]'>
+          <div className='rounded-[6px] px-3 py-2 border border-warning/30 bg-warning/10 text-warning text-meta'>
             <span className='font-medium'>
               {uncheckedPosts.length} {uncheckedPosts.length === 1 ? 'post could' : 'posts could'} not be checked in
               full
@@ -233,25 +267,25 @@ export default function MediaPage() {
         )}
 
         {error && (
-          <div className='rounded-[6px] px-3 py-2 border border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/[0.08] dark:text-red-400 text-[12px] font-medium'>
+          <div
+            role='alert'
+            className='rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
+          >
             {error}
           </div>
         )}
 
         {loading ? (
-          <p className='py-16 text-center text-[13px] text-zinc-400 dark:text-zinc-600'>Loading media…</p>
+          <p className='py-16 text-center text-ui text-muted-foreground'>Loading media…</p>
         ) : items.length === 0 ? (
-          <p className='py-16 text-center text-[13px] text-zinc-400 dark:text-zinc-600'>
+          <p className='py-16 text-center text-ui text-muted-foreground'>
             No media yet. Upload an image or video to get started.
           </p>
         ) : (
           <div className='grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3'>
             {items.map((item) => (
-              <div
-                key={item.key}
-                className='group relative rounded-[8px] border border-zinc-200 dark:border-white/[0.07] overflow-hidden bg-white dark:bg-[#161616]'
-              >
-                <div className='aspect-square bg-zinc-50 dark:bg-white/[0.02] flex items-center justify-center overflow-hidden'>
+              <div key={item.key} className='group relative rounded-[8px] border border-border overflow-hidden bg-card'>
+                <div className='aspect-square bg-muted/50 flex items-center justify-center overflow-hidden'>
                   {item.isVideo ? (
                     <video src={item.src} muted preload='metadata' className='w-full h-full object-cover' />
                   ) : (
@@ -259,10 +293,10 @@ export default function MediaPage() {
                     <img src={item.src} alt={item.name} loading='lazy' className='w-full h-full object-cover' />
                   )}
                 </div>
-                <div className='flex items-center justify-between gap-2 px-2.5 py-2 border-t border-zinc-100 dark:border-white/[0.05]'>
+                <div className='flex items-center justify-between gap-2 px-2.5 py-2 border-t border-border/60'>
                   <div className='min-w-0'>
-                    <p className='text-[11px] font-mono text-zinc-600 dark:text-zinc-400 truncate'>{item.name}</p>
-                    <p className='text-[10px] text-zinc-400 dark:text-zinc-600'>
+                    <p className='text-label font-mono text-body truncate'>{item.name}</p>
+                    <p className='text-label text-muted-foreground'>
                       {formatSize(item.size)}
                       {' · '}
                       {item.usedBy.posts.length === 0 ? (
@@ -278,9 +312,9 @@ export default function MediaPage() {
                       ) : (
                         <button
                           type='button'
-                          onClick={() => setInspecting(item)}
+                          onClick={() => inspect(item)}
                           title='See which posts use this'
-                          className='underline decoration-dotted underline-offset-2 hover:text-zinc-600 dark:hover:text-zinc-400 transition-colors'
+                          className='underline decoration-dotted underline-offset-2 hover:text-body transition-colors'
                         >
                           {usageLabel(item.usedBy)}
                         </button>
@@ -291,7 +325,7 @@ export default function MediaPage() {
                     type='button'
                     aria-label={`Delete ${item.name}`}
                     onClick={() => requestDelete(item)}
-                    className='shrink-0 p-1 rounded-[4px] text-zinc-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/[0.1] transition-colors opacity-0 group-hover:opacity-100'
+                    className='shrink-0 p-1 rounded-[4px] text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100'
                   >
                     <Trash2 size={13} strokeWidth={2} />
                   </button>
@@ -303,24 +337,27 @@ export default function MediaPage() {
 
         {/* Which posts use an object. Opening one is the point — a name and a
             thumbnail are rarely enough to remember what an image was for. */}
-        {inspecting && (
-          <div
-            role='dialog'
-            aria-modal='true'
-            aria-label={`Posts using ${inspecting.name}`}
-            className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6'
-            onPointerDown={(e) => {
-              if (e.target === e.currentTarget) setInspecting(null);
-            }}
-          >
-            <div className='flex max-h-[70vh] w-full max-w-[520px] flex-col rounded-[8px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616]'>
-              <div className='border-b border-zinc-100 dark:border-white/[0.05] px-4 py-3'>
-                <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>
+        <Dialog
+          open={inspecting !== null}
+          onOpenChange={(open) => {
+            if (!open) setInspecting(null);
+          }}
+        >
+          {inspecting && (
+            <DialogContent
+              showCloseButton={false}
+              onCloseAutoFocus={restoreFocus}
+              className='flex max-h-[70vh] flex-col gap-0 rounded-[8px] border border-border bg-card p-0 ring-0 sm:max-w-[520px]'
+            >
+              <div className='border-b border-border/60 px-4 py-3'>
+                <DialogTitle className='text-ui leading-normal font-semibold text-foreground'>
                   Used by {inspecting.usedBy.posts.length}
                   {inspecting.usedBy.complete ? '' : ' or more'}{' '}
                   {inspecting.usedBy.posts.length === 1 && inspecting.usedBy.complete ? 'post' : 'posts'}
-                </h2>
-                <p className='mt-0.5 font-mono text-[11px] text-zinc-400 dark:text-zinc-600'>{inspecting.name}</p>
+                </DialogTitle>
+                <DialogDescription className='mt-0.5 font-mono text-label text-muted-foreground'>
+                  {inspecting.name}
+                </DialogDescription>
               </div>
               <ul className='min-h-0 flex-1 overflow-y-auto p-2'>
                 {inspecting.usedBy.posts.map((post) => (
@@ -338,103 +375,109 @@ export default function MediaPage() {
                           : undefined
                       }
                       onClick={() => router.push(`/posts/edit?id=${post.id}`)}
-                      className='flex w-full items-baseline justify-between gap-3 rounded-[6px] px-2.5 py-2 text-left transition-colors enabled:hover:bg-zinc-50 enabled:active:scale-[0.99] disabled:cursor-default dark:enabled:hover:bg-white/[0.03]'
+                      className='flex w-full items-baseline justify-between gap-3 rounded-[6px] px-2.5 py-2 text-left transition-colors enabled:hover:bg-muted/50 enabled:active:scale-[0.99] disabled:cursor-default'
                     >
                       <span
                         className={cn(
-                          'truncate text-[12px] font-medium',
+                          'truncate text-meta font-medium',
                           post.trashed
-                            ? 'text-zinc-400 line-through decoration-zinc-300 dark:text-zinc-600 dark:decoration-zinc-700'
-                            : 'text-zinc-700 dark:text-zinc-300',
+                            ? 'text-muted-foreground line-through decoration-muted-foreground/40'
+                            : 'text-body',
                         )}
                       >
                         {post.title}
                       </span>
-                      <span className='shrink-0 text-[10px] font-semibold uppercase tracking-[0.08em] text-zinc-400 dark:text-zinc-600'>
+                      <span className='shrink-0 text-label font-semibold uppercase tracking-[0.08em] text-muted-foreground'>
                         {post.trashed ? 'In trash' : post.published ? 'Live' : 'Draft'}
                       </span>
                     </button>
                   </li>
                 ))}
               </ul>
-              <div className='flex justify-end border-t border-zinc-100 dark:border-white/[0.05] px-4 py-2.5'>
-                <Button
-                  variant='outline'
-                  size='sm'
-                  onClick={() => setInspecting(null)}
-                  className='h-[28px] px-3 rounded-[5px] text-[12px] font-semibold'
-                >
-                  Close
-                </Button>
+              <div className='flex justify-end border-t border-border/60 px-4 py-2.5'>
+                <DialogClose asChild>
+                  <Button variant='outline' size='sm' className='h-[28px] px-3 rounded-[5px] text-meta font-semibold'>
+                    Close
+                  </Button>
+                </DialogClose>
               </div>
-            </div>
-          </div>
-        )}
+            </DialogContent>
+          )}
+        </Dialog>
 
         {/* Deleting something a post still points at. The backend refuses this
             without `force`, so this dialog is the only way through — which is
             what makes the warning a gate rather than a courtesy. */}
-        {confirming && (
-          <div
-            role='dialog'
-            aria-modal='true'
-            aria-label='Confirm media deletion'
-            className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6'
-            onPointerDown={(e) => {
-              if (e.target === e.currentTarget) setConfirming(null);
-            }}
-          >
-            <div className='w-full max-w-[480px] rounded-[8px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616] p-4'>
-              <h2 className='flex items-center gap-2 text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>
-                <FileWarning size={14} strokeWidth={2} className='text-amber-500' />
+        <AlertDialog
+          open={confirming !== null}
+          onOpenChange={(open) => {
+            if (!open && !deleting) setConfirming(null);
+          }}
+        >
+          {confirming && (
+            <AlertDialogContent
+              onCloseAutoFocus={restoreFocus}
+              className='gap-0 rounded-[8px] border border-border bg-card p-4 ring-0 data-[size=default]:max-w-[480px] data-[size=default]:sm:max-w-[480px]'
+            >
+              <AlertDialogTitle className='flex items-center gap-2 text-ui font-semibold text-foreground'>
+                <FileWarning size={14} strokeWidth={2} className='text-warning' />
                 {confirming.usedBy.posts.length === 0
                   ? 'Nobody checked whether this is used'
                   : `${confirming.usedBy.posts.length}${confirming.usedBy.complete ? '' : ' or more'} ${
                       confirming.usedBy.posts.length === 1 && confirming.usedBy.complete ? 'post uses' : 'posts use'
                     } this image`}
-              </h2>
-              <p className='mt-1.5 text-[12px] leading-[1.6] text-zinc-500 dark:text-zinc-500'>
+              </AlertDialogTitle>
+              <AlertDialogDescription className='mt-1.5 text-meta leading-[1.6] text-pretty text-muted-foreground'>
                 {confirming.usedBy.posts.length === 0
                   ? 'Either this object is not cached on this machine, or some post could not be accounted for in full — so there was nothing conclusive to match against. It may well be in use. The banner above says what would settle it.'
                   : confirming.usedBy.complete
                     ? 'Deleting it removes the object from R2. Any published post pointing at it will show a broken image to readers until it is replaced.'
                     : 'Deleting it removes the object from R2, and these are only the posts that could be checked — others may reference it too. Any published post pointing at it will show a broken image to readers until it is replaced.'}
-              </p>
+              </AlertDialogDescription>
               {confirming.usedBy.posts.length > 0 && (
-                <ul className='mt-3 max-h-[180px] overflow-y-auto rounded-[6px] border border-zinc-200 dark:border-white/[0.07]'>
+                <ul className='mt-3 max-h-[180px] overflow-y-auto rounded-[6px] border border-border'>
                   {confirming.usedBy.posts.map((post) => (
                     <li
                       key={post.id}
-                      className='flex items-baseline justify-between gap-3 border-b border-zinc-100 px-2.5 py-1.5 last:border-b-0 dark:border-white/[0.04]'
+                      className='flex items-baseline justify-between gap-3 border-b border-border/60 px-2.5 py-1.5 last:border-b-0'
                     >
-                      <span className='truncate text-[12px] text-zinc-700 dark:text-zinc-300'>{post.title}</span>
-                      <span className='shrink-0 text-[10px] font-semibold uppercase tracking-[0.08em] text-zinc-400 dark:text-zinc-600'>
+                      <span className='truncate text-meta text-body'>{post.title}</span>
+                      <span className='shrink-0 text-label font-semibold uppercase tracking-[0.08em] text-muted-foreground'>
                         {post.trashed ? 'In trash' : post.published ? 'Live' : 'Draft'}
                       </span>
                     </li>
                   ))}
                 </ul>
               )}
+              {/* An alert dialog opens on its Cancel, so the destructive answer
+                  always takes a deliberate move, and it is not dismissed by a
+                  stray click outside. */}
               <div className='mt-4 flex items-center justify-end gap-2'>
-                <Button
-                  variant='outline'
+                <AlertDialogCancel
                   size='sm'
-                  onClick={() => setConfirming(null)}
-                  className='h-[28px] px-3 rounded-[5px] text-[12px] font-semibold'
+                  disabled={deleting}
+                  className='h-[28px] px-3 rounded-[5px] text-meta font-semibold'
                 >
                   Keep it
-                </Button>
-                <Button
+                </AlertDialogCancel>
+                <AlertDialogAction
+                  variant='destructive'
                   size='sm'
-                  onClick={() => void handleDelete(confirming, true)}
-                  className='h-[28px] px-3 rounded-[5px] text-[12px] font-semibold bg-red-600 text-white hover:bg-red-700 dark:bg-red-600 dark:hover:bg-red-700'
+                  disabled={deleting}
+                  onClick={(e) => {
+                    // Held open until the delete settles: `handleDelete`
+                    // closes it either way, and says so if it failed.
+                    e.preventDefault();
+                    void handleDelete(confirming, true);
+                  }}
+                  className='h-[28px] px-3 rounded-[5px] text-meta font-semibold'
                 >
-                  Delete anyway
-                </Button>
+                  {deleting ? 'Deleting…' : 'Delete anyway'}
+                </AlertDialogAction>
               </div>
-            </div>
-          </div>
-        )}
+            </AlertDialogContent>
+          )}
+        </AlertDialog>
       </div>
     </main>
   );

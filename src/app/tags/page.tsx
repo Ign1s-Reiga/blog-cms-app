@@ -89,22 +89,22 @@ export default function TagsPage() {
     <main className='flex-1 overflow-y-auto p-6'>
       <div className='max-w-[720px] space-y-4'>
         <div>
-          <h1 className='text-[15px] font-semibold text-zinc-800 dark:text-zinc-200'>Tags</h1>
-          <p className='text-[12px] text-zinc-500 dark:text-zinc-600'>
+          <h1 className='text-title font-semibold tracking-tight text-balance text-foreground'>Tags</h1>
+          <p className='text-meta text-muted-foreground'>
             Every tag in the library, as it is stored. Renaming one onto another merges them.
           </p>
         </div>
 
         {error && (
           <Alert variant='destructive'>
-            <AlertDescription className='text-[12px]'>{error}</AlertDescription>
+            <AlertDescription className='text-meta'>{error}</AlertDescription>
           </Alert>
         )}
 
         {result && (
-          <Alert className='items-start rounded-[6px] px-3 py-2 border-emerald-200 bg-emerald-50 dark:border-emerald-500/20 dark:bg-emerald-500/[0.08]'>
-            <Check size={13} strokeWidth={2} className='mt-[2px] size-3.5 text-emerald-600 dark:text-emerald-400' />
-            <AlertDescription className='text-[12px] text-emerald-700 dark:text-emerald-400'>
+          <Alert className='items-start rounded-[6px] px-3 py-2 border-success/30 bg-success/10'>
+            <Check size={13} strokeWidth={2} className='mt-[2px] size-3.5 text-success' />
+            <AlertDescription className='text-meta text-success'>
               <span className='font-mono font-semibold'>{result.from}</span> → {}
               <span className='font-mono font-semibold'>{result.to}</span> on {result.changed} post
               {result.changed === 1 ? '' : 's'}. They are edited locally and go up on the next push.
@@ -115,8 +115,8 @@ export default function TagsPage() {
         {/* A rename that visibly did not finish, rather than one that silently
             comes undone on the next Refresh. */}
         {result && result.skipped.length > 0 && (
-          <Alert className='items-start rounded-[6px] px-3 py-2 border-amber-200 bg-amber-50/60 dark:border-amber-900/40 dark:bg-amber-950/20'>
-            <AlertDescription className='text-[12px] leading-[1.6] text-amber-700 dark:text-amber-500'>
+          <Alert className='items-start rounded-[6px] px-3 py-2 border-warning/30 bg-warning/10'>
+            <AlertDescription className='text-meta leading-[1.6] text-warning'>
               {result.skipped.length} post{result.skipped.length === 1 ? '' : 's'} carrying{' '}
               <span className='font-mono font-semibold'>{result.from}</span>{' '}
               {result.skipped.length === 1 ? 'was' : 'were'} left unchanged:{' '}
@@ -140,25 +140,24 @@ export default function TagsPage() {
         )}
 
         {loading ? (
-          <p className='flex items-center gap-2 p-3 text-[12px] text-zinc-500 dark:text-zinc-500'>
+          <p className='flex items-center gap-2 p-3 text-meta text-muted-foreground'>
             <Loader2 size={13} strokeWidth={2} className='animate-spin' />
             Reading tags…
           </p>
         ) : tags.length === 0 ? (
-          <div className='rounded-[8px] border border-dashed border-zinc-200 px-4 py-8 text-center dark:border-white/[0.08]'>
-            <TagsIcon size={18} strokeWidth={1.6} className='mx-auto text-zinc-300 dark:text-zinc-700' />
-            <p className='mt-2 text-[12px] text-zinc-500 dark:text-zinc-600'>
-              No tags yet. Add them to a post from its editor.
-            </p>
+          <div className='rounded-[8px] border border-dashed border-border px-4 py-8 text-center'>
+            <TagsIcon size={18} strokeWidth={1.6} className='mx-auto text-muted-foreground' />
+            <p className='mt-2 text-meta text-muted-foreground'>No tags yet. Add them to a post from its editor.</p>
           </div>
         ) : (
-          <ul className='divide-y divide-zinc-100 rounded-[8px] border border-zinc-200 bg-white dark:divide-white/[0.05] dark:border-white/[0.07] dark:bg-[#161616]'>
+          <ul className='divide-y divide-border/60 rounded-[8px] border border-border bg-card'>
             {tags.map((tag) => (
               <li key={tag.name} className='px-3 py-2'>
                 {editing?.from === tag.name ? (
                   <div className='flex items-center gap-2'>
                     <Input
                       autoFocus
+                      aria-label={`New name for ${tag.name}`}
                       value={editing.to}
                       onChange={(e) => setEditing({ ...editing, to: e.target.value })}
                       onKeyDown={(e) => {
@@ -166,13 +165,13 @@ export default function TagsPage() {
                         if (e.key === 'Escape') setEditing(null);
                       }}
                       spellCheck={false}
-                      className='h-[28px] flex-1 font-mono text-[12px]'
+                      className='h-[28px] flex-1 font-mono text-meta'
                     />
                     <Button
                       size='sm'
                       onClick={() => void commit()}
                       disabled={busy || editing.to.trim() === ''}
-                      className='h-[28px] gap-1.5 text-[11px] font-semibold'
+                      className='h-[28px] gap-1.5 text-label font-semibold'
                     >
                       {mergesInto(editing.to) && <Merge size={11} strokeWidth={2} />}
                       {busy ? 'Working…' : mergesInto(editing.to) ? 'Merge' : 'Rename'}
@@ -183,7 +182,7 @@ export default function TagsPage() {
                       aria-label='Cancel'
                       onClick={() => setEditing(null)}
                       disabled={busy}
-                      className='size-[26px] rounded-[5px] text-zinc-400 dark:text-zinc-500'
+                      className='size-[26px] rounded-[5px] text-muted-foreground'
                     >
                       <X size={13} strokeWidth={2} />
                     </Button>
@@ -194,12 +193,10 @@ export default function TagsPage() {
                       type='button'
                       onClick={() => router.push(`/posts?tag=${encodeURIComponent(tag.name)}`)}
                       title={`Show the ${tag.posts} post${tag.posts === 1 ? '' : 's'} tagged ${tag.name}`}
-                      className='flex min-w-0 flex-1 items-baseline gap-2.5 rounded-[5px] px-1 py-0.5 text-left transition-colors hover:bg-zinc-50 dark:hover:bg-white/[0.03]'
+                      className='flex min-w-0 flex-1 items-baseline gap-2.5 rounded-[5px] px-1 py-0.5 text-left transition-colors hover:bg-muted/50'
                     >
-                      <span className='truncate font-mono text-[12px] font-semibold text-zinc-700 dark:text-zinc-300'>
-                        {tag.name}
-                      </span>
-                      <span className='shrink-0 text-[11px] tabular-nums text-zinc-400 dark:text-zinc-600'>
+                      <span className='truncate font-mono text-meta font-semibold text-body'>{tag.name}</span>
+                      <span className='shrink-0 text-label tabular-nums text-muted-foreground'>
                         {tag.posts} post{tag.posts === 1 ? '' : 's'}
                       </span>
                     </button>
@@ -208,7 +205,7 @@ export default function TagsPage() {
                       size='icon'
                       aria-label={`Rename ${tag.name}`}
                       onClick={() => setEditing({ from: tag.name, to: tag.name })}
-                      className='size-[26px] shrink-0 rounded-[5px] text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 dark:text-zinc-500'
+                      className='size-[26px] shrink-0 rounded-[5px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100'
                     >
                       <Pencil size={12} strokeWidth={2} />
                     </Button>
@@ -220,7 +217,7 @@ export default function TagsPage() {
         )}
 
         {tags.length > 0 && (
-          <p className='text-[11px] leading-[1.6] text-zinc-500 dark:text-zinc-600'>
+          <p className='text-label leading-[1.6] text-muted-foreground'>
             Tags are listed exactly as they are stored, so <span className='font-mono'>Rust</span> and{' '}
             <span className='font-mono'>rust</span> appear separately — which is how you find the ones worth merging.
             Search treats them as the same, which is what hides the difference elsewhere.

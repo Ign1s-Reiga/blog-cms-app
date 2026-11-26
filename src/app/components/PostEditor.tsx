@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import {
   ArrowLeft,
@@ -37,6 +37,18 @@ import { cn } from '@/lib/utils';
 import { useScrollSync } from '@/lib/scrollSync';
 
 type EditorMode = 'write' | 'split' | 'preview';
+
+// The metadata fields above the body are borderless so the page reads as a
+// document rather than a form. That leaves nothing on screen to say which one
+// has the caret, so focus shades the field and draws a faint inset ring — the
+// same treatment on every one of them, so it reads as one signal.
+const DOC_FIELD =
+  'rounded-[4px] bg-transparent border-none outline-none transition-colors focus-visible:bg-muted/50 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/40';
+
+// The small inline fields sit flush with their icons. Padding the field and
+// pulling it back by the same amount gives the focus shade room around the
+// text without moving anything at rest.
+const INLINE_FIELD = cn(DOC_FIELD, 'px-1 -mx-1');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -366,6 +378,42 @@ export function PostEditor() {
   const [schedule, setSchedule] = useState<Schedule | null>(null);
   /// Whether the "publish later" controls are open, and what has been picked.
   const [scheduling, setScheduling] = useState(false);
+  const scheduleRootRef = useRef<HTMLDivElement>(null);
+  const scheduleInputRef = useRef<HTMLInputElement>(null);
+  const schedulePopoverId = useId();
+
+  // The schedule popover takes focus when it opens and closes on Escape or a
+  // click outside it, as any popover does.
+  useEffect(() => {
+    if (!scheduling) return;
+    // The wrapper outlives the popover (it holds the button that opens it), so
+    // the node read now is still the one to return focus into at close.
+    const root = scheduleRootRef.current;
+    scheduleInputRef.current?.focus();
+    const onPointerDown = (e: PointerEvent) => {
+      if (!root?.contains(e.target as Node)) setScheduling(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setScheduling(false);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown);
+      // By now the popover is gone, and focus that was inside it went with it
+      // to the page body. Hand it back to the control the popover belongs to —
+      // the Schedule button, or Cancel schedule once a schedule was set. Focus
+      // somewhere else means the author put it there; it stays.
+      if (document.activeElement === null || document.activeElement === document.body) {
+        root?.querySelector<HTMLElement>('button')?.focus();
+      }
+    };
+  }, [scheduling]);
+
   const [scheduleAt, setScheduleAt] = useState('');
 
   /// Pull one post's metadata, body and sync state out of the backend into the
@@ -835,6 +883,23 @@ export function PostEditor() {
   };
 
   const [mode, setMode] = useState<EditorMode>('write');
+
+  /// Arrow keys move through the views and switch to the one they land on, as
+  /// radio buttons do — wrapping at the ends, with Home and End for the first
+  /// and last.
+  function handleModeKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    const order: EditorMode[] = ['write', 'split', 'preview'];
+    const at = order.indexOf(mode);
+    let next: number | null = null;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (at + 1) % order.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (at - 1 + order.length) % order.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = order.length - 1;
+    if (next === null) return;
+    e.preventDefault();
+    setMode(order[next]);
+    e.currentTarget.querySelector<HTMLElement>(`[data-mode="${order[next]}"]`)?.focus();
+  }
   const [preview, setPreview] = useState('');
   const [historyOpen, setHistoryOpen] = useState(false);
 
@@ -1017,15 +1082,36 @@ export function PostEditor() {
     },
   ];
 
+  // Put the caret back where the menu was opened from. Without this, closing
+  // the menu from the keyboard drops focus on the page body and the author has
+  // to find their place in the text again.
+  function returnToEditor() {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(savedSel.current.start, savedSel.current.end);
+  }
+
   // Dismiss the menu on outside pointer, Escape, scroll or resize.
   useEffect(() => {
     if (!menu) return;
-    const close = () => setMenu(null);
+    // Focus is handed back only when it was in the menu. An outside click has
+    // already put it where the author wanted it.
+    const close = () => {
+      const hadFocus = menuRef.current?.contains(document.activeElement) ?? false;
+      setMenu(null);
+      if (hadFocus) returnToEditor();
+    };
     const onPointerDown = (e: PointerEvent) => {
-      if (!menuRef.current?.contains(e.target as Node)) close();
+      if (!menuRef.current?.contains(e.target as Node)) {
+        setMenu(null);
+      }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        close();
+      }
     };
     window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('keydown', onKeyDown);
@@ -1039,8 +1125,10 @@ export function PostEditor() {
     };
   }, [menu]);
 
-  // Once rendered, nudge the menu back inside the viewport if it overflows.
-  useEffect(() => {
+  // Once rendered, nudge the menu back inside the viewport if it overflows. A
+  // layout effect, so the correction lands before the browser paints — a
+  // passive one let the menu show for a frame hanging off the window edge.
+  useLayoutEffect(() => {
     if (!menu || !menuRef.current) return;
     const { width, height } = menuRef.current.getBoundingClientRect();
     const pad = 8;
@@ -1048,6 +1136,38 @@ export function PostEditor() {
     const y = Math.max(pad, Math.min(menu.y, window.innerHeight - height - pad));
     if (x !== menu.x || y !== menu.y) setMenu({ x, y });
   }, [menu]);
+
+  // Opening the menu moves focus to its first item, so the keyboard can reach
+  // it at all. Keyed on open rather than on position: the clamp above moves
+  // the menu, and that must not pull focus back to the top item.
+  const menuOpen = menu !== null;
+  useEffect(() => {
+    if (!menuOpen) return;
+    menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus({ preventScroll: true });
+  }, [menuOpen]);
+
+  // Arrow keys, Home and End move between the items, wrapping at the ends, as
+  // a menu does. Tab leaves the menu — it is a transient surface, not a stop
+  // in the page's tab order — and returns to the text.
+  function handleMenuKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+    if (items.length === 0) return;
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    let next: number | null = null;
+    if (e.key === 'ArrowDown') next = (at + 1) % items.length;
+    else if (e.key === 'ArrowUp') next = (at - 1 + items.length) % items.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = items.length - 1;
+    else if (e.key === 'Tab') {
+      e.preventDefault();
+      setMenu(null);
+      returnToEditor();
+      return;
+    }
+    if (next === null) return;
+    e.preventDefault();
+    items[next].focus({ preventScroll: true });
+  }
 
   function handleEditorKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.nativeEvent.isComposing) return; // don't interfere with IME
@@ -1374,20 +1494,27 @@ export function PostEditor() {
 
   // ── Shared fields, composed differently per layout mode below ────────────────
 
+  // Each field's error is tied to the field, so a screen reader landing on the
+  // field hears why it was refused.
+  const seriesErrorId = useId();
+  const thumbnailErrorId = useId();
+  const slugErrorId = useId();
+
   const titleField = (
     <input
       type='text'
       value={title}
       onChange={(e) => setTitle(e.target.value)}
+      aria-label='Title'
       placeholder='Post title'
-      className={[
+      className={cn(
         'w-full px-4 pt-8 pb-1',
         'text-[26px] font-bold leading-snug tracking-tight',
-        'text-zinc-900 dark:text-zinc-50',
-        'placeholder:text-zinc-200 dark:placeholder:text-zinc-800',
-        'bg-transparent border-none outline-none focus:ring-0',
+        'text-foreground',
+        'placeholder:text-muted-foreground/70',
+        DOC_FIELD,
         'shrink-0',
-      ].join(' ')}
+      )}
     />
   );
 
@@ -1412,42 +1539,44 @@ export function PostEditor() {
         if (e.key === 'Enter' && !e.nativeEvent.isComposing) e.preventDefault();
       }}
       placeholder='Excerpt — the card text and meta description'
-      className={[
+      className={cn(
         'w-full px-4 pt-1 pb-1 resize-none field-sizing-content',
         'text-[14px] leading-relaxed',
-        'text-zinc-600 dark:text-zinc-400',
-        'placeholder:text-zinc-300 dark:placeholder:text-zinc-700',
-        'bg-transparent border-none outline-none focus:ring-0',
+        'text-body',
+        'placeholder:text-muted-foreground',
+        DOC_FIELD,
         'shrink-0',
-      ].join(' ')}
+      )}
     />
   );
 
   const tagsField = (
     <div className='flex items-center gap-2 px-4 py-2 shrink-0'>
-      <Tag size={11} strokeWidth={1.8} className='text-zinc-300 dark:text-zinc-700 shrink-0' />
+      <Tag size={11} strokeWidth={1.8} className='text-muted-foreground shrink-0' />
       <input
         type='text'
         value={tags}
         onChange={(e) => setTags(e.target.value)}
+        aria-label='Tags (comma-separated)'
         placeholder='Tags (comma-separated)'
-        className={[
-          'flex-1 text-[12px] font-medium',
-          'text-zinc-500 dark:text-zinc-500',
-          'placeholder:text-zinc-300 dark:placeholder:text-zinc-700',
-          'bg-transparent border-none outline-none focus:ring-0',
-        ].join(' ')}
+        className={cn(
+          'flex-1 text-meta font-medium',
+          'text-muted-foreground',
+          'placeholder:text-muted-foreground',
+          INLINE_FIELD,
+        )}
       />
-      <span className='text-zinc-200 dark:text-zinc-800 shrink-0'>·</span>
-      <span className='text-[11px] font-mono tracking-tight text-zinc-300 dark:text-zinc-700 shrink-0'>{today()}</span>
+      <span className='text-muted-foreground shrink-0'>·</span>
+      <span className='text-label font-mono tracking-tight text-muted-foreground shrink-0'>{today()}</span>
     </div>
   );
 
   const seriesField = (
     <div className='flex items-center gap-2 px-4 pb-2 shrink-0'>
-      <Layers size={11} strokeWidth={1.8} className='text-zinc-300 dark:text-zinc-700 shrink-0' />
+      <Layers size={11} strokeWidth={1.8} className='text-muted-foreground shrink-0' />
       <select
         aria-label='Series'
+        aria-describedby={seriesError ? seriesErrorId : undefined}
         value={seriesId ?? ''}
         onChange={(e) => {
           const next = e.target.value === '' ? null : Number(e.target.value);
@@ -1455,12 +1584,12 @@ export function PostEditor() {
           // no series to be ordered within is a number about nothing.
           void applySeries(next, next === null ? null : seriesRef.current.order);
         }}
-        className={[
-          'text-[12px] font-medium max-w-[240px]',
-          seriesId === null ? 'text-zinc-300 dark:text-zinc-700' : 'text-zinc-500 dark:text-zinc-500',
-          'bg-transparent border-none outline-none focus:ring-0',
-          'transition-colors cursor-pointer',
-        ].join(' ')}
+        className={cn(
+          'text-meta font-medium max-w-[240px]',
+          seriesId === null ? 'text-muted-foreground' : 'text-muted-foreground',
+          INLINE_FIELD,
+          'cursor-pointer',
+        )}
       >
         <option value=''>No series</option>
         {seriesList.map((s) => (
@@ -1472,11 +1601,12 @@ export function PostEditor() {
 
       {seriesId !== null && (
         <>
-          <span className='text-zinc-200 dark:text-zinc-800 shrink-0'>·</span>
+          <span className='text-muted-foreground shrink-0'>·</span>
           <input
             type='number'
             min={1}
             aria-label='Position in series'
+            aria-describedby={seriesError ? seriesErrorId : undefined}
             value={seriesOrder}
             onChange={(e) => setSeriesOrder(e.target.value)}
             // Written on blur rather than per keystroke: every digit typed
@@ -1488,23 +1618,31 @@ export function PostEditor() {
               if (next !== seriesRef.current.order) void applySeries(seriesId, next);
             }}
             placeholder='#'
-            className={[
-              'w-[42px] text-[12px] font-medium',
-              'text-zinc-500 dark:text-zinc-500',
-              'placeholder:text-zinc-300 dark:placeholder:text-zinc-700',
-              'bg-transparent border-none outline-none focus:ring-0',
-            ].join(' ')}
+            // 50px less the 8px the inline padding pulls back: the same 42px
+            // footprint as before, with the same room for the digits.
+            className={cn(
+              'w-[50px] text-meta font-medium',
+              'text-muted-foreground',
+              'placeholder:text-muted-foreground',
+              INLINE_FIELD,
+            )}
           />
         </>
       )}
 
-      {seriesError && <span className='truncate text-[11px] text-red-600 dark:text-red-400'>{seriesError}</span>}
+      {/* Wrapped rather than truncated: the reason is the part worth reading,
+          and a clipped sentence with no way to see the rest is no reason. */}
+      {seriesError && (
+        <span id={seriesErrorId} className='min-w-0 flex-1 break-words text-label leading-snug text-destructive'>
+          {seriesError}
+        </span>
+      )}
     </div>
   );
 
   const thumbnailField = (
     <div className='flex items-center gap-2 px-4 pb-2 shrink-0'>
-      <ImagePlus size={11} strokeWidth={1.8} className='text-zinc-300 dark:text-zinc-700 shrink-0' />
+      <ImagePlus size={11} strokeWidth={1.8} className='text-muted-foreground shrink-0' />
       {thumbnail !== null && (
         // `asset:` URL from the local staging directory, not a remote image
         // next/image could optimise. The media library and picker carry the
@@ -1513,27 +1651,32 @@ export function PostEditor() {
         <img
           src={thumbnail}
           alt='Current thumbnail'
-          className='h-[20px] w-[36px] shrink-0 rounded-[2px] border border-zinc-200 object-cover dark:border-white/[0.08]'
+          className='h-[20px] w-[36px] shrink-0 rounded-[2px] border border-border object-cover'
         />
       )}
       <button
         type='button'
         onClick={() => void applyThumbnail()}
         disabled={slug === null || thumbnailBusy}
+        aria-describedby={thumbnailError ? thumbnailErrorId : undefined}
         // Said rather than left to be guessed: a disabled control with no
         // reason on it reads as broken.
         title={slug === null ? 'Save the post first — a thumbnail is stored under its slug' : undefined}
-        className={[
-          'text-[12px] font-medium transition-colors active:scale-95',
+        className={cn(
+          'text-meta font-medium transition-colors active:scale-95',
           slug === null || thumbnailBusy
-            ? 'cursor-not-allowed text-zinc-300 dark:text-zinc-700'
-            : 'cursor-pointer text-zinc-500 hover:text-zinc-800 dark:text-zinc-500 dark:hover:text-zinc-200',
-        ].join(' ')}
+            ? 'cursor-not-allowed text-muted-foreground'
+            : 'cursor-pointer text-muted-foreground hover:text-foreground',
+        )}
       >
         {thumbnailBusy ? 'Uploading…' : thumbnail !== null ? 'Replace thumbnail' : 'Set thumbnail'}
       </button>
 
-      {thumbnailError && <span className='truncate text-[11px] text-red-600 dark:text-red-400'>{thumbnailError}</span>}
+      {thumbnailError && (
+        <span id={thumbnailErrorId} className='min-w-0 flex-1 break-words text-label leading-snug text-destructive'>
+          {thumbnailError}
+        </span>
+      )}
     </div>
   );
 
@@ -1544,11 +1687,11 @@ export function PostEditor() {
   /// on editing with this on screen, fix what they meant to fix, and press
   /// Publish again.
   const publishWarningsPanel = publishWarnings !== null && (
-    <div className='mx-4 mb-2 shrink-0 rounded-[6px] border border-amber-200 bg-amber-50/60 px-3 py-2 dark:border-amber-900/40 dark:bg-amber-950/20'>
-      <p className='text-[12px] font-medium text-amber-800 dark:text-amber-400'>Worth a look before this goes live</p>
+    <div className='mx-4 mb-2 shrink-0 rounded-[6px] border border-warning/30 bg-warning/10 px-3 py-2'>
+      <p className='text-meta font-medium text-warning'>Worth a look before this goes live</p>
       <ul className='mt-1 space-y-[2px]'>
         {publishWarnings.map((w, i) => (
-          <li key={i} className='text-[12px] leading-[1.6] text-amber-700 dark:text-amber-500'>
+          <li key={i} className='text-meta leading-[1.6] text-warning'>
             {w.kind === 'no_excerpt' ? (
               <>No excerpt — it is the card text and the meta description.</>
             ) : (
@@ -1564,14 +1707,14 @@ export function PostEditor() {
           size='sm'
           variant='ghost'
           onClick={() => setPublishWarnings(null)}
-          className='h-[24px] px-2 rounded-[4px] text-[12px]'
+          className='h-[24px] px-2 rounded-[4px] text-meta'
         >
           Go back
         </Button>
         <Button
           size='sm'
           onClick={() => void handleSave(true, true)}
-          className='h-[24px] px-2 rounded-[4px] text-[12px] font-semibold'
+          className='h-[24px] px-2 rounded-[4px] text-meta font-semibold'
         >
           Publish anyway
         </Button>
@@ -1581,10 +1724,11 @@ export function PostEditor() {
 
   const slugField = slug !== null && (
     <div className='flex items-center gap-2 px-4 pb-2 shrink-0'>
-      <Link2 size={11} strokeWidth={1.8} className='text-zinc-300 dark:text-zinc-700 shrink-0' />
+      <Link2 size={11} strokeWidth={1.8} className='text-muted-foreground shrink-0' />
       <input
         type='text'
         aria-label='Slug'
+        aria-describedby={slugError ? slugErrorId : undefined}
         value={slugDraft}
         onChange={(e) => setSlugDraft(e.target.value)}
         onBlur={() => void applySlug()}
@@ -1596,17 +1740,17 @@ export function PostEditor() {
           }
         }}
         spellCheck={false}
-        className={[
-          'max-w-[280px] flex-1 text-[12px] font-medium',
-          'text-zinc-500 dark:text-zinc-500',
-          'bg-transparent border-none outline-none focus:ring-0',
-        ].join(' ')}
+        className={cn('max-w-[280px] flex-1 text-meta font-medium', 'text-muted-foreground', INLINE_FIELD)}
       />
-      {slugError && <span className='truncate text-[11px] text-red-600 dark:text-red-400'>{slugError}</span>}
+      {slugError && (
+        <span id={slugErrorId} className='min-w-0 flex-1 break-words text-label leading-snug text-destructive'>
+          {slugError}
+        </span>
+      )}
     </div>
   );
 
-  const divider = <Separator className='bg-zinc-100 dark:bg-white/[0.04] mx-4 mb-2 w-[calc(100%-2rem)]' />;
+  const divider = <Separator className='bg-border/60 mx-4 mb-2 w-[calc(100%-2rem)]' />;
 
   const editor = (
     <textarea
@@ -1615,16 +1759,22 @@ export function PostEditor() {
       onChange={(e) => setBody(e.target.value)}
       onKeyDown={handleEditorKeyDown}
       onContextMenu={handleEditorContextMenu}
+      aria-label='Body'
       placeholder={`Start writing in Markdown…\n\n## Heading\n\nYour content here.`}
       spellCheck
       className={cn(
         'flex-1 min-h-0 w-full resize-none',
         'px-4 py-3',
         'font-mono text-[13.5px] leading-[1.85]',
-        'text-zinc-700 dark:text-zinc-300',
-        'placeholder:text-zinc-300 dark:placeholder:text-zinc-700',
-        'bg-transparent border-none outline-none focus:ring-0',
+        'text-body',
+        'placeholder:text-muted-foreground',
+        'bg-transparent border-none outline-none',
         'overflow-y-auto transition-colors',
+        // The writing surface gets the quietest cue that still answers "where
+        // am I": a hairline inset ring, no shade. Anything louder would sit
+        // around every word typed. Held back while a drop is pending so the
+        // drop target's own ring is the one on screen.
+        !dragActive && 'rounded-[4px] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring/20',
         dragActive && 'ring-2 ring-inset ring-blue-400/70 bg-blue-50/50 dark:ring-blue-400/50 dark:bg-blue-500/[0.07]',
       )}
     />
@@ -1632,9 +1782,9 @@ export function PostEditor() {
 
   const previewBody =
     body.trim() === '' ? (
-      <p className='font-mono text-[13px] text-zinc-300 dark:text-zinc-700'>Nothing to preview yet.</p>
+      <p className='font-mono text-ui text-muted-foreground'>Nothing to preview yet.</p>
     ) : preview === '' ? (
-      <p className='font-mono text-[13px] text-zinc-300 dark:text-zinc-700'>Rendering…</p>
+      <p className='font-mono text-ui text-muted-foreground'>Rendering…</p>
     ) : (
       // Intentionally unsanitized: `body` is the author's own Markdown, rendered
       // locally in a single-user preview (self-XSS only), and the preset relies
@@ -1650,7 +1800,10 @@ export function PostEditor() {
     );
 
   return (
-    <div className='flex flex-col flex-1 min-h-0 bg-white dark:bg-[#161616]'>
+    <div className='flex flex-col flex-1 min-h-0 bg-card'>
+      {/* The title field is an input, not a heading; this names the page for
+          outline navigation. */}
+      <h1 className='sr-only'>{postId === null ? 'New post' : 'Edit post'}</h1>
       <MediaPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={pickFromLibrary} />
       <RevisionHistory
         open={historyOpen}
@@ -1661,13 +1814,16 @@ export function PostEditor() {
       />
 
       {/* ── Topbar ──────────────────────────────────────────────────────── */}
-      <div className='relative flex items-center justify-between px-5 h-[48px] shrink-0 border-b border-zinc-200 dark:border-white/[0.06]'>
+      {/* Three columns, not an absolutely centred toggle: the right-hand cluster
+          grows (a long save error, the sync pill) and must push the columns
+          apart rather than slide under the view switch. */}
+      <div className='grid grid-cols-[1fr_auto_1fr] items-center gap-4 px-5 h-[48px] shrink-0 border-b border-border'>
         {/* Back */}
         <Button
           asChild
           variant='ghost'
           size='sm'
-          className='h-[28px] px-2 -ml-1 gap-1.5 rounded-[5px] text-[12px] font-medium text-zinc-500 dark:text-zinc-400'
+          className='justify-self-start h-[28px] px-2 -ml-1 gap-1.5 rounded-[5px] text-meta font-medium text-muted-foreground'
         >
           <Link href='/posts'>
             <ArrowLeft size={13} strokeWidth={2} />
@@ -1675,8 +1831,14 @@ export function PostEditor() {
           </Link>
         </Button>
 
-        {/* Write / Split / Preview toggle */}
-        <div className='absolute left-1/2 -translate-x-1/2 flex items-center gap-0.5 p-[3px] rounded-[7px] bg-zinc-100 dark:bg-white/[0.04]'>
+        {/* Write / Split / Preview toggle. Exactly one is always on, so it is a
+            radio group: one Tab stop, arrow keys to move between views. */}
+        <div
+          role='radiogroup'
+          aria-label='Editor view'
+          onKeyDown={handleModeKeyDown}
+          className='flex items-center gap-0.5 p-[3px] rounded-[7px] bg-muted'
+        >
           {(
             [
               { value: 'write', label: 'Write', Icon: PenLine },
@@ -1687,13 +1849,17 @@ export function PostEditor() {
             <button
               key={value}
               type='button'
+              role='radio'
+              aria-checked={mode === value}
+              data-mode={value}
+              tabIndex={mode === value ? 0 : -1}
               onClick={() => setMode(value)}
-              aria-pressed={mode === value}
               className={cn(
-                'flex items-center gap-1.5 h-[22px] px-2.5 rounded-[5px] text-[12px] font-medium transition-colors active:scale-95',
+                'flex items-center gap-1.5 h-[22px] px-2.5 rounded-[5px] text-meta font-medium transition-colors active:scale-95',
+                'outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
                 mode === value
-                  ? 'bg-white dark:bg-white/[0.08] text-zinc-900 dark:text-zinc-100 shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
-                  : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200',
+                  ? 'bg-card text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
+                  : 'text-muted-foreground hover:text-foreground',
               )}
             >
               <Icon size={12} strokeWidth={2} />
@@ -1703,69 +1869,51 @@ export function PostEditor() {
         </div>
 
         {/* Actions */}
-        <div className='flex items-center gap-2'>
+        <div className='justify-self-end min-w-0 flex items-center gap-2'>
           {/* What readers are being served, when that differs from what is on
               screen. Silent when the two agree — a badge that is always there
               stops being read. */}
-          {saveState.kind === 'idle' && sync === 'conflict' && (
-            <>
-              <StatusPill status='conflict' />
-              {/* Both answers throw something away, so neither is a default and
-                  neither is styled as the safe one. */}
-              <Button
-                variant='outline'
-                size='sm'
-                onClick={() => void resolve('keep_local')}
-                title='Keep what is on this machine. The cloud change is discarded; your edits stay unpublished until you publish them.'
-                className='h-[28px] px-2 rounded-[5px] text-[12px] font-semibold'
-              >
-                Keep mine
-              </Button>
-              <Button
-                variant='outline'
-                size='sm'
-                onClick={() => void resolve('keep_remote')}
-                title='Take the cloud version. Everything on screen is replaced by it.'
-                className='h-[28px] px-2 rounded-[5px] text-[12px] font-semibold'
-              >
-                Keep cloud
-              </Button>
-            </>
-          )}
+          {saveState.kind === 'idle' && sync === 'conflict' && <StatusPill status='conflict' />}
           {saveState.kind === 'idle' && sync === 'remote_ahead' && <StatusPill status='behind' />}
           {saveState.kind === 'idle' && sync === 'sync_failed' && <StatusPill status='failed' />}
           {saveState.kind === 'idle' && sync === 'modified' && live && <StatusPill status='edited' />}
-          {saveState.kind === 'saved' && (
-            <span className='text-[12px] font-medium text-emerald-600 dark:text-emerald-400'>
-              {saveState.publish ? 'Published' : 'Saved'}
-            </span>
-          )}
+          {/* Settled outcomes are announced; the churn is not. The region is
+              always rendered, because a live region that appears together with
+              its text is not reliably read out. `contents` keeps it out of the
+              row's layout, so an empty one adds no gap. */}
+          <div role='status' aria-live='polite' className='contents'>
+            {saveState.kind === 'saved' && (
+              <span className='text-meta font-medium text-success'>{saveState.publish ? 'Published' : 'Saved'}</span>
+            )}
+            {saveState.kind === 'idle' && localSave.kind === 'failed' && (
+              <span title={localSave.message} className='max-w-[220px] truncate text-meta font-medium text-destructive'>
+                Autosave failed
+                {/* The reason, for a screen reader. On screen it is the
+                    tooltip — the label alone is what fits in the bar. */}
+                <span className='sr-only'>: {localSave.message}</span>
+              </span>
+            )}
+          </div>
           {/* Autosave, which is about this machine only — never the blog. Kept
               out of the way of the manual save's own feedback, and silent until
-              autosave has actually done something. */}
-          {saveState.kind === 'idle' && localSave.kind !== 'idle' && (
+              autosave has actually done something. Outside the live region:
+              it changes at every pause in typing, and announcing each one would
+              talk over the writing. */}
+          {saveState.kind === 'idle' && (localSave.kind === 'saving' || localSave.kind === 'saved') && (
             <span
-              title={
-                localSave.kind === 'failed'
-                  ? localSave.message
-                  : 'Autosave keeps this post on this machine only. Publishing is still a separate, deliberate step.'
-              }
-              className={cn(
-                'max-w-[220px] truncate text-[12px] font-medium',
-                localSave.kind === 'failed' ? 'text-red-600 dark:text-red-400' : 'text-zinc-400 dark:text-zinc-500',
-              )}
+              title='Autosave keeps this post on this machine only. Publishing is still a separate, deliberate step.'
+              className='max-w-[220px] truncate text-meta font-medium text-muted-foreground'
             >
-              {localSave.kind === 'saving'
-                ? 'Saving locally…'
-                : localSave.kind === 'saved'
-                  ? 'Saved locally'
-                  : 'Autosave failed'}
+              {localSave.kind === 'saving' ? 'Saving locally…' : 'Saved locally'}
             </span>
           )}
+          {/* Allowed two lines rather than one, so most messages can be read
+              in full; the tooltip carries any that run longer. */}
           {saveState.kind === 'error' && (
             <span
+              role='alert'
               title={saveState.message}
-              className='max-w-[220px] truncate text-[12px] font-medium text-red-600 dark:text-red-400'
+              className='max-w-[220px] line-clamp-2 break-words text-meta font-medium leading-tight text-destructive'
             >
               {saveState.message}
             </span>
@@ -1776,7 +1924,7 @@ export function PostEditor() {
             size='sm'
             onClick={() => setPickerOpen(true)}
             title='Insert an image from the media library'
-            className='h-[28px] px-2 gap-1.5 rounded-[5px] text-[12px] font-medium text-zinc-500 dark:text-zinc-400'
+            className='h-[28px] px-2 gap-1.5 rounded-[5px] text-meta font-medium text-muted-foreground'
           >
             <ImagePlus size={13} strokeWidth={2} />
             Insert media
@@ -1799,7 +1947,7 @@ export function PostEditor() {
               onClick={() => setHistoryOpen(true)}
               disabled={saveState.kind === 'saving'}
               title='Earlier versions of this post, and a way back to any of them'
-              className='h-[28px] px-2 gap-1.5 rounded-[5px] text-[12px] font-medium text-zinc-500 dark:text-zinc-400'
+              className='h-[28px] px-2 gap-1.5 rounded-[5px] text-meta font-medium text-muted-foreground'
             >
               <History size={13} strokeWidth={2} />
               History
@@ -1812,7 +1960,7 @@ export function PostEditor() {
             onClick={() => handleSave(false)}
             disabled={saveState.kind === 'saving' || loadingBody}
             title={loadingBody ? 'Waiting for this post to finish loading' : undefined}
-            className='h-[28px] px-3 rounded-[5px] text-[12px] font-semibold text-zinc-600 dark:text-zinc-400'
+            className='h-[28px] px-3 rounded-[5px] text-meta font-semibold text-body'
           >
             {saveState.kind === 'saving' && !saveState.publish ? 'Saving…' : 'Save Draft'}
           </Button>
@@ -1821,7 +1969,7 @@ export function PostEditor() {
               live post has nothing to schedule, and a post with no row yet has
               no slug for the schedule to name. */}
           {postId !== null && !live && (
-            <div className='relative'>
+            <div ref={scheduleRootRef} className='relative'>
               {schedule?.state === 'scheduled' || schedule?.state === 'overdue' ? (
                 <Button
                   variant='outline'
@@ -1829,7 +1977,7 @@ export function PostEditor() {
                   onClick={() => void cancelSchedule()}
                   disabled={saveState.kind === 'saving'}
                   title={`Cloudflare publishes this at ${new Date(schedule.publish_at * 1000).toLocaleString()}. Cancelling leaves it an unpublished draft.`}
-                  className='h-[28px] px-2 gap-1.5 rounded-[5px] text-[12px] font-semibold text-indigo-600 dark:text-indigo-400'
+                  className='h-[28px] px-2 gap-1.5 rounded-[5px] text-meta font-semibold text-indigo-600 dark:text-indigo-400'
                 >
                   <CalendarClock size={13} strokeWidth={2} />
                   {schedule.state === 'overdue' ? 'Overdue — cancel' : 'Cancel schedule'}
@@ -1846,7 +1994,10 @@ export function PostEditor() {
                     setScheduling((open) => !open);
                   }}
                   disabled={saveState.kind === 'saving'}
-                  className='h-[28px] px-2 gap-1.5 rounded-[5px] text-[12px] font-semibold text-zinc-600 dark:text-zinc-400'
+                  aria-haspopup='dialog'
+                  aria-expanded={scheduling}
+                  aria-controls={scheduling ? schedulePopoverId : undefined}
+                  className='h-[28px] px-2 gap-1.5 rounded-[5px] text-meta font-semibold text-body'
                 >
                   <CalendarClock size={13} strokeWidth={2} />
                   Schedule
@@ -1854,21 +2005,24 @@ export function PostEditor() {
               )}
 
               {scheduling && (
-                <div className='absolute right-0 top-[34px] z-50 w-[300px] rounded-[8px] border border-zinc-200 bg-white p-3 shadow-xl shadow-black/[0.06] dark:border-white/10 dark:bg-zinc-900 dark:shadow-black/40'>
-                  <label
-                    htmlFor='schedule-at'
-                    className='block text-[12px] font-semibold text-zinc-700 dark:text-zinc-300'
-                  >
+                <div
+                  id={schedulePopoverId}
+                  role='dialog'
+                  aria-label='Schedule publishing'
+                  className='absolute right-0 top-[34px] z-50 w-[300px] rounded-[8px] border border-border bg-card p-3 shadow-xl shadow-black/[0.06] dark:shadow-black/40'
+                >
+                  <label htmlFor='schedule-at' className='block text-meta font-semibold text-body'>
                     Publish at
                   </label>
                   <input
+                    ref={scheduleInputRef}
                     id='schedule-at'
                     type='datetime-local'
                     value={scheduleAt}
                     onChange={(e) => setScheduleAt(e.target.value)}
-                    className='mt-1.5 w-full rounded-[5px] border border-zinc-200 bg-white px-2 py-1.5 text-[12px] text-zinc-800 outline-none focus:border-zinc-400 dark:border-white/10 dark:bg-zinc-950 dark:text-zinc-200 dark:focus:border-white/30'
+                    className='mt-1.5 w-full rounded-[5px] border border-border bg-card px-2 py-1.5 text-meta text-foreground outline-none focus:border-ring'
                   />
-                  <p className='mt-2 text-[11px] leading-[1.5] text-zinc-500 dark:text-zinc-500'>
+                  <p className='mt-2 text-label leading-[1.5] text-muted-foreground'>
                     The post is uploaded now and goes live at this time, published by Cloudflare — so it happens whether
                     or not this app is running. Readers see nothing until then.
                   </p>
@@ -1877,7 +2031,7 @@ export function PostEditor() {
                       variant='ghost'
                       size='sm'
                       onClick={() => setScheduling(false)}
-                      className='h-[26px] px-2 rounded-[5px] text-[12px] font-semibold text-zinc-500'
+                      className='h-[26px] px-2 rounded-[5px] text-meta font-semibold text-muted-foreground'
                     >
                       Cancel
                     </Button>
@@ -1885,7 +2039,7 @@ export function PostEditor() {
                       size='sm'
                       onClick={() => void submitSchedule()}
                       disabled={scheduleAt === '' || saveState.kind === 'saving'}
-                      className='h-[26px] px-3 rounded-[5px] text-[12px] font-semibold'
+                      className='h-[26px] px-3 rounded-[5px] text-meta font-semibold'
                     >
                       Schedule
                     </Button>
@@ -1900,12 +2054,53 @@ export function PostEditor() {
             onClick={() => handleSave(true)}
             disabled={saveState.kind === 'saving' || loadingBody}
             title={loadingBody ? 'Waiting for this post to finish loading' : undefined}
-            className='h-[28px] px-3 rounded-[5px] text-[12px] font-semibold shadow-[0_1px_2px_rgba(0,0,0,0.12)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.18)] dark:hover:shadow-[0_2px_8px_rgba(0,0,0,0.5)]'
+            className='h-[28px] px-3 rounded-[5px] text-meta font-semibold shadow-[0_1px_2px_rgba(0,0,0,0.12)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.18)] dark:hover:shadow-[0_2px_8px_rgba(0,0,0,0.5)]'
           >
             {saveState.kind === 'saving' && saveState.publish ? 'Publishing…' : 'Publish'}
           </Button>
         </div>
       </div>
+
+      {/* ── Conflict ────────────────────────────────────────────────────── */}
+      {/* Both copies changed, and either answer throws one of them away, so the
+          choice is spelled out on screen rather than left to a tooltip. Neither
+          button is styled as the safe one. Keeping the cloud's copy is not
+          confirmed: the local text is saved to History first, so it can be
+          restored, and naming that here is the reassurance. */}
+      {saveState.kind === 'idle' && sync === 'conflict' && (
+        <div
+          role='region'
+          aria-label='Sync conflict'
+          className='flex items-center gap-4 px-5 py-2.5 shrink-0 border-b border-warning/30 bg-warning/10'
+        >
+          <div className='flex-1 min-w-0 text-meta leading-[1.5] text-body'>
+            <p className='font-semibold text-foreground'>This post changed here and in the cloud.</p>
+            <p>
+              <span className='font-medium text-foreground'>Keep mine</span> discards the cloud change; your edits stay
+              unpublished until you publish them. <span className='font-medium text-foreground'>Keep cloud</span>{' '}
+              replaces what is on screen; your current text is saved in History.
+            </p>
+          </div>
+          <div className='flex items-center gap-2 shrink-0'>
+            <Button
+              variant='outline'
+              size='sm'
+              onClick={() => void resolve('keep_local')}
+              className='h-[28px] px-2.5 rounded-[5px] text-meta font-semibold'
+            >
+              Keep mine
+            </Button>
+            <Button
+              variant='outline'
+              size='sm'
+              onClick={() => void resolve('keep_remote')}
+              className='h-[28px] px-2.5 rounded-[5px] text-meta font-semibold'
+            >
+              Keep cloud
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* ── Document area ───────────────────────────────────────────────── */}
       {mode === 'split' ? (
@@ -1925,7 +2120,7 @@ export function PostEditor() {
             <div className='flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden'>{editor}</div>
             <div
               ref={previewPaneRef}
-              className='flex-1 min-w-0 min-h-0 overflow-y-auto px-5 py-3 border-l border-zinc-200 dark:border-white/[0.06]'
+              className='flex-1 min-w-0 min-h-0 overflow-y-auto px-5 py-3 border-l border-border'
             >
               {previewBody}
             </div>
@@ -1950,19 +2145,17 @@ export function PostEditor() {
       )}
 
       {/* ── Status bar ──────────────────────────────────────────────────── */}
-      <div className='flex items-center justify-between px-5 h-[34px] shrink-0 border-t border-zinc-100 dark:border-white/[0.04]'>
+      <div className='flex items-center justify-between px-5 h-[34px] shrink-0 border-t border-border/60'>
         <div className='flex items-center gap-3'>
-          <span className='text-[11px] font-mono text-zinc-300 dark:text-zinc-700'>
+          <span className='text-label font-mono text-muted-foreground'>
             {words.toLocaleString()} {words === 1 ? 'word' : 'words'}
           </span>
-          <span className='text-zinc-200 dark:text-zinc-800'>·</span>
-          <span className='text-[11px] font-mono text-zinc-300 dark:text-zinc-700'>
+          <span className='text-muted-foreground'>·</span>
+          <span className='text-label font-mono text-muted-foreground'>
             {chars.toLocaleString()} {chars === 1 ? 'character' : 'characters'}
           </span>
         </div>
-        <span className='text-[10px] font-bold uppercase tracking-[0.1em] text-zinc-300 dark:text-zinc-700'>
-          Markdown
-        </span>
+        <span className='text-label font-bold uppercase tracking-[0.1em] text-muted-foreground'>Markdown</span>
       </div>
 
       {/* ── Selection formatting menu (right-click) ─────────────────────── */}
@@ -1971,24 +2164,28 @@ export function PostEditor() {
           <div
             ref={menuRef}
             role='menu'
+            aria-label='Format selection'
+            onKeyDown={handleMenuKeyDown}
             style={{ top: menu.y, left: menu.x }}
-            className='fixed z-50 min-w-[188px] rounded-lg border border-zinc-200 bg-white p-1 shadow-xl shadow-black/[0.06] dark:border-white/10 dark:bg-zinc-900 dark:shadow-black/40'
+            className='fixed z-50 min-w-[188px] rounded-lg border border-border bg-card p-1 shadow-xl shadow-black/[0.06] dark:shadow-black/40'
           >
             {formatActions.map(({ label, Icon, keys, run, separated }) => (
               <Fragment key={label}>
-                {separated && <div className='my-1 h-px bg-zinc-100 dark:bg-white/10' />}
+                {separated && <div role='separator' className='my-1 h-px bg-muted' />}
                 <button
                   type='button'
                   role='menuitem'
+                  // Reached with the arrow keys, not Tab: one stop for the menu.
+                  tabIndex={-1}
                   onClick={() => {
                     run();
                     setMenu(null);
                   }}
-                  className='flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100 active:scale-[0.98] dark:text-zinc-200 dark:hover:bg-white/[0.06]'
+                  className='flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-ui font-medium text-body outline-none transition-colors hover:bg-muted focus-visible:bg-muted active:scale-[0.98]'
                 >
-                  <Icon size={14} strokeWidth={2} className='text-zinc-500 dark:text-zinc-400' />
+                  <Icon size={14} strokeWidth={2} className='text-muted-foreground' />
                   {label}
-                  <span className='ml-auto pl-4 font-mono text-[11px] text-zinc-400 dark:text-zinc-600'>{keys}</span>
+                  <span className='ml-auto pl-4 font-mono text-label text-muted-foreground'>{keys}</span>
                 </button>
               </Fragment>
             ))}

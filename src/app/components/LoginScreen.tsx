@@ -64,17 +64,28 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
     >
       <form
         onSubmit={submit}
-        className='w-full max-w-[380px] space-y-4 rounded-[10px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616] p-6 shadow-xl'
+        className='w-full max-w-[380px] space-y-4 rounded-[10px] border border-border bg-card p-6 shadow-xl'
       >
         <div className='space-y-1'>
-          <h1 className='text-[16px] font-semibold text-zinc-900 dark:text-zinc-50'>Connect to Cloudflare</h1>
-          <p className='text-[12px] text-zinc-500 dark:text-zinc-400'>
+          <h1 className='text-title font-semibold tracking-tight text-balance text-foreground'>
+            Connect to Cloudflare
+          </h1>
+          <p className='text-meta text-muted-foreground'>
             Enter your Cloudflare credentials to use R2 and D1. Your API token is kept in your device&rsquo;s keychain.
           </p>
         </div>
 
         <div className='space-y-2.5'>
-          <Field label='Account ID' value={accountId} onChange={setAccountId} placeholder='Cloudflare account id' />
+          {/* Focus starts here: the app behind this is inert, so the form is
+              the only place a keyboard can go, and it should not have to look
+              for it. */}
+          <Field
+            label='Account ID'
+            value={accountId}
+            onChange={setAccountId}
+            placeholder='Cloudflare account id'
+            autoFocus
+          />
           <Field
             label='API Token'
             value={apiToken}
@@ -92,9 +103,13 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
           />
         </div>
 
-        {error && <p className='text-[12px] font-medium text-red-600 dark:text-red-400'>{error}</p>}
+        {error && (
+          <p role='alert' className='text-meta font-medium text-destructive'>
+            {error}
+          </p>
+        )}
 
-        <Button type='submit' disabled={!ready || busy} className='w-full h-[34px] text-[13px] font-semibold'>
+        <Button type='submit' disabled={!ready || busy} className='w-full h-[34px] text-ui font-semibold'>
           {busy ? 'Connecting…' : 'Connect'}
         </Button>
       </form>
@@ -108,22 +123,25 @@ function Field({
   onChange,
   placeholder,
   type = 'text',
+  autoFocus,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   type?: string;
+  autoFocus?: boolean;
 }) {
   return (
     <label className='block space-y-1'>
-      <span className='text-[11px] font-semibold text-zinc-600 dark:text-zinc-400'>{label}</span>
+      <span className='text-label font-semibold text-body'>{label}</span>
       <Input
         type={type}
+        autoFocus={autoFocus}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className='h-[32px] text-[13px]'
+        className='h-[32px] text-ui'
       />
     </label>
   );

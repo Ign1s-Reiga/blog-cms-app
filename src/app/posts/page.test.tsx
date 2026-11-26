@@ -115,4 +115,31 @@ describe('the posts list', () => {
 
     expect(await screen.findByText('1 selected')).toBeInTheDocument();
   });
+
+  /// The row used to be a `role='button'` holding a checkbox and three buttons,
+  /// which a screen reader flattens into one label. The title is the way in now.
+  it('opens a post from a link on its title', async () => {
+    respond({ posts: [row(1, 'Live post')] });
+    render(<PostsPage />);
+
+    const link = await screen.findByRole('link', { name: 'Live post' });
+    expect(link).toHaveAttribute('href', '/posts/edit?id=1');
+  });
+
+  /// Permanent deletion is the one step that cannot be undone, so its
+  /// confirmation has to start on the safe choice and close without acting.
+  it('starts the delete confirmation on Cancel, and Escape deletes nothing', async () => {
+    respond({ trashed: [row(2, 'Binned post')] });
+    render(<PostsPage />);
+
+    await userEvent.click(await screen.findByRole('tab', { name: /Trash/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete forever: Binned post' }));
+
+    await screen.findByRole('alertdialog');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus());
+
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(invoke).not.toHaveBeenCalledWith('delete_post_permanently', expect.anything());
+  });
 });

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { History, Loader2, RotateCcw, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 
 /// One entry as `list_revisions` returns it (see `RevisionSummary` in
@@ -143,16 +144,6 @@ export function RevisionHistory({
     onClose();
   }, [restoring, onClose]);
 
-  // Escape closes, matching the editor's other transient surfaces.
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') dismiss();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, dismiss]);
-
   const select = async (summary: RevisionSummary) => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
@@ -184,28 +175,38 @@ export function RevisionHistory({
     }
   };
 
-  if (!open) return null;
-
+  // Built on the Dialog primitive so focus moves into the panel, stays there,
+  // and goes back to the button that opened it. Every way of dismissing it —
+  // Escape, the backdrop, the X — reaches `dismiss`, so the refusal while a
+  // restore runs holds for all of them. Escape and outside clicks are also
+  // cancelled at the source then, so the primitive never starts closing a
+  // panel that is going to stay.
   return (
-    <div
-      role='dialog'
-      aria-modal='true'
-      aria-label='Version history'
-      className='fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6'
-      onPointerDown={(e) => {
-        if (e.target === e.currentTarget) dismiss();
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) dismiss();
       }}
     >
-      <div className='flex h-[76vh] w-full max-w-[900px] flex-col rounded-[8px] border border-zinc-200 dark:border-white/[0.08] bg-white dark:bg-[#161616]'>
-        <div className='flex items-center justify-between border-b border-zinc-100 dark:border-white/[0.05] px-4 py-3'>
+      <DialogContent
+        showCloseButton={false}
+        onEscapeKeyDown={(e) => {
+          if (restoring) e.preventDefault();
+        }}
+        onInteractOutside={(e) => {
+          if (restoring) e.preventDefault();
+        }}
+        className='flex h-[76vh] w-full max-w-[min(900px,calc(100%-3rem))] flex-col gap-0 rounded-[8px] border border-border bg-card p-0 ring-0 sm:max-w-[min(900px,calc(100%-3rem))]'
+      >
+        <div className='flex items-center justify-between border-b border-border/60 px-4 py-3'>
           <div className='flex items-baseline gap-2'>
-            <h2 className='flex items-center gap-2 text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>
-              <History size={13} strokeWidth={2} className='text-zinc-400 dark:text-zinc-500' />
+            <DialogTitle className='flex items-center gap-2 text-ui leading-normal font-semibold text-foreground'>
+              <History size={13} strokeWidth={2} className='text-muted-foreground' />
               Version history
-            </h2>
-            <span className='text-[11px] text-zinc-400 dark:text-zinc-600'>
+            </DialogTitle>
+            <DialogDescription className='text-label text-muted-foreground'>
               each entry is the post as it stood before that change
-            </span>
+            </DialogDescription>
           </div>
           <Button
             variant='ghost'
@@ -213,28 +214,31 @@ export function RevisionHistory({
             aria-label='Close'
             onClick={dismiss}
             disabled={restoring}
-            className='size-[26px] rounded-[5px] text-zinc-400 dark:text-zinc-500'
+            className='size-[26px] rounded-[5px] text-muted-foreground'
           >
             <X size={13} strokeWidth={2} />
           </Button>
         </div>
 
         {error && (
-          <p className='border-b border-red-100 bg-red-50 px-4 py-2 text-[12px] font-medium text-red-700 dark:border-red-500/20 dark:bg-red-500/[0.08] dark:text-red-400'>
+          <p
+            role='alert'
+            className='border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-meta font-medium text-destructive'
+          >
             {error}
           </p>
         )}
 
         <div className='flex min-h-0 flex-1'>
           {/* Versions */}
-          <ul className='w-[280px] shrink-0 overflow-y-auto border-r border-zinc-100 dark:border-white/[0.05] p-2'>
+          <ul className='w-[280px] shrink-0 overflow-y-auto border-r border-border/60 p-2'>
             {loading ? (
-              <li className='flex items-center gap-2 p-3 text-[12px] text-zinc-500 dark:text-zinc-500'>
+              <li className='flex items-center gap-2 p-3 text-meta text-muted-foreground'>
                 <Loader2 size={13} strokeWidth={2} className='animate-spin' />
                 Loading history…
               </li>
             ) : items.length === 0 ? (
-              <li className='p-3 text-[12px] text-zinc-400 dark:text-zinc-600'>
+              <li className='p-3 text-meta text-muted-foreground'>
                 No earlier versions yet. One is kept each time this post is saved, published, or edited by an MCP
                 client.
               </li>
@@ -244,26 +248,23 @@ export function RevisionHistory({
                   <button
                     type='button'
                     onClick={() => void select(item)}
-                    aria-pressed={selected?.id === item.id}
+                    // The version on show, of several — not a toggle, so
+                    // `aria-current` rather than `aria-pressed`, which would
+                    // announce every other entry as a switch that is off.
+                    aria-current={selected?.id === item.id ? 'true' : undefined}
                     className={cn(
                       'w-full rounded-[6px] px-2.5 py-2 text-left transition-colors active:scale-[0.99]',
-                      selected?.id === item.id
-                        ? 'bg-zinc-100 dark:bg-white/[0.06]'
-                        : 'hover:bg-zinc-50 dark:hover:bg-white/[0.03]',
+                      selected?.id === item.id ? 'bg-muted' : 'hover:bg-muted/50',
                     )}
                   >
                     <span className='flex items-baseline justify-between gap-2'>
-                      <span className='truncate text-[12px] font-medium text-zinc-700 dark:text-zinc-300'>
-                        {originLabel(item.origin)}
-                      </span>
-                      <span className='shrink-0 font-mono text-[10px] tabular-nums text-zinc-400 dark:text-zinc-600'>
+                      <span className='truncate text-meta font-medium text-body'>{originLabel(item.origin)}</span>
+                      <span className='shrink-0 font-mono text-label tabular-nums text-muted-foreground'>
                         {formatWhen(item.created_at)}
                       </span>
                     </span>
-                    <span className='mt-0.5 block truncate text-[11px] text-zinc-500 dark:text-zinc-500'>
-                      {item.title}
-                    </span>
-                    <span className='mt-0.5 block text-[10px] tabular-nums text-zinc-400 dark:text-zinc-600'>
+                    <span className='mt-0.5 block truncate text-label text-muted-foreground'>{item.title}</span>
+                    <span className='mt-0.5 block text-label tabular-nums text-muted-foreground'>
                       {formatSize(item.body_chars)} · {item.published ? 'was live' : 'was a draft'}
                     </span>
                   </button>
@@ -275,15 +276,13 @@ export function RevisionHistory({
           {/* Preview of the selected version */}
           <div className='flex min-w-0 flex-1 flex-col'>
             {selected === null ? (
-              <p className='p-4 text-[12px] text-zinc-400 dark:text-zinc-600'>Select a version to see what it held.</p>
+              <p className='p-4 text-meta text-muted-foreground'>Select a version to see what it held.</p>
             ) : (
               <>
-                <div className='flex items-center justify-between gap-3 border-b border-zinc-100 dark:border-white/[0.05] px-4 py-2.5'>
+                <div className='flex items-center justify-between gap-3 border-b border-border/60 px-4 py-2.5'>
                   <div className='min-w-0'>
-                    <p className='truncate text-[13px] font-medium text-zinc-800 dark:text-zinc-200'>
-                      {selected.title}
-                    </p>
-                    <p className='text-[11px] text-zinc-400 dark:text-zinc-600'>
+                    <p className='truncate text-ui font-medium text-foreground'>{selected.title}</p>
+                    <p className='text-label text-muted-foreground'>
                       {new Date(selected.created_at * 1000).toLocaleString()} · {originLabel(selected.origin)}
                     </p>
                   </div>
@@ -292,7 +291,7 @@ export function RevisionHistory({
                     onClick={() => void restore()}
                     disabled={restoring}
                     title='Put the post back to this version. The version you are on now is kept, so this can be undone.'
-                    className='h-[28px] shrink-0 gap-1.5 rounded-[5px] px-3 text-[12px] font-semibold'
+                    className='h-[28px] shrink-0 gap-1.5 rounded-[5px] px-3 text-meta font-semibold'
                   >
                     <RotateCcw size={12} strokeWidth={2} />
                     {restoring ? 'Restoring…' : 'Restore this version'}
@@ -300,12 +299,12 @@ export function RevisionHistory({
                 </div>
                 <div className='min-h-0 flex-1 overflow-auto px-4 py-3'>
                   {selected.body === null ? (
-                    <p className='text-[12px] text-zinc-400 dark:text-zinc-600'>
+                    <p className='text-meta text-muted-foreground'>
                       This version has no stored text — its body was not cached on this machine when the snapshot was
                       taken. Restoring it puts the title and tags back and leaves the text as it is.
                     </p>
                   ) : (
-                    <pre className='whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.7] text-zinc-600 dark:text-zinc-400'>
+                    <pre className='whitespace-pre-wrap break-words font-mono text-meta leading-[1.7] text-body'>
                       {selected.body}
                     </pre>
                   )}
@@ -314,7 +313,7 @@ export function RevisionHistory({
             )}
           </div>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
