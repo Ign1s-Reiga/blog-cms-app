@@ -3,6 +3,7 @@
 import {
   ArrowUpCircle,
   BarChart2,
+  BookOpenText,
   FileText,
   Image,
   Layers,
@@ -44,6 +45,7 @@ const NAV_MAIN: NavItem[] = [
 
 const NAV_TOOLS: NavItem[] = [
   { href: '/analytics', label: 'Analytics', Icon: BarChart2 },
+  { href: '/markdown', label: 'Markdown', Icon: BookOpenText },
   { href: '/settings', label: 'Settings', Icon: Settings },
 ];
 

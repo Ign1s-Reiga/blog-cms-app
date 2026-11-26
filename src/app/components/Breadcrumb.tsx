@@ -17,6 +17,7 @@ const LABELS: Record<string, string> = {
   '/tags': 'Tags',
   '/media': 'Media',
   '/analytics': 'Analytics',
+  '/markdown': 'Markdown',
   '/settings': 'Settings',
 };
 
