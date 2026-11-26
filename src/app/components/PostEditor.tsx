@@ -1604,7 +1604,9 @@ export function PostEditor() {
         }}
         className={cn(
           'text-meta font-medium max-w-[240px]',
-          seriesId === null ? 'text-muted-foreground' : 'text-muted-foreground',
+          // "No series" reads as a placeholder, dimmer than a chosen series, at the
+          // same strength as the title field's placeholder.
+          seriesId === null ? 'text-muted-foreground/70' : 'text-muted-foreground',
           INLINE_FIELD,
           'cursor-pointer',
         )}
