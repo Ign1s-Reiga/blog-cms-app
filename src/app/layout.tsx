@@ -5,6 +5,7 @@ import { AuthGate } from '@/components/AuthGate';
 import { Header } from '@/components/Header';
 import { Sidebar } from '@/components/Sidebar';
 import { SidebarProvider } from '@/components/SidebarProvider';
+import { Toaster } from '@/components/ui/sonner';
 import { Geist } from 'next/font/google';
 import { cn } from '@/lib/utils';
 
@@ -22,7 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ThemeProvider attribute='class' defaultTheme='light' disableTransitionOnChange>
           <SidebarProvider>
             <AuthGate>
-              <div className='flex h-screen overflow-hidden bg-zinc-50 dark:bg-[#0a0a0a] text-zinc-900 dark:text-zinc-100 antialiased'>
+              <div className='flex h-screen overflow-hidden bg-background text-foreground antialiased'>
                 <Sidebar />
                 <div className='flex-1 flex flex-col min-w-0'>
                   <Header />
@@ -31,6 +32,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               </div>
             </AuthGate>
           </SidebarProvider>
+          {/* Outside the auth gate so a failure during sign-in can still be reported. */}
+          <Toaster position='bottom-right' />
         </ThemeProvider>
       </body>
     </html>

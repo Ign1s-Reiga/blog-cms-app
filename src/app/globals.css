@@ -37,7 +37,27 @@
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
   --color-foreground: var(--foreground);
+  --color-body: var(--body);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
   --color-background: var(--background);
+  /*
+   * Type roles for a dense desktop console. Components use these names, not
+   * pixel values: `label` for uppercase section labels and keycaps, `meta` for
+   * secondary lines and compact controls, `ui` for body text and default
+   * controls, `heading` for card and section titles, `title` for the page.
+   * 11px is the floor for any text that carries meaning.
+   */
+  --text-label: 0.6875rem;
+  --text-label--line-height: 1rem;
+  --text-meta: 0.75rem;
+  --text-meta--line-height: 1.125rem;
+  --text-ui: 0.8125rem;
+  --text-ui--line-height: 1.25rem;
+  --text-heading: 0.9375rem;
+  --text-heading--line-height: 1.375rem;
+  --text-title: 1.25rem;
+  --text-title--line-height: 1.75rem;
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -47,73 +67,89 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/*
+ * The app's palette, as roles. Components paint with these (`bg-card`,
+ * `text-muted-foreground`, `border-border` …), never with a raw zinc/slate
+ * step or a hex, so a theme change is a change here.
+ *
+ * Light is slate and dark is zinc, per the console spec in CLAUDE.md. Three
+ * text tiers: `foreground` for headings and values, `body` for running text,
+ * `muted-foreground` for meta. All three clear 4.5:1 on every surface they sit
+ * on, including `muted`.
+ */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --background: oklch(0.984 0.003 247.858); /* slate-50 */
+  --foreground: oklch(0.208 0.042 265.755); /* slate-900 */
+  --body: oklch(0.372 0.044 257.287); /* slate-700 */
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0.208 0.042 265.755);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
+  --popover-foreground: oklch(0.208 0.042 265.755);
+  --primary: oklch(0.208 0.042 265.755);
+  --primary-foreground: oklch(0.984 0.003 247.858);
+  --secondary: oklch(0.968 0.007 247.896); /* slate-100 */
+  --secondary-foreground: oklch(0.208 0.042 265.755);
+  --muted: oklch(0.968 0.007 247.896);
+  --muted-foreground: oklch(0.5 0.042 257); /* 5.4:1 on white, 4.9:1 on muted */
+  --accent: oklch(0.968 0.007 247.896);
+  --accent-foreground: oklch(0.208 0.042 265.755);
+  --destructive: oklch(0.505 0.213 27.518); /* red-700 */
+  --success: oklch(0.508 0.118 165.612); /* emerald-700 */
+  --warning: oklch(0.555 0.163 48.998); /* amber-700 */
+  --border: oklch(0.929 0.013 255.508); /* slate-200 */
+  --input: oklch(0.869 0.022 252.894); /* slate-300 */
+  --ring: oklch(0.554 0.046 257.417); /* slate-500 */
+  --chart-1: oklch(0.546 0.17 254); /* R2 */
+  --chart-2: oklch(0.66 0.18 40); /* D1 */
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: oklch(1 0 0);
+  --sidebar-foreground: oklch(0.208 0.042 265.755);
+  --sidebar-primary: oklch(0.208 0.042 265.755);
+  --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
+  --sidebar-accent: oklch(0.968 0.007 247.896);
+  --sidebar-accent-foreground: oklch(0.208 0.042 265.755);
+  --sidebar-border: oklch(0.929 0.013 255.508);
+  --sidebar-ring: oklch(0.554 0.046 257.417);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
+  --background: oklch(0.141 0.005 285.823); /* zinc-950 */
+  --foreground: oklch(0.985 0 0); /* zinc-50 */
+  --body: oklch(0.871 0.006 286.286); /* zinc-300 */
+  --card: oklch(0.21 0.006 285.885); /* zinc-900 */
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
+  --popover: oklch(0.21 0.006 285.885);
   --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.21 0.006 285.885);
+  --secondary: oklch(0.274 0.006 286.033); /* zinc-800 */
   --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
+  --muted: oklch(0.274 0.006 286.033);
+  --muted-foreground: oklch(0.705 0.015 286.067); /* zinc-400: 5.9:1 on muted */
+  --accent: oklch(0.274 0.006 286.033);
   --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
+  --destructive: oklch(0.704 0.191 22.216); /* red-400 */
+  --success: oklch(0.765 0.177 163.223); /* emerald-400 */
+  --warning: oklch(0.828 0.189 84.429); /* amber-400 */
+  --border: oklch(0.274 0.006 286.033); /* zinc-800 */
+  --input: oklch(0.37 0.013 285.805); /* zinc-700 */
+  --ring: oklch(0.552 0.016 285.938); /* zinc-500 */
+  --chart-1: oklch(0.623 0.16 254);
+  --chart-2: oklch(0.68 0.17 40);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
+  --sidebar: oklch(0.17 0.005 285.8); /* between zinc-950 and zinc-900 */
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-primary: oklch(0.985 0 0);
+  --sidebar-primary-foreground: oklch(0.21 0.006 285.885);
+  --sidebar-accent: oklch(0.274 0.006 286.033);
   --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar-border: oklch(0.274 0.006 286.033);
+  --sidebar-ring: oklch(0.552 0.016 285.938);
 }
 
 @layer base {
@@ -125,5 +161,23 @@
   }
   html {
     @apply font-sans;
+    /* The parts the browser draws still belong to the palette. */
+    scrollbar-color: var(--input) transparent;
+  }
+  ::selection {
+    background-color: color-mix(in oklch, var(--ring) 28%, transparent);
+  }
+}
+
+/*
+ * Reduced motion keeps every state change visible and drops only the travel:
+ * dialogs still fade in and out, but do not zoom. Spinners keep turning,
+ * because they are the only sign that work is in progress.
+ */
+@media (prefers-reduced-motion: reduce) {
+  [data-slot='dialog-content'],
+  [data-slot='alert-dialog-content'] {
+    --tw-enter-scale: 1;
+    --tw-exit-scale: 1;
   }
 }

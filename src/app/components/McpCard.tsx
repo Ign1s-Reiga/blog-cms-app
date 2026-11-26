@@ -1,9 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { Check, Copy, Eye, EyeOff, KeyRound, Plug, ShieldCheck, TriangleAlert, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 
 type McpStatus = {
@@ -49,6 +50,8 @@ export function McpCard() {
   const [error, setError] = useState<string | null>(null);
   const [reveal, setReveal] = useState(false);
   const [available, setAvailable] = useState(true);
+  const portId = useId();
+  const portRangeId = `${portId}-range`;
 
   const refresh = useCallback(async () => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
@@ -144,39 +147,32 @@ export function McpCard() {
   const decided = requests.filter((r) => r.state !== 'awaiting_approval');
 
   return (
-    <section className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]'>
-      <div className='flex items-center justify-between gap-3 px-4 py-3 border-b border-zinc-100 dark:border-white/[0.05]'>
+    <section className='rounded-[8px] border border-border bg-card'>
+      <div className='flex items-center justify-between gap-3 px-4 py-3 border-b border-border/60'>
         <div>
-          <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>MCP server</h2>
-          <p className='mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-600'>
+          <h2 className='text-heading font-semibold text-foreground'>MCP server</h2>
+          <p className='mt-0.5 text-label text-muted-foreground'>
             Let an AI assistant read and draft your posts. Publishing still needs your approval.
           </p>
         </div>
         <span
           className={cn(
-            'flex shrink-0 items-center gap-1.5 rounded-full px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.08em]',
-            status?.running
-              ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400'
-              : 'bg-zinc-100 text-zinc-500 dark:bg-white/[0.05] dark:text-zinc-500',
+            'flex shrink-0 items-center gap-1.5 rounded-full px-2 py-[3px] text-label font-bold uppercase tracking-[0.08em]',
+            status?.running ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground',
           )}
         >
-          <span
-            className={cn(
-              'size-[5px] rounded-full',
-              status?.running ? 'bg-emerald-500' : 'bg-zinc-400 dark:bg-zinc-600',
-            )}
-          />
+          <span className={cn('size-[5px] rounded-full', status?.running ? 'bg-success' : 'bg-muted-foreground')} />
           {status?.running ? 'Running' : 'Stopped'}
         </span>
       </div>
 
-      <div className='px-4 py-3 space-y-4 text-[12px]'>
+      <div className='px-4 py-3 space-y-4 text-meta'>
         {!available ? (
-          <p className='text-zinc-400 dark:text-zinc-600'>The MCP server is unavailable in the browser.</p>
+          <p className='text-muted-foreground'>The MCP server is unavailable in the browser.</p>
         ) : (
           <>
             {error && (
-              <p className='flex items-start gap-1.5 text-[11px] leading-[1.5] text-red-600 dark:text-red-400'>
+              <p role='alert' className='flex items-start gap-1.5 text-label leading-[1.5] text-destructive'>
                 <TriangleAlert size={12} strokeWidth={2} className='mt-[2px] shrink-0' />
                 {error}
               </p>
@@ -188,20 +184,25 @@ export function McpCard() {
                 variant={status?.enabled ? 'outline' : 'default'}
                 onClick={() => void configure(!status?.enabled, portValid ? parsedPort : DEFAULT_PORT)}
                 disabled={busy || !portValid}
-                className='h-[30px] gap-1.5 text-[12px] font-semibold'
+                className='h-[30px] gap-1.5 text-meta font-semibold'
               >
                 <Plug size={13} strokeWidth={2} />
                 {status?.enabled ? 'Turn off' : 'Turn on'}
               </Button>
 
               <div className='flex items-center gap-1.5'>
-                <label className='text-zinc-500 dark:text-zinc-500'>Port</label>
+                <Label htmlFor={portId} className='text-meta leading-normal font-normal text-muted-foreground'>
+                  Port
+                </Label>
                 <Input
+                  id={portId}
+                  aria-invalid={port !== '' && !portValid ? true : undefined}
+                  aria-describedby={port !== '' && !portValid ? portRangeId : undefined}
                   value={port}
                   onChange={(e) => setPort(e.target.value)}
                   spellCheck={false}
                   inputMode='numeric'
-                  className='h-[30px] w-[84px] font-mono text-[12px]'
+                  className='h-[30px] w-[84px] font-mono text-meta'
                 />
               </div>
 
@@ -211,25 +212,27 @@ export function McpCard() {
                   variant='outline'
                   onClick={() => void configure(status?.enabled ?? false, parsedPort)}
                   disabled={busy}
-                  className='h-[30px] text-[12px] font-semibold'
+                  className='h-[30px] text-meta font-semibold'
                 >
                   Apply
                 </Button>
               )}
               {port !== '' && !portValid && (
-                <span className='text-[11px] text-red-600 dark:text-red-400'>1024–65535</span>
+                <span id={portRangeId} className='text-label text-destructive'>
+                  1024–65535
+                </span>
               )}
             </div>
 
             {status && (
-              <div className='space-y-2 rounded-[6px] border border-zinc-100 dark:border-white/[0.05] bg-zinc-50 dark:bg-white/[0.02] px-3 py-2.5'>
+              <div className='space-y-2 rounded-[6px] border border-border/60 bg-muted/50 px-3 py-2.5'>
                 <Secret label='Endpoint' value={status.endpoint} />
                 {status.token ? (
                   <Secret label='Token' value={status.token} masked={!reveal} onToggle={() => setReveal((v) => !v)} />
                 ) : (
                   <div className='flex items-center justify-between gap-3'>
-                    <span className='shrink-0 text-zinc-500 dark:text-zinc-500'>Token</span>
-                    <span className='truncate text-[11px] text-zinc-400 dark:text-zinc-600'>
+                    <span className='shrink-0 text-muted-foreground'>Token</span>
+                    <span className='truncate text-label text-muted-foreground'>
                       Issued when you first turn the server on
                     </span>
                   </div>
@@ -242,53 +245,48 @@ export function McpCard() {
                       size='sm'
                       onClick={() => void regenerate()}
                       disabled={busy}
-                      className='h-[28px] gap-1.5 text-[11px] font-semibold'
+                      className='h-[28px] gap-1.5 text-label font-semibold'
                     >
                       <KeyRound size={12} strokeWidth={2} />
                       New token
                     </Button>
                   </div>
                 )}
-                <p className='text-[11px] leading-[1.5] text-zinc-500 dark:text-zinc-600'>
+                <p className='text-label leading-[1.5] text-muted-foreground'>
                   Paste the config into your MCP client. The endpoint listens on this machine only, and rejects any
                   request without the token.
                 </p>
               </div>
             )}
 
-            <div className='space-y-2 border-t border-zinc-100 dark:border-white/[0.05] pt-3'>
+            <div className='space-y-2 border-t border-border/60 pt-3'>
               <div className='flex items-center gap-1.5'>
-                <ShieldCheck size={13} strokeWidth={2} className='text-zinc-400 dark:text-zinc-600' />
-                <h3 className='text-[12px] font-semibold text-zinc-700 dark:text-zinc-300'>Publish approvals</h3>
+                <ShieldCheck size={13} strokeWidth={2} className='text-muted-foreground' />
+                <h3 className='text-meta font-semibold text-body'>Publish approvals</h3>
                 {pending.length > 0 && (
-                  <span className='rounded-full bg-amber-100 px-1.5 py-[1px] text-[10px] font-bold text-amber-700 dark:bg-amber-500/15 dark:text-amber-400'>
+                  <span className='rounded-full bg-warning/15 px-1.5 py-[1px] text-label font-bold text-warning'>
                     {pending.length}
                   </span>
                 )}
               </div>
 
               {requests.length === 0 ? (
-                <p className='text-[11px] leading-[1.5] text-zinc-500 dark:text-zinc-600'>
+                <p className='text-label leading-[1.5] text-muted-foreground'>
                   Nothing waiting. When an assistant asks to publish a post, it appears here for you to approve.
                 </p>
               ) : (
                 <ul className='space-y-1.5'>
                   {pending.map((r) => (
-                    <li
-                      key={r.id}
-                      className='rounded-[6px] border border-amber-200 bg-amber-50/60 px-3 py-2 dark:border-amber-500/20 dark:bg-amber-500/[0.06]'
-                    >
-                      <p className='font-medium text-zinc-800 dark:text-zinc-200'>{r.title}</p>
-                      <p className='font-mono text-[11px] text-zinc-500 dark:text-zinc-500'>{r.slug}</p>
-                      {r.reason && (
-                        <p className='mt-1 text-[11px] leading-[1.5] text-zinc-600 dark:text-zinc-400'>{r.reason}</p>
-                      )}
+                    <li key={r.id} className='rounded-[6px] border border-warning/30 bg-warning/10 px-3 py-2'>
+                      <p className='font-medium text-foreground'>{r.title}</p>
+                      <p className='font-mono text-label text-muted-foreground'>{r.slug}</p>
+                      {r.reason && <p className='mt-1 text-label leading-[1.5] text-body'>{r.reason}</p>}
                       <div className='mt-2 flex items-center gap-2'>
                         <Button
                           size='sm'
                           onClick={() => void decide(r.id, true)}
                           disabled={busy}
-                          className='h-[26px] gap-1.5 text-[11px] font-semibold'
+                          className='h-[26px] gap-1.5 text-label font-semibold'
                         >
                           <Check size={12} strokeWidth={2.5} />
                           Approve &amp; publish
@@ -298,7 +296,7 @@ export function McpCard() {
                           variant='outline'
                           onClick={() => void decide(r.id, false)}
                           disabled={busy}
-                          className='h-[26px] gap-1.5 text-[11px] font-semibold'
+                          className='h-[26px] gap-1.5 text-label font-semibold'
                         >
                           <X size={12} strokeWidth={2.5} />
                           Reject
@@ -310,13 +308,11 @@ export function McpCard() {
                   {decided.map((r) => (
                     <li
                       key={r.id}
-                      className='flex items-start justify-between gap-3 rounded-[6px] border border-zinc-100 px-3 py-2 dark:border-white/[0.05]'
+                      className='flex items-start justify-between gap-3 rounded-[6px] border border-border/60 px-3 py-2'
                     >
                       <div className='min-w-0'>
-                        <p className='truncate text-zinc-600 dark:text-zinc-400'>{r.title}</p>
-                        {r.error && (
-                          <p className='mt-0.5 text-[11px] leading-[1.5] text-red-600 dark:text-red-400'>{r.error}</p>
-                        )}
+                        <p className='truncate text-body'>{r.title}</p>
+                        {r.error && <p className='mt-0.5 text-label leading-[1.5] text-destructive'>{r.error}</p>}
                       </div>
                       <Outcome state={r.state} />
                     </li>
@@ -334,16 +330,16 @@ export function McpCard() {
 // ─── Pieces ───────────────────────────────────────────────────────────────────
 
 const OUTCOMES = {
-  publishing: { label: 'Publishing…', className: 'text-amber-600 dark:text-amber-500' },
-  published: { label: 'Published', className: 'text-emerald-600 dark:text-emerald-500' },
-  rejected: { label: 'Rejected', className: 'text-zinc-400 dark:text-zinc-600' },
-  failed: { label: 'Failed', className: 'text-red-600 dark:text-red-400' },
+  publishing: { label: 'Publishing…', className: 'text-warning' },
+  published: { label: 'Published', className: 'text-success' },
+  rejected: { label: 'Rejected', className: 'text-muted-foreground' },
+  failed: { label: 'Failed', className: 'text-destructive' },
 } as const;
 
 function Outcome({ state }: { state: PublishState }) {
   if (state === 'awaiting_approval') return null;
   const { label, className } = OUTCOMES[state];
-  return <span className={cn('shrink-0 text-[11px] font-semibold', className)}>{label}</span>;
+  return <span className={cn('shrink-0 text-label font-semibold', className)}>{label}</span>;
 }
 
 function Secret({
@@ -359,17 +355,15 @@ function Secret({
 }) {
   return (
     <div className='flex items-center justify-between gap-3'>
-      <span className='shrink-0 text-zinc-500 dark:text-zinc-500'>{label}</span>
+      <span className='shrink-0 text-muted-foreground'>{label}</span>
       <div className='flex min-w-0 items-center gap-1'>
-        <span className='truncate font-mono text-[11px] text-zinc-700 dark:text-zinc-300'>
-          {masked ? '•'.repeat(24) : value}
-        </span>
+        <span className='truncate font-mono text-label text-body'>{masked ? '•'.repeat(24) : value}</span>
         {onToggle && (
           <button
             type='button'
             onClick={onToggle}
             aria-label={masked ? `Show ${label}` : `Hide ${label}`}
-            className='shrink-0 rounded p-1 text-zinc-400 transition-colors hover:text-zinc-700 active:scale-95 dark:text-zinc-600 dark:hover:text-zinc-300'
+            className='shrink-0 rounded p-1 text-muted-foreground transition-colors hover:text-body active:scale-95'
           >
             {masked ? <Eye size={12} strokeWidth={2} /> : <EyeOff size={12} strokeWidth={2} />}
           </button>
@@ -394,7 +388,7 @@ function CopyButton({ label, value, iconOnly }: { label: string; value: string; 
   };
 
   const mark = copied ? (
-    <Check size={12} strokeWidth={2.5} className='text-emerald-600 dark:text-emerald-500' />
+    <Check size={12} strokeWidth={2.5} className='text-success' />
   ) : (
     <Copy size={12} strokeWidth={2} />
   );
@@ -405,7 +399,7 @@ function CopyButton({ label, value, iconOnly }: { label: string; value: string; 
         type='button'
         onClick={() => void copy()}
         aria-label={label}
-        className='shrink-0 rounded p-1 text-zinc-400 transition-colors hover:text-zinc-700 active:scale-95 dark:text-zinc-600 dark:hover:text-zinc-300'
+        className='shrink-0 rounded p-1 text-muted-foreground transition-colors hover:text-body active:scale-95'
       >
         {mark}
       </button>
@@ -417,7 +411,7 @@ function CopyButton({ label, value, iconOnly }: { label: string; value: string; 
       variant='outline'
       size='sm'
       onClick={() => void copy()}
-      className='h-[28px] gap-1.5 text-[11px] font-semibold'
+      className='h-[28px] gap-1.5 text-label font-semibold'
     >
       {mark}
       {copied ? 'Copied' : label}

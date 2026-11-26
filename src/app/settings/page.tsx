@@ -1,9 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useState } from 'react';
 import { LogOut, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { McpCard } from '@/components/McpCard';
 import { UpdateCard } from '@/components/UpdateCard';
 
@@ -95,8 +96,8 @@ export default function SettingsPage() {
     <main className='flex-1 overflow-y-auto p-6'>
       <div className='max-w-[1100px] space-y-6'>
         <div>
-          <h1 className='text-[15px] font-semibold text-zinc-800 dark:text-zinc-200'>Settings</h1>
-          <p className='text-[12px] text-zinc-500 dark:text-zinc-600'>Cloudflare connection and preferences.</p>
+          <h1 className='text-title font-semibold tracking-tight text-balance text-foreground'>Settings</h1>
+          <p className='text-meta text-muted-foreground'>Cloudflare connection and preferences.</p>
         </div>
 
         {/* Two equal columns. `items-start` keeps each card at its natural
@@ -105,13 +106,13 @@ export default function SettingsPage() {
         <div className='grid items-start gap-6 lg:grid-cols-2'>
           {/* Left: connection, then the MCP endpoint. */}
           <div className='space-y-6'>
-            <section className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]'>
-              <div className='px-4 py-3 border-b border-zinc-100 dark:border-white/[0.05]'>
-                <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>Cloudflare</h2>
+            <section className='rounded-[8px] border border-border bg-card'>
+              <div className='px-4 py-3 border-b border-border/60'>
+                <h2 className='text-heading font-semibold text-foreground'>Cloudflare</h2>
               </div>
-              <div className='px-4 py-3 space-y-2 text-[12px]'>
+              <div className='px-4 py-3 space-y-2 text-meta'>
                 {loading ? (
-                  <p className='text-zinc-400 dark:text-zinc-600'>Loading…</p>
+                  <p className='text-muted-foreground'>Loading…</p>
                 ) : creds ? (
                   <>
                     <Row label='Account ID' value={creds.account_id} />
@@ -126,10 +127,10 @@ export default function SettingsPage() {
                     />
                     <div className='pt-2'>
                       <Button
-                        variant='outline'
+                        variant='destructive'
                         size='sm'
                         onClick={signOut}
-                        className='h-[30px] gap-1.5 text-[12px] font-semibold text-red-600 dark:text-red-400'
+                        className='h-[30px] gap-1.5 text-meta font-semibold'
                       >
                         <LogOut size={13} strokeWidth={2} />
                         Sign out
@@ -137,7 +138,7 @@ export default function SettingsPage() {
                     </div>
                   </>
                 ) : (
-                  <p className='text-zinc-400 dark:text-zinc-600'>Not connected.</p>
+                  <p className='text-muted-foreground'>Not connected.</p>
                 )}
               </div>
             </section>
@@ -150,15 +151,15 @@ export default function SettingsPage() {
           {/* Right: media settings, then updates. */}
           <div className='space-y-6'>
             {creds && (
-              <section className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]'>
-                <div className='px-4 py-3 border-b border-zinc-100 dark:border-white/[0.05]'>
-                  <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>Media</h2>
-                  <p className='mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-600'>
+              <section className='rounded-[8px] border border-border bg-card'>
+                <div className='px-4 py-3 border-b border-border/60'>
+                  <h2 className='text-heading font-semibold text-foreground'>Media</h2>
+                  <p className='mt-0.5 text-label text-muted-foreground'>
                     Where uploaded media is stored in R2, and the URL it is served from.
                   </p>
                 </div>
 
-                <div className='px-4 py-3 space-y-4 text-[12px]'>
+                <div className='px-4 py-3 space-y-4 text-meta'>
                   <Field
                     label='R2 Public URL'
                     value={publicUrl}
@@ -189,15 +190,19 @@ export default function SettingsPage() {
                       size='sm'
                       onClick={commit}
                       disabled={!dirty || save.kind === 'saving'}
-                      className='h-[30px] text-[12px] font-semibold'
+                      className='h-[30px] text-meta font-semibold'
                     >
                       {save.kind === 'saving' ? 'Saving…' : 'Save changes'}
                     </Button>
                     {save.kind === 'saved' && (
-                      <span className='text-[12px] font-medium text-emerald-600 dark:text-emerald-500'>Saved</span>
+                      <span role='status' className='text-meta font-medium text-success'>
+                        Saved
+                      </span>
                     )}
                     {save.kind === 'error' && (
-                      <span className='text-[12px] font-medium text-red-600 dark:text-red-400'>{save.message}</span>
+                      <span role='alert' className='text-meta font-medium text-destructive'>
+                        {save.message}
+                      </span>
                     )}
                   </div>
                 </div>
@@ -215,8 +220,8 @@ export default function SettingsPage() {
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className='flex items-center justify-between gap-4'>
-      <span className='text-zinc-500 dark:text-zinc-500'>{label}</span>
-      <span className='max-w-[300px] truncate font-mono text-zinc-700 dark:text-zinc-300'>{value}</span>
+      <span className='text-muted-foreground'>{label}</span>
+      <span className='max-w-[300px] truncate font-mono text-body'>{value}</span>
     </div>
   );
 }
@@ -236,19 +241,34 @@ function Field({
   hint?: string;
   warning?: string;
 }) {
+  const id = useId();
+  const hintId = `${id}-hint`;
+  const warningId = `${id}-warning`;
+  // The hint and the warning are what make the pattern safe to edit, so a
+  // screen reader hears them on reaching the field rather than only after it.
+  const describedBy = [hint && hintId, warning && warningId].filter(Boolean).join(' ') || undefined;
+
   return (
     <div className='space-y-1.5'>
-      <label className='block text-[12px] font-medium text-zinc-700 dark:text-zinc-300'>{label}</label>
+      <Label htmlFor={id} className='block text-meta leading-normal font-medium text-body'>
+        {label}
+      </Label>
       <Input
+        id={id}
+        aria-describedby={describedBy}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         spellCheck={false}
-        className='h-[32px] font-mono text-[12px]'
+        className='h-[32px] font-mono text-meta'
       />
-      {hint && <p className='text-[11px] leading-[1.5] text-zinc-500 dark:text-zinc-600'>{hint}</p>}
+      {hint && (
+        <p id={hintId} className='text-label leading-[1.5] text-muted-foreground'>
+          {hint}
+        </p>
+      )}
       {warning && (
-        <p className='flex items-start gap-1.5 text-[11px] leading-[1.5] text-amber-600 dark:text-amber-500'>
+        <p id={warningId} className='flex items-start gap-1.5 text-label leading-[1.5] text-warning'>
           <TriangleAlert size={12} strokeWidth={2} className='mt-[2px] shrink-0' />
           {warning}
         </p>

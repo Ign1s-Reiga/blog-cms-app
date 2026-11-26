@@ -1,10 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BarChart2, ExternalLink, KeyRound, Loader2, RefreshCw } from 'lucide-react';
+import { ArrowUpRight, BarChart2, ExternalLink, KeyRound, Loader2, RefreshCw } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { cn } from '@/lib/utils';
 
 /// Mirrors `AnalyticsError` in `src-tauri/src/analytics.rs`.
@@ -165,33 +165,47 @@ export default function AnalyticsPage() {
   // series with a real bar to draw, and calling it "nothing recorded" tells the
   // author their post went unread when it did not.
   const recorded = series.reduce((sum, d) => sum + d.views, 0);
+  const focusedTitle = focused === null ? null : (report?.posts.find((p) => p.id === focused)?.title ?? null);
 
   return (
     <main className='flex-1 overflow-y-auto p-6'>
       <div className='max-w-[1000px] space-y-5'>
         <div className='flex items-start justify-between gap-4'>
           <div>
-            <h1 className='text-[15px] font-semibold text-zinc-800 dark:text-zinc-200'>Analytics</h1>
-            <p className='text-[12px] text-zinc-500 dark:text-zinc-600'>
-              What readers opened, from Cloudflare Web Analytics.
-            </p>
+            <h1 className='text-title font-semibold tracking-tight text-balance text-foreground'>Analytics</h1>
+            <p className='text-meta text-muted-foreground'>What readers opened, from Cloudflare Web Analytics.</p>
           </div>
           <div className='flex items-center gap-2'>
-            <Tabs value={String(days)} onValueChange={(v) => setDays(Number(v))}>
-              <TabsList className='h-[30px] gap-px rounded-[7px] border border-zinc-200 dark:border-white/[0.07] bg-zinc-100 dark:bg-white/[0.04] p-[3px]'>
-                {WINDOWS.map((w) => (
-                  <TabsTrigger key={w.days} value={String(w.days)} className='h-[22px] px-2.5 text-[11px]'>
-                    {w.label}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
+            {/* A choice of period, not a set of panels: a single-select toggle
+                group, so it reads as one setting rather than tabs with no
+                tab panels behind them. */}
+            <ToggleGroup
+              type='single'
+              value={String(days)}
+              // Single mode reports '' when the active item is pressed again;
+              // a period is always chosen, so that press changes nothing.
+              onValueChange={(v) => v && setDays(Number(v))}
+              aria-label='Period'
+              spacing={0}
+              className='h-[30px] gap-px rounded-[7px] border border-border bg-muted p-[3px]'
+            >
+              {WINDOWS.map((w) => (
+                <ToggleGroupItem
+                  key={w.days}
+                  value={String(w.days)}
+                  size='sm'
+                  className='h-[22px] min-w-0 rounded-[5px] px-2.5 text-label font-medium text-muted-foreground hover:bg-transparent hover:text-foreground data-[state=on]:bg-card data-[state=on]:text-foreground data-[state=on]:shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
+                >
+                  {w.label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
             <Button
               variant='ghost'
               size='sm'
               onClick={() => (sites === null ? void offerSites() : setSites(null))}
               disabled={choosing}
-              className='h-[30px] text-[11px] text-zinc-500 dark:text-zinc-500'
+              className='h-[30px] text-label text-muted-foreground'
             >
               {choosing ? 'Looking…' : sites === null ? 'Change site' : 'Cancel'}
             </Button>
@@ -201,7 +215,7 @@ export default function AnalyticsPage() {
               aria-label='Refresh'
               onClick={() => void load()}
               disabled={loading}
-              className='size-[30px] rounded-[6px] text-zinc-400 dark:text-zinc-500'
+              className='size-[30px] rounded-[6px] text-muted-foreground'
             >
               <RefreshCw size={13} strokeWidth={2} className={cn(loading && 'animate-spin')} />
             </Button>
@@ -209,7 +223,7 @@ export default function AnalyticsPage() {
         </div>
 
         {loading && !report ? (
-          <p className='flex items-center gap-2 p-3 text-[12px] text-zinc-500 dark:text-zinc-500'>
+          <p className='flex items-center gap-2 p-3 text-meta text-muted-foreground'>
             <Loader2 size={13} strokeWidth={2} className='animate-spin' />
             Reading traffic…
           </p>
@@ -225,12 +239,10 @@ export default function AnalyticsPage() {
         ) : report ? (
           <>
             {sites !== null && (
-              <section className='rounded-[8px] border border-zinc-200 bg-white px-4 py-3 dark:border-white/[0.07] dark:bg-[#161616]'>
-                <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>Which site is the blog?</h2>
+              <section className='rounded-[8px] border border-border bg-card px-4 py-3'>
+                <h2 className='text-heading font-semibold text-foreground'>Which site is the blog?</h2>
                 {sites.length === 0 ? (
-                  <p className='mt-1.5 text-[12px] text-zinc-500 dark:text-zinc-600'>
-                    This account has no Web Analytics sites.
-                  </p>
+                  <p className='mt-1.5 text-meta text-muted-foreground'>This account has no Web Analytics sites.</p>
                 ) : (
                   <ul className='mt-2 space-y-1'>
                     {sites.map((site) => (
@@ -239,10 +251,10 @@ export default function AnalyticsPage() {
                           type='button'
                           onClick={() => void chooseSite(site.site_tag)}
                           disabled={choosing}
-                          className='flex w-full items-center justify-between gap-3 rounded-[6px] border border-zinc-200 px-3 py-2 text-left transition-colors hover:bg-zinc-50 active:scale-[0.99] disabled:opacity-60 dark:border-white/[0.07] dark:hover:bg-white/[0.03]'
+                          className='flex w-full items-center justify-between gap-3 rounded-[6px] border border-border px-3 py-2 text-left transition-colors hover:bg-muted/50 active:scale-[0.99] disabled:opacity-60'
                         >
-                          <span className='truncate text-[12px] text-zinc-700 dark:text-zinc-300'>{site.name}</span>
-                          <span className='shrink-0 font-mono text-[10px] text-zinc-400 dark:text-zinc-600'>
+                          <span className='truncate text-meta text-body'>{site.name}</span>
+                          <span className='shrink-0 font-mono text-label text-muted-foreground'>
                             {site.site_tag.slice(0, 8)}…
                           </span>
                         </button>
@@ -254,7 +266,7 @@ export default function AnalyticsPage() {
             )}
 
             {report.truncated && (
-              <p className='rounded-[8px] border border-amber-200 bg-amber-50/60 px-4 py-2.5 text-[11px] leading-[1.6] text-amber-700 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-amber-500'>
+              <p className='rounded-[8px] border border-warning/30 bg-warning/10 px-4 py-2.5 text-label leading-[1.6] text-warning'>
                 One day in this window had more distinct pages than Cloudflare will return at once, so these numbers are
                 a floor rather than a total. A shorter window will be exact.
               </p>
@@ -270,16 +282,14 @@ export default function AnalyticsPage() {
               />
             </div>
 
-            <section className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]'>
-              <div className='flex items-baseline justify-between gap-3 border-b border-zinc-100 dark:border-white/[0.05] px-4 py-3'>
-                <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>
-                  {focused === null ? 'All posts' : report.posts.find((p) => p.id === focused)?.title}
-                </h2>
+            <section className='rounded-[8px] border border-border bg-card'>
+              <div className='flex items-baseline justify-between gap-3 border-b border-border/60 px-4 py-3'>
+                <h2 className='text-heading font-semibold text-foreground'>{focusedTitle ?? 'All posts'}</h2>
                 {focused !== null && (
                   <button
                     type='button'
                     onClick={() => setFocused(null)}
-                    className='text-[11px] text-zinc-500 transition-colors hover:text-zinc-800 dark:text-zinc-500 dark:hover:text-zinc-300'
+                    className='text-label text-muted-foreground transition-colors hover:text-foreground'
                   >
                     Show all
                   </button>
@@ -287,41 +297,71 @@ export default function AnalyticsPage() {
               </div>
               <div className='px-4 py-4'>
                 {recorded === 0 ? (
-                  <p className='py-6 text-center text-[12px] text-zinc-400 dark:text-zinc-600'>
-                    Nothing recorded in this window.
-                  </p>
+                  <p className='py-6 text-center text-meta text-muted-foreground'>Nothing recorded in this window.</p>
                 ) : (
-                  <div className='flex h-[140px] items-end gap-[3px]'>
+                  <div
+                    role='img'
+                    aria-label={`Views per day, ${focusedTitle ?? 'all posts'}: ${recorded.toLocaleString()} over the last ${series.length} days`}
+                    className='flex h-[140px] items-end gap-[3px]'
+                  >
                     {series.map((d) => (
                       <div key={d.date} className='group relative flex flex-1 flex-col justify-end'>
                         <div
-                          className='rounded-t-[2px] bg-zinc-300 transition-colors group-hover:bg-zinc-500 dark:bg-zinc-700 dark:group-hover:bg-zinc-500'
+                          className='rounded-t-[2px] bg-input transition-colors group-hover:bg-muted-foreground'
                           style={{ height: `${Math.max(2, (d.views / peak) * 100)}%` }}
                         />
-                        <span className='pointer-events-none absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-[4px] bg-zinc-900 px-1.5 py-0.5 text-[10px] text-white opacity-0 transition-opacity group-hover:opacity-100 dark:bg-zinc-100 dark:text-zinc-900'>
+                        <span className='pointer-events-none absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-[4px] bg-primary px-1.5 py-0.5 text-label text-primary-foreground opacity-0 transition-opacity group-hover:opacity-100'>
                           {shortDate(d.date)} · {d.views}
                         </span>
                       </div>
                     ))}
                   </div>
                 )}
+
+                {/* Values in text, so the chart is never the only way to read
+                    them — the hover labels above reach neither a keyboard nor
+                    a screen reader. */}
+                {recorded > 0 && (
+                  <table className='sr-only'>
+                    <caption>Views per day, {focusedTitle ?? 'all posts'}</caption>
+                    <thead>
+                      <tr>
+                        <th scope='col'>Date</th>
+                        <th scope='col'>Views</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {series.map((d) => (
+                        <tr key={d.date}>
+                          <th scope='row'>{d.date}</th>
+                          <td>{d.views}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </section>
 
-            <section className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]'>
-              <div className='border-b border-zinc-100 dark:border-white/[0.05] px-4 py-3'>
-                <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>By post</h2>
+            <section className='rounded-[8px] border border-border bg-card'>
+              <div className='border-b border-border/60 px-4 py-3'>
+                <h2 className='text-heading font-semibold text-foreground'>By post</h2>
               </div>
               {report.posts.length === 0 ? (
-                <p className='px-4 py-6 text-center text-[12px] text-zinc-400 dark:text-zinc-600'>
+                <p className='px-4 py-6 text-center text-meta text-muted-foreground'>
                   No traffic reached a post in this window.
                 </p>
               ) : (
                 <ul className='p-2'>
                   {report.posts.map((p) => (
-                    <li key={p.id}>
+                    <li key={p.id} className='group flex items-center gap-1'>
+                      {/* A toggle: pressing it draws this post's days in the
+                          chart above, and pressing it again goes back to all
+                          posts — so `aria-pressed`, not colour alone, is what
+                          says which one is drawn. */}
                       <button
                         type='button'
+                        aria-pressed={focused === p.id}
                         onClick={() => setFocused(focused === p.id ? null : p.id)}
                         // Only for a post the editor will actually open. It
                         // refuses a trashed one, so offering it here would send
@@ -329,31 +369,46 @@ export default function AnalyticsPage() {
                         onDoubleClick={p.trashed ? undefined : () => router.push(`/posts/edit?id=${p.id}`)}
                         title={p.trashed ? 'In the trash. Restore it from Posts → Trash to open it.' : undefined}
                         className={cn(
-                          'flex w-full items-baseline gap-3 rounded-[6px] px-2.5 py-2 text-left transition-colors',
-                          focused === p.id
-                            ? 'bg-zinc-100 dark:bg-white/[0.06]'
-                            : 'hover:bg-zinc-50 dark:hover:bg-white/[0.03]',
+                          'flex min-w-0 flex-1 items-baseline gap-3 rounded-[6px] px-2.5 py-2 text-left transition-colors',
+                          focused === p.id ? 'bg-muted' : 'hover:bg-muted/50',
                         )}
                       >
                         <span className='min-w-0 flex-1'>
-                          <span className='block truncate text-[12px] font-medium text-zinc-700 dark:text-zinc-300'>
-                            {p.title}
-                          </span>
-                          <span className='block truncate font-mono text-[10px] text-zinc-400 dark:text-zinc-600'>
+                          <span className='block truncate text-meta font-medium text-body'>{p.title}</span>
+                          <span className='block truncate font-mono text-label text-muted-foreground'>
                             {p.slug}
                             {!p.published && ' · not published'}
                             {p.trashed && ' · in the trash'}
                           </span>
                         </span>
                         <span className='shrink-0 text-right'>
-                          <span className='block text-[12px] font-semibold tabular-nums text-zinc-800 dark:text-zinc-200'>
+                          <span className='block text-meta font-semibold tabular-nums text-foreground'>
                             {p.views.toLocaleString()}
                           </span>
-                          <span className='block text-[10px] tabular-nums text-zinc-400 dark:text-zinc-600'>
+                          <span className='block text-label tabular-nums text-muted-foreground'>
                             {p.visits.toLocaleString()} visits
                           </span>
                         </span>
                       </button>
+                      {/* The double-click above has no keyboard equivalent, and
+                          Enter on the row already means "draw this one", so
+                          opening gets its own control. Same rule about the
+                          trash as the double-click. */}
+                      {!p.trashed && (
+                        <Button
+                          variant='ghost'
+                          size='icon-sm'
+                          aria-label={`Open ${p.title} in the editor`}
+                          title='Open in the editor'
+                          onClick={() => router.push(`/posts/edit?id=${p.id}`)}
+                          className={cn(
+                            'shrink-0 text-muted-foreground transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100',
+                            focused === p.id ? 'opacity-100' : 'opacity-0',
+                          )}
+                        >
+                          <ArrowUpRight size={13} strokeWidth={2} />
+                        </Button>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -364,10 +419,10 @@ export default function AnalyticsPage() {
                 end in its slug look identical in a total, and only one of them
                 is worth doing something about. */}
             {report.unattributed.length > 0 && (
-              <section className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white dark:bg-[#161616]'>
-                <div className='border-b border-zinc-100 dark:border-white/[0.05] px-4 py-3'>
-                  <h2 className='text-[13px] font-semibold text-zinc-800 dark:text-zinc-200'>Other paths</h2>
-                  <p className='mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-600'>
+              <section className='rounded-[8px] border border-border bg-card'>
+                <div className='border-b border-border/60 px-4 py-3'>
+                  <h2 className='text-heading font-semibold text-foreground'>Other paths</h2>
+                  <p className='mt-0.5 text-label text-muted-foreground'>
                     Traffic that did not end in a post’s slug — the blog’s own pages, and anything whose URL this could
                     not match.
                   </p>
@@ -375,17 +430,15 @@ export default function AnalyticsPage() {
                 <ul className='p-2'>
                   {report.unattributed.slice(0, 25).map((u) => (
                     <li key={u.path} className='flex items-baseline gap-3 px-2.5 py-1.5'>
-                      <span className='min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-600 dark:text-zinc-400'>
-                        {u.path}
-                      </span>
-                      <span className='shrink-0 text-[11px] tabular-nums text-zinc-500 dark:text-zinc-500'>
+                      <span className='min-w-0 flex-1 truncate font-mono text-label text-body'>{u.path}</span>
+                      <span className='shrink-0 text-label tabular-nums text-muted-foreground'>
                         {u.views.toLocaleString()}
                       </span>
                     </li>
                   ))}
                 </ul>
                 {report.unattributed.length > 25 && (
-                  <p className='px-4 pb-3 text-[11px] text-zinc-400 dark:text-zinc-600'>
+                  <p className='px-4 pb-3 text-label text-muted-foreground'>
                     …and {report.unattributed.length - 25} more.
                   </p>
                 )}
@@ -400,12 +453,10 @@ export default function AnalyticsPage() {
 
 function Stat({ label, value, hint }: { label: string; value: number; hint: string }) {
   return (
-    <div className='rounded-[8px] border border-zinc-200 dark:border-white/[0.07] bg-white px-4 py-3 dark:bg-[#161616]'>
-      <p className='text-[11px] text-zinc-500 dark:text-zinc-600'>{label}</p>
-      <p className='mt-1 text-[20px] font-semibold tabular-nums text-zinc-800 dark:text-zinc-200'>
-        {value.toLocaleString()}
-      </p>
-      <p className='mt-0.5 text-[11px] text-zinc-400 dark:text-zinc-600'>{hint}</p>
+    <div className='rounded-[8px] border border-border bg-card px-4 py-3'>
+      <p className='text-label text-muted-foreground'>{label}</p>
+      <p className='mt-1 text-[20px] font-semibold tabular-nums text-foreground'>{value.toLocaleString()}</p>
+      <p className='mt-0.5 text-label text-muted-foreground'>{hint}</p>
     </div>
   );
 }
@@ -431,19 +482,19 @@ function ErrorPanel({
 }) {
   if (error.kind === 'notConfigured' && error.message.includes('Web Analytics')) {
     return (
-      <div className='rounded-[8px] border border-dashed border-zinc-200 px-4 py-8 text-center dark:border-white/[0.08]'>
-        <BarChart2 size={18} strokeWidth={1.6} className='mx-auto text-zinc-300 dark:text-zinc-700' />
-        <p className='mx-auto mt-2 max-w-[440px] text-[12px] leading-[1.6] text-zinc-500 dark:text-zinc-600'>
+      <div className='rounded-[8px] border border-dashed border-border px-4 py-8 text-center'>
+        <BarChart2 size={18} strokeWidth={1.6} className='mx-auto text-muted-foreground' />
+        <p className='mx-auto mt-2 max-w-[440px] text-meta leading-[1.6] text-muted-foreground'>
           Readership comes from Cloudflare Web Analytics. Pick which site is the blog and this reads from it — no new
           token permission is needed.
         </p>
 
         {sites === null ? (
-          <Button size='sm' onClick={onOfferSites} disabled={choosing} className='mt-3 h-[30px] text-[12px]'>
+          <Button size='sm' onClick={onOfferSites} disabled={choosing} className='mt-3 h-[30px] text-meta'>
             {choosing ? 'Looking…' : 'Choose a site'}
           </Button>
         ) : sites.length === 0 ? (
-          <p className='mt-3 text-[12px] text-zinc-500 dark:text-zinc-600'>
+          <p className='mt-3 text-meta text-muted-foreground'>
             This account has no Web Analytics sites. Add one in the Cloudflare dashboard, then come back.
           </p>
         ) : (
@@ -454,12 +505,10 @@ function ErrorPanel({
                   type='button'
                   onClick={() => onChoose(s.site_tag)}
                   disabled={choosing}
-                  className='flex w-full items-center justify-between gap-3 rounded-[6px] border border-zinc-200 px-3 py-2 text-left transition-colors hover:bg-zinc-50 active:scale-[0.99] disabled:opacity-60 dark:border-white/[0.07] dark:hover:bg-white/[0.03]'
+                  className='flex w-full items-center justify-between gap-3 rounded-[6px] border border-border px-3 py-2 text-left transition-colors hover:bg-muted/50 active:scale-[0.99] disabled:opacity-60'
                 >
-                  <span className='truncate text-[12px] text-zinc-700 dark:text-zinc-300'>{s.name}</span>
-                  <span className='shrink-0 font-mono text-[10px] text-zinc-400 dark:text-zinc-600'>
-                    {s.site_tag.slice(0, 8)}…
-                  </span>
+                  <span className='truncate text-meta text-body'>{s.name}</span>
+                  <span className='shrink-0 font-mono text-label text-muted-foreground'>{s.site_tag.slice(0, 8)}…</span>
                 </button>
               </li>
             ))}
@@ -471,16 +520,16 @@ function ErrorPanel({
 
   if (error.kind === 'permission') {
     return (
-      <div className='rounded-[8px] border border-amber-200 bg-amber-50/60 px-4 py-4 dark:border-amber-900/40 dark:bg-amber-950/20'>
-        <p className='flex items-center gap-2 text-[12px] font-semibold text-amber-700 dark:text-amber-500'>
+      <div className='rounded-[8px] border border-warning/30 bg-warning/10 px-4 py-4'>
+        <p className='flex items-center gap-2 text-meta font-semibold text-warning'>
           <KeyRound size={13} strokeWidth={2} />
           The token cannot read analytics
         </p>
-        <p className='mt-1.5 text-[12px] leading-[1.6] text-amber-700/90 dark:text-amber-500/90'>
+        <p className='mt-1.5 text-meta leading-[1.6] text-warning'>
           Add <span className='font-mono'>Account Analytics: Read</span> to the API token in the Cloudflare dashboard,
           then sign in again. Everything else in the app works without it.
         </p>
-        <p className='mt-1.5 text-[11px] text-amber-700/70 dark:text-amber-500/70'>{error.message}</p>
+        <p className='mt-1.5 text-label text-warning'>{error.message}</p>
       </div>
     );
   }
@@ -488,7 +537,7 @@ function ErrorPanel({
   if (error.kind === 'notConfigured') {
     return (
       <Panel title='Not signed in' body={error.message}>
-        <Button size='sm' onClick={onSettings} className='mt-3 h-[30px] gap-1.5 text-[12px]'>
+        <Button size='sm' onClick={onSettings} className='mt-3 h-[30px] gap-1.5 text-meta'>
           <ExternalLink size={12} strokeWidth={2} />
           Settings
         </Button>
@@ -512,9 +561,9 @@ function ErrorPanel({
 
 function Panel({ title, body, children }: { title: string; body: string; children?: React.ReactNode }) {
   return (
-    <div className='rounded-[8px] border border-zinc-200 bg-white px-4 py-4 dark:border-white/[0.07] dark:bg-[#161616]'>
-      <p className='text-[12px] font-semibold text-zinc-800 dark:text-zinc-200'>{title}</p>
-      <p className='mt-1.5 text-[12px] leading-[1.6] text-zinc-600 dark:text-zinc-400'>{body}</p>
+    <div className='rounded-[8px] border border-border bg-card px-4 py-4'>
+      <p className='text-meta font-semibold text-foreground'>{title}</p>
+      <p className='mt-1.5 text-meta leading-[1.6] text-body'>{body}</p>
       {children}
     </div>
   );

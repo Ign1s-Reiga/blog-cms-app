@@ -43,9 +43,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (phase === 'checking') {
     return (
-      <div className='flex h-screen items-center justify-center bg-zinc-50 dark:bg-[#0a0a0a]'>
-        <div className='flex items-center gap-2 text-[13px] font-medium text-zinc-500 dark:text-zinc-400'>
-          <span className='size-3.5 rounded-full border-2 border-zinc-300 border-t-zinc-500 dark:border-zinc-700 dark:border-t-zinc-400 animate-spin' />
+      <div className='flex h-screen items-center justify-center bg-muted/50'>
+        <div className='flex items-center gap-2 text-ui font-medium text-muted-foreground'>
+          <span className='size-3.5 rounded-full border-2 border-input border-t-muted-foreground animate-spin' />
           Checking session…
         </div>
       </div>
@@ -56,7 +56,15 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   if (phase === 'unauthed') {
     return (
       <>
-        {children}
+        {/* Seen but not reachable: `inert` keeps Tab and the pointer out of the
+            app behind the login, and `aria-hidden` keeps a screen reader from
+            reading it as though it were usable. `contents` leaves the layout
+            exactly as it was. Signing in still remounts the app, as it did
+            before the wrapper, so every screen reloads against the new
+            session. */}
+        <div className='contents' inert aria-hidden='true'>
+          {children}
+        </div>
         <LoginScreen
           onAuthed={() => {
             setPhase('authed');
@@ -83,16 +91,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       {pullError !== null && (
         <div
           role='alert'
-          className='fixed bottom-4 right-4 z-50 max-w-[420px] rounded-[6px] border border-red-200 dark:border-red-500/[0.3] bg-red-50 dark:bg-red-500/[0.08] px-3 py-2'
+          className='fixed bottom-4 right-4 z-50 max-w-[420px] rounded-[6px] border border-destructive/30 bg-destructive/10 px-3 py-2'
         >
-          <p className='text-[12px] font-semibold text-red-700 dark:text-red-400'>
-            Could not read this account&apos;s posts
-          </p>
-          <p className='mt-0.5 text-[11px] leading-[1.5] text-red-600 dark:text-red-400/90'>{pullError}</p>
+          <p className='text-meta font-semibold text-destructive'>Could not read this account&apos;s posts</p>
+          <p className='mt-0.5 text-label leading-[1.5] text-destructive'>{pullError}</p>
           <button
             type='button'
             onClick={() => setPullError(null)}
-            className='mt-1.5 text-[11px] font-semibold text-red-700 dark:text-red-400 underline underline-offset-2'
+            className='mt-1.5 text-label font-semibold text-destructive underline underline-offset-2'
           >
             Dismiss
           </button>

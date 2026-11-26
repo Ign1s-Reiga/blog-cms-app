@@ -71,8 +71,8 @@ function Series({
   return (
     <figure className='m-0 min-w-0 flex-1'>
       <figcaption className='flex items-baseline justify-between gap-2'>
-        <span className='text-[11px] font-semibold text-zinc-600 dark:text-zinc-400'>{label}</span>
-        <span className='font-mono text-[11px] tabular-nums text-zinc-500 dark:text-zinc-500'>
+        <span className='text-label font-semibold text-body'>{label}</span>
+        <span className='font-mono text-label tabular-nums text-muted-foreground'>
           {hover === null ? `${formatCount(total)} total` : `${dates[hover].slice(5)} · ${formatCount(values[hover])}`}
         </span>
       </figcaption>
@@ -173,25 +173,13 @@ export function AnalyticsCard() {
     <section>
       <SectionHeader>Activity</SectionHeader>
 
-      <div className='relative rounded-lg border border-zinc-200 bg-white p-4 dark:border-white/[0.07] dark:bg-[#161616]'>
+      <div className='relative rounded-lg border border-border bg-card p-4'>
         <div className='flex flex-col gap-5 sm:flex-row sm:gap-6'>
-          <Series
-            label='R2 requests'
-            total={data?.r2_total ?? 0}
-            values={r2}
-            dates={dates}
-            barClass='fill-[#2a78d6] dark:fill-[#3987e5]'
-          />
-          <Series
-            label='D1 queries'
-            total={data?.d1_total ?? 0}
-            values={d1}
-            dates={dates}
-            barClass='fill-[#eb6834] dark:fill-[#d95926]'
-          />
+          <Series label='R2 requests' total={data?.r2_total ?? 0} values={r2} dates={dates} barClass='fill-chart-1' />
+          <Series label='D1 queries' total={data?.d1_total ?? 0} values={d1} dates={dates} barClass='fill-chart-2' />
         </div>
 
-        <p className='mt-3 text-[10px] text-zinc-400 dark:text-zinc-600'>Last 7 days</p>
+        <p className='mt-3 text-label text-muted-foreground'>Last 7 days</p>
 
         {/* Values in text, so the chart is never the only way to read them. */}
         {data && (
@@ -218,8 +206,8 @@ export function AnalyticsCard() {
 
         {loading && !error && (
           <Overlay>
-            <RefreshCw size={13} strokeWidth={2} className='animate-spin text-zinc-400' />
-            <span className='text-[12px] text-zinc-500 dark:text-zinc-400'>Loading analytics…</span>
+            <RefreshCw size={13} strokeWidth={2} className='animate-spin text-muted-foreground' />
+            <span className='text-meta text-muted-foreground'>Loading analytics…</span>
           </Overlay>
         )}
 
@@ -233,7 +221,7 @@ export function AnalyticsCard() {
 /// the reason is attached to what it affects.
 function Overlay({ children }: { children: React.ReactNode }) {
   return (
-    <div className='absolute inset-0 flex flex-col items-center justify-center gap-1.5 rounded-lg bg-white/80 px-4 text-center backdrop-blur-[1px] dark:bg-[#161616]/80'>
+    <div className='absolute inset-0 flex flex-col items-center justify-center gap-1.5 rounded-lg bg-card/80 px-4 text-center backdrop-blur-[1px]'>
       {children}
     </div>
   );
@@ -245,20 +233,15 @@ function ErrorOverlay({ error, onRetry }: { error: AnalyticsError; onRetry: () =
     <Overlay>
       <div className='flex items-center gap-1.5'>
         {permission ? (
-          <Lock size={13} strokeWidth={2} className='text-amber-600 dark:text-amber-500' />
+          <Lock size={13} strokeWidth={2} className='text-warning' />
         ) : (
-          <TriangleAlert size={13} strokeWidth={2} className='text-red-600 dark:text-red-400' />
+          <TriangleAlert size={13} strokeWidth={2} className='text-destructive' />
         )}
-        <span
-          className={cn(
-            'text-[12px] font-semibold',
-            permission ? 'text-amber-700 dark:text-amber-500' : 'text-red-600 dark:text-red-400',
-          )}
-        >
+        <span className={cn('text-meta font-semibold', permission ? 'text-warning' : 'text-destructive')}>
           {permission ? 'Insufficient permissions' : TITLES[error.kind]}
         </span>
       </div>
-      <p className='max-w-[380px] text-[11px] leading-[1.5] text-zinc-500 dark:text-zinc-500'>
+      <p className='max-w-[380px] text-label leading-[1.5] text-muted-foreground'>
         {permission
           ? 'The API token needs Account Analytics: Read to show usage.'
           : error.message || 'Analytics could not be loaded.'}
@@ -266,7 +249,7 @@ function ErrorOverlay({ error, onRetry }: { error: AnalyticsError; onRetry: () =
       {!permission && (
         <button
           onClick={onRetry}
-          className='mt-0.5 text-[11px] font-semibold text-zinc-600 underline underline-offset-2 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200'
+          className='mt-0.5 text-label font-semibold text-body underline underline-offset-2 transition-colors hover:text-foreground'
         >
           Try again
         </button>
