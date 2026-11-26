@@ -402,7 +402,7 @@ export default function AnalyticsPage() {
                           title='Open in the editor'
                           onClick={() => router.push(`/posts/edit?id=${p.id}`)}
                           className={cn(
-                            'shrink-0 text-muted-foreground transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100',
+                            'shrink-0 text-muted-foreground transition-[color,background-color,opacity] group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100',
                             focused === p.id ? 'opacity-100' : 'opacity-0',
                           )}
                         >
