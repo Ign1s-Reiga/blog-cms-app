@@ -438,7 +438,11 @@ describe('the format menu', () => {
     fireEvent.scroll(preview!);
     expect(screen.getByRole('menu', { name: 'Format selection' })).toBeInTheDocument();
 
+    // Closing on a scroll gives focus back without setting the selection,
+    // which would scroll the source straight back to it.
+    const setSelection = vi.spyOn(body as HTMLTextAreaElement, 'setSelectionRange');
     fireEvent.scroll(body);
     expect(screen.queryByRole('menu', { name: 'Format selection' })).not.toBeInTheDocument();
+    expect(setSelection).not.toHaveBeenCalled();
   });
 });
