@@ -34,6 +34,7 @@ import { MediaPicker, type MediaEntry } from '@/components/MediaPicker';
 import { RevisionHistory } from '@/components/RevisionHistory';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
+import { useScrollSync } from '@/lib/scrollSync';
 
 type EditorMode = 'write' | 'split' | 'preview';
 
@@ -862,6 +863,9 @@ export function PostEditor() {
   const chars = body.length;
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // The split view's preview pane, kept level with the source as either scrolls.
+  const previewPaneRef = useRef<HTMLDivElement>(null);
+  useScrollSync(mode === 'split', textareaRef, previewPaneRef, preview);
 
   // Replace the textarea content and restore the caret. flushSync commits the
   // state update before we move the caret, so the controlled value and the
@@ -1919,7 +1923,10 @@ export function PostEditor() {
           {divider}
           <div className='flex-1 min-h-0 flex'>
             <div className='flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden'>{editor}</div>
-            <div className='flex-1 min-w-0 min-h-0 overflow-y-auto px-5 py-3 border-l border-zinc-200 dark:border-white/[0.06]'>
+            <div
+              ref={previewPaneRef}
+              className='flex-1 min-w-0 min-h-0 overflow-y-auto px-5 py-3 border-l border-zinc-200 dark:border-white/[0.06]'
+            >
               {previewBody}
             </div>
           </div>
