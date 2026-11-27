@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { FileWarning, Loader2, Trash2, Upload, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
@@ -93,6 +93,10 @@ function usageLabel({ posts, complete }: Usage): string {
 
 export default function MediaPage() {
   const router = useRouter();
+  /// Ties each notice's Dismiss button to its message. The button is named
+  /// just "Dismiss" and described by the message: it sits inside the alert,
+  /// and a name that repeated the message would have it read out twice.
+  const noticeId = useId();
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -385,7 +389,9 @@ export default function MediaPage() {
           >
             {uploadError && (
               <div className='flex items-start gap-2'>
-                <p className='flex-1 min-w-0 break-words'>{uploadError}</p>
+                <p id={`${noticeId}-upload`} className='flex-1 min-w-0 break-words'>
+                  {uploadError}
+                </p>
                 {/* Its button goes with it, so focus moves to Upload — the
                     way to try again — rather than falling to <body>. */}
                 <Button
@@ -395,7 +401,8 @@ export default function MediaPage() {
                     setUploadError(null);
                     uploadButton.current?.focus();
                   }}
-                  aria-label={`Dismiss: ${uploadError}`}
+                  aria-label='Dismiss'
+                  aria-describedby={`${noticeId}-upload`}
                   className='shrink-0 text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive active:scale-95'
                 >
                   <X size={12} strokeWidth={2} />
@@ -412,9 +419,13 @@ export default function MediaPage() {
             className='rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
           >
             <ul className='space-y-1'>
-              {[...deleteErrors].map(([key, message]) => (
+              {[...deleteErrors].map(([key, message], i) => (
                 <li key={key} className='flex items-start gap-2'>
-                  <span className='flex-1 min-w-0 break-words'>{message}</span>
+                  {/* By position, not key: an object key may hold spaces,
+                      which would split an ID reference in two. */}
+                  <span id={`${noticeId}-delete-${i}`} className='flex-1 min-w-0 break-words'>
+                    {message}
+                  </span>
                   <Button
                     ref={(el) => {
                       if (el) dismissButtons.current.set(key, el);
@@ -423,7 +434,8 @@ export default function MediaPage() {
                     variant='ghost'
                     size='icon-xs'
                     onClick={() => dismissDeleteError(key)}
-                    aria-label={`Dismiss: ${message}`}
+                    aria-label='Dismiss'
+                    aria-describedby={`${noticeId}-delete-${i}`}
                     className='shrink-0 text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive active:scale-95'
                   >
                     <X size={12} strokeWidth={2} />
