@@ -36,18 +36,21 @@ const usedBy = (name: string): Usage => ({
 const unused = (name: string): Usage => ({ key: `media/${name}`, posts: [] });
 
 /// Answers by command. `delete_media` and, when asked, `list_media` are held
-/// until the test lets them go, so they can be made to overlap.
+/// until the test lets them go, so they can be made to overlap. The listing
+/// can be changed between reloads, as R2 changes under the page.
 function backend({
   listing = [object('a.webp'), object('b.webp')],
   usage = [unused('a.webp'), unused('b.webp')],
+  holdFirstList = false,
 } = {}) {
   const deletes: { key: string; settle: (error?: string) => void }[] = [];
   const lists: ((rows: unknown[]) => void)[] = [];
-  let holdLists = false;
+  let holdLists = holdFirstList;
+  let current = listing;
   invoke.mockImplementation(async (command: string, args?: { key: string }) => {
     switch (command) {
       case 'list_media':
-        return holdLists ? new Promise((resolve) => lists.push(resolve)) : listing;
+        return holdLists ? new Promise((resolve) => lists.push(resolve)) : current;
       case 'media_usage':
         return { objects: usage, unchecked_posts: [] };
       case 'delete_media':
@@ -61,8 +64,11 @@ function backend({
   return {
     deletes,
     lists,
-    holdLists: () => {
-      holdLists = true;
+    holdLists: (on = true) => {
+      holdLists = on;
+    },
+    setListing: (rows: ReturnType<typeof object>[]) => {
+      current = rows;
     },
   };
 }
@@ -137,5 +143,47 @@ describe('deleting media', () => {
     await waitFor(() => expect(deletes).toHaveLength(2));
     deletes[1].settle();
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
+
+  it('keeps a notice per failed object, each dismissable on its own', async () => {
+    const { deletes } = backend();
+    render(<MediaPage />);
+
+    await userEvent.click((await screen.findByRole('button', { name: 'Delete a.webp' }))!);
+    await userEvent.click(tile('b.webp')!);
+    await waitFor(() => expect(deletes).toHaveLength(2));
+    deletes[0].settle('R2 timed out');
+    deletes[1].settle('R2 refused');
+
+    const alert = await screen.findByRole('alert');
+    await waitFor(() => expect(alert).toHaveTextContent('Could not delete b.webp: R2 refused'));
+    expect(alert).toHaveTextContent('Could not delete a.webp: R2 timed out');
+
+    // b goes through on a retry; a's failure is still reported.
+    await userEvent.click(tile('b.webp')!);
+    await waitFor(() => expect(deletes).toHaveLength(3));
+    deletes[2].settle();
+    await waitFor(() => expect(screen.getByRole('alert')).not.toHaveTextContent('b.webp'));
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not delete a.webp');
+
+    await userEvent.click(screen.getByRole('button', { name: /^Dismiss: Could not delete a\.webp/ }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it("drops a failed delete's notice once a reload no longer lists the object", async () => {
+    const { deletes, setListing } = backend();
+    render(<MediaPage />);
+
+    await userEvent.click((await screen.findByRole('button', { name: 'Delete a.webp' }))!);
+    await waitFor(() => expect(deletes).toHaveLength(1));
+    deletes[0].settle('R2 timed out');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not delete a.webp');
+
+    // The delete went through after all, and the next listing says so.
+    setListing([object('b.webp')]);
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+
+    await waitFor(() => expect(tile('a.webp')).not.toBeInTheDocument());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
