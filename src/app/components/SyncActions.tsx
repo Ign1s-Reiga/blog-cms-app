@@ -56,9 +56,14 @@ function SyncAction({
       // had been behind the login — so a pull that had no credentials would
       // report its failure into the session that does.
       const behindLogin = button.current?.closest('[inert]') != null;
+      // The standing failure notice for this action has one id, so a later
+      // failure replaces it rather than stacking a second, and a later success
+      // takes it away — it would otherwise outlive the problem it reports.
+      const standing = `${label}: launch failure`;
       setBusy(true);
       try {
         const ran = await run();
+        if (ran) toast.dismiss(standing);
         if (clicked) {
           if (ran) toast.success(done);
           else toast(SYNC_UNAVAILABLE);
@@ -72,7 +77,7 @@ function SyncAction({
           // It stays until dismissed: it is how a bad token from signing in
           // shows, and once a fading toast is gone, the empty library behind
           // it reads as an account with no posts.
-          toast.error(failed, { description: String(err), duration: Infinity, closeButton: true });
+          toast.error(failed, { id: standing, description: String(err), duration: Infinity, closeButton: true });
         }
       } finally {
         guard.current = false;

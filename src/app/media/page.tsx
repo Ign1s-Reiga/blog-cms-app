@@ -102,15 +102,22 @@ export default function MediaPage() {
   /// is "what uses this", the other "delete it anyway?".
   const [inspecting, setInspecting] = useState<MediaItem | null>(null);
   const [confirming, setConfirming] = useState<MediaItem | null>(null);
-  /// A forced delete in flight. The confirmation stays up until it settles, so
-  /// a slow R2 call cannot be dismissed into looking like it never happened.
-  const [deleting, setDeleting] = useState(false);
-  /// The objects being deleted right now, readable at once: `deleting` only
-  /// disables the dialog's button on the next render, and a double click lands
-  /// its second press before that. Keyed by object, so a repeat press for the
-  /// same one is dropped while a delete of a different one goes ahead — an
-  /// unused tile deletes straight away, with no dialog to show it is busy.
+  /// The objects being deleted right now. Per object, because deletes run side
+  /// by side — an unused tile deletes straight away, with no dialog — and one
+  /// object's delete must neither hold up nor close another's confirmation.
+  /// The confirmation stays up until *its* delete settles, so a slow R2 call
+  /// cannot be dismissed into looking like it never happened.
+  const [deleting, setDeleting] = useState<ReadonlySet<string>>(new Set());
+  /// The same set, readable at once: state only changes on the next render,
+  /// and a double click lands its second press before that.
   const deletingKeys = useRef(new Set<string>());
+  /// When each object's delete went through, as a count of deletes. A media
+  /// reload that started before a delete finished carries a list fetched with
+  /// the object still in it; this is how it knows to leave that one out.
+  const removals = useRef({ count: 0, at: new Map<string, number>() });
+  /// A delete that failed, kept apart from the page's other errors so it can
+  /// name its object and go away once that object is deleted after all.
+  const [deleteError, setDeleteError] = useState<{ key: string; message: string } | null>(null);
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -122,6 +129,7 @@ export default function MediaPage() {
   // Load media from R2 (cached locally by the backend). No-ops in a plain
   // browser (`pnpm dev`), where the Tauri API isn't available.
   const loadMedia = useCallback(async () => {
+    const since = removals.current.count;
     const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
@@ -158,7 +166,10 @@ export default function MediaPage() {
           usedBy: withUsage(usage.get(r.key), blind),
         })),
       );
-      setItems(resolved);
+      // Leave out what was deleted while this was in flight: the list came
+      // from R2 before the delete did, and would put the object back.
+      const removedAt = removals.current.at;
+      setItems(resolved.filter((item) => (removedAt.get(item.key) ?? 0) <= since));
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -196,11 +207,13 @@ export default function MediaPage() {
     const inFlight = deletingKeys.current;
     if (inFlight.has(item.key)) return;
     inFlight.add(item.key);
-    setDeleting(true);
+    setDeleting(new Set(inFlight));
     const release = () => {
       inFlight.delete(item.key);
-      setDeleting(inFlight.size > 0);
+      setDeleting(new Set(inFlight));
     };
+    // Settling one delete closes the confirmation only if it is this object's.
+    const closeOwnConfirmation = () => setConfirming((c) => (c?.key === item.key ? null : c));
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       release();
@@ -208,11 +221,14 @@ export default function MediaPage() {
     }
     try {
       await invoke('delete_media', { key: item.key, force });
+      const r = removals.current;
+      r.at.set(item.key, ++r.count);
       setItems((prev) => prev.filter((i) => i.key !== item.key));
-      setConfirming(null);
+      setDeleteError((d) => (d?.key === item.key ? null : d));
+      closeOwnConfirmation();
     } catch (e) {
-      setError(String(e));
-      setConfirming(null);
+      setDeleteError({ key: item.key, message: `Could not delete ${item.name}: ${String(e)}` });
+      closeOwnConfirmation();
     } finally {
       release();
     }
@@ -291,6 +307,15 @@ export default function MediaPage() {
             className='rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
           >
             {error}
+          </div>
+        )}
+
+        {deleteError && (
+          <div
+            role='alert'
+            className='rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
+          >
+            {deleteError.message}
           </div>
         )}
 
@@ -430,7 +455,7 @@ export default function MediaPage() {
         <AlertDialog
           open={confirming !== null}
           onOpenChange={(open) => {
-            if (!open && !deleting) setConfirming(null);
+            if (!open && !(confirming && deleting.has(confirming.key))) setConfirming(null);
           }}
         >
           {confirming && (
@@ -474,7 +499,7 @@ export default function MediaPage() {
               <div className='mt-4 flex items-center justify-end gap-2'>
                 <AlertDialogCancel
                   size='sm'
-                  disabled={deleting}
+                  disabled={deleting.has(confirming.key)}
                   className='h-[28px] px-3 rounded-[5px] text-meta font-semibold'
                 >
                   Keep it
@@ -482,7 +507,7 @@ export default function MediaPage() {
                 <AlertDialogAction
                   variant='destructive'
                   size='sm'
-                  disabled={deleting}
+                  disabled={deleting.has(confirming.key)}
                   onClick={(e) => {
                     // Held open until the delete settles: `handleDelete`
                     // closes it either way, and says so if it failed.
@@ -491,7 +516,7 @@ export default function MediaPage() {
                   }}
                   className='h-[28px] px-3 rounded-[5px] text-meta font-semibold'
                 >
-                  {deleting ? 'Deleting…' : 'Delete anyway'}
+                  {deleting.has(confirming.key) ? 'Deleting…' : 'Delete anyway'}
                 </AlertDialogAction>
               </div>
             </AlertDialogContent>

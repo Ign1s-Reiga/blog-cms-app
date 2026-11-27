@@ -8,7 +8,7 @@ import userEvent from '@testing-library/user-event';
 
 const { pull, toast } = vi.hoisted(() => ({
   pull: vi.fn(),
-  toast: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn() }),
+  toast: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn(), dismiss: vi.fn() }),
 }));
 
 vi.mock('@/lib/sync', async (original) => ({
@@ -51,5 +51,20 @@ describe('the launch-time pull', () => {
 
     expect(toast).toHaveBeenCalledWith(SYNC_UNAVAILABLE);
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  /// The launch-time failure stays until dismissed, so it must not stack on a
+  /// repeat or outlive the problem: it has one id, and a pull that works takes
+  /// it away.
+  it('keeps one standing failure notice, and clears it once a pull works', async () => {
+    pull.mockRejectedValueOnce('401 Unauthorized').mockResolvedValue(true);
+    render(<SyncActions />);
+
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalled());
+    const [, options] = toast.error.mock.calls[0];
+    expect(options).toMatchObject({ id: expect.any(String), duration: Infinity });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Pull from cloud' }));
+    expect(toast.dismiss).toHaveBeenCalledWith(options.id);
   });
 });
