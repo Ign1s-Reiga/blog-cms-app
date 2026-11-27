@@ -97,6 +97,11 @@ export default function MediaPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /// An upload's failure, kept apart from `error`, which belongs to reloads:
+  /// a reload clears it when it lands, and one that started before the upload
+  /// would otherwise clear a failure it knows nothing about. Goes when the
+  /// next upload starts.
+  const [uploadError, setUploadError] = useState<string | null>(null);
   /// The item whose posts are being inspected, and the one whose deletion is
   /// waiting on an answer. Separate because they are different questions: one
   /// is "what uses this", the other "delete it anyway?".
@@ -239,12 +244,13 @@ export default function MediaPage() {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setBusy(true);
+    setUploadError(null);
     try {
       await invoke('upload_media');
       await loadMedia();
     } catch (e) {
       const msg = String(e);
-      if (msg !== 'cancelled') setError(msg);
+      if (msg !== 'cancelled') setUploadError(`Could not upload: ${msg}`);
     } finally {
       setBusy(false);
     }
@@ -355,12 +361,13 @@ export default function MediaPage() {
           </div>
         )}
 
-        {error && (
+        {(uploadError || error) && (
           <div
             role='alert'
-            className='rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
+            className='space-y-1 rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
           >
-            {error}
+            {uploadError && <p>{uploadError}</p>}
+            {error && <p>{error}</p>}
           </div>
         )}
 
