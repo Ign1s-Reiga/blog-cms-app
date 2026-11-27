@@ -203,7 +203,7 @@ describe('deleting media', () => {
     await waitFor(() => expect(screen.getByRole('alert')).not.toHaveTextContent('b.webp'));
     expect(screen.getByRole('alert')).toHaveTextContent('Could not delete a.webp');
 
-    await userEvent.click(screen.getByRole('button', { name: /^Dismiss: Could not delete a\.webp/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Dismiss', description: /^Could not delete a\.webp/ }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -295,6 +295,34 @@ describe('deleting media', () => {
     expect(screen.queryByText('Loading media…')).not.toBeInTheDocument();
   });
 
+  it('reports a delete that fails before it reaches R2, and lets it be retried', async () => {
+    const { deletes } = backend();
+    render(<MediaPage />);
+    await screen.findByRole('button', { name: 'Delete a.webp' });
+
+    isTauri.mockImplementationOnce(() => {
+      throw new Error('chunk failed to load');
+    });
+    await userEvent.click(tile('a.webp')!);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not delete a.webp: Error: chunk failed to load');
+    expect(tile('a.webp')).not.toHaveAttribute('aria-busy');
+
+    await userEvent.click(tile('a.webp')!);
+    await waitFor(() => expect(deletes).toHaveLength(1));
+  });
+
+  it('reports an upload that fails before it starts', async () => {
+    backend();
+    render(<MediaPage />);
+    await screen.findByRole('button', { name: 'Delete a.webp' });
+
+    isTauri.mockImplementationOnce(() => {
+      throw new Error('chunk failed to load');
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not upload: Error: chunk failed to load');
+  });
+
   it("keeps an upload's failure when an earlier load lands after it", async () => {
     const { lists, failUpload } = backend({ holdFirstList: true });
     render(<MediaPage />);
@@ -319,7 +347,7 @@ describe('deleting media', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
     await screen.findByRole('alert');
 
-    screen.getByRole('button', { name: 'Dismiss: Could not upload: permission denied' }).focus();
+    screen.getByRole('button', { name: 'Dismiss', description: 'Could not upload: permission denied' }).focus();
     await userEvent.keyboard('{Enter}');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Upload' })).toHaveFocus();
@@ -334,8 +362,8 @@ describe('deleting media', () => {
     await waitFor(() => expect(deletes).toHaveLength(2));
     deletes[0].settle('R2 timed out');
     deletes[1].settle('R2 refused');
-    const dismissA = await screen.findByRole('button', { name: /^Dismiss: Could not delete a\.webp/ });
-    const dismissB = await screen.findByRole('button', { name: /^Dismiss: Could not delete b\.webp/ });
+    const dismissA = await screen.findByRole('button', { name: 'Dismiss', description: /^Could not delete a\.webp/ });
+    const dismissB = await screen.findByRole('button', { name: 'Dismiss', description: /^Could not delete b\.webp/ });
 
     dismissA.focus();
     await userEvent.keyboard('{Enter}');
@@ -352,7 +380,7 @@ describe('deleting media', () => {
     await userEvent.click((await screen.findByRole('button', { name: 'Delete a.webp' }))!);
     await waitFor(() => expect(deletes).toHaveLength(1));
     deletes[0].settle('R2 timed out');
-    const dismiss = await screen.findByRole('button', { name: /^Dismiss: Could not delete a\.webp/ });
+    const dismiss = await screen.findByRole('button', { name: 'Dismiss', description: /^Could not delete a\.webp/ });
 
     // The upload stays busy while its reload is held.
     holdLists();
