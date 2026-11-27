@@ -67,4 +67,18 @@ describe('the launch-time pull', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Pull from cloud' }));
     expect(toast.dismiss).toHaveBeenCalledWith(options.id);
   });
+
+  /// A click that fails while the launch failure is still up replaces it rather
+  /// than stacking a second notice of the same failure beside it.
+  it('reports a failed click under the standing notice, not beside it', async () => {
+    pull.mockRejectedValue('401 Unauthorized');
+    render(<SyncActions />);
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Pull from cloud' }));
+
+    expect(toast.error).toHaveBeenCalledTimes(2);
+    const [[, standing], [, clicked]] = toast.error.mock.calls;
+    expect(clicked.id).toBe(standing.id);
+  });
 });

@@ -71,7 +71,10 @@ function SyncAction({
       } catch (err) {
         console.error(`${label} failed:`, err);
         if (clicked) {
-          toast.error(failed, { description: String(err) });
+          // Under the standing notice's id too, so it replaces that rather than
+          // stacking beside it. It fades like any click's result: the person
+          // who clicked is there to see it.
+          toast.error(failed, { id: standing, description: String(err) });
         } else if (!behindLogin && mounted.current) {
           // Nobody asked for this run, so nobody is watching for its result.
           // It stays until dismissed: it is how a bad token from signing in
