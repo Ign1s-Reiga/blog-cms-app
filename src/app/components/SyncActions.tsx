@@ -65,7 +65,15 @@ function SyncAction({
         }
       } catch (err) {
         console.error(`${label} failed:`, err);
-        if (clicked || (!behindLogin && mounted.current)) toast.error(failed, { description: String(err) });
+        if (clicked) {
+          toast.error(failed, { description: String(err) });
+        } else if (!behindLogin && mounted.current) {
+          // Nobody asked for this run, so nobody is watching for its result.
+          // It stays until dismissed: it is how a bad token from signing in
+          // shows, and once a fading toast is gone, the empty library behind
+          // it reads as an account with no posts.
+          toast.error(failed, { description: String(err), duration: Infinity, closeButton: true });
+        }
       } finally {
         guard.current = false;
         setBusy(false);
