@@ -162,8 +162,15 @@ describe('deleting media', () => {
     await userEvent.click((await screen.findByRole('button', { name: 'Delete a.webp' }))!);
     await waitFor(() => expect(deletes).toHaveLength(1));
 
-    expect(tile('a.webp')).toBeDisabled();
-    expect(tile('b.webp')).toBeEnabled();
+    // Marked busy without `disabled`, which would drop its keyboard focus.
+    expect(tile('a.webp')).toHaveAttribute('aria-disabled', 'true');
+    expect(tile('a.webp')).toHaveAttribute('aria-busy', 'true');
+    expect(tile('a.webp')).toBeEnabled();
+    expect(tile('b.webp')).not.toHaveAttribute('aria-disabled');
+
+    // A press while it is busy sends nothing more.
+    await userEvent.click(tile('a.webp')!);
+    expect(deletes).toHaveLength(1);
   });
 
   it('keeps a notice per failed object, each dismissable on its own', async () => {

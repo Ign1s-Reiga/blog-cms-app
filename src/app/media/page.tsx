@@ -409,18 +409,23 @@ export default function MediaPage() {
                   </div>
                   {/* Busy while its own delete runs: an unused object deletes
                       straight from here, with no dialog to show it, and a slow
-                      R2 call would otherwise look like a dead click. */}
+                      R2 call would otherwise look like a dead click.
+                      `aria-disabled`, not `disabled`: a button that becomes
+                      disabled drops the keyboard focus it holds to <body>. A
+                      repeat press is refused here and in `handleDelete`. */}
                   <button
                     type='button'
                     aria-label={`Delete ${item.name}`}
-                    onClick={() => requestDelete(item)}
-                    disabled={deleting.has(item.key)}
+                    onClick={() => {
+                      if (!deleting.has(item.key)) requestDelete(item);
+                    }}
+                    aria-disabled={deleting.has(item.key) || undefined}
                     aria-busy={deleting.has(item.key) || undefined}
                     className={cn(
                       'shrink-0 p-1 rounded-[4px] text-muted-foreground transition-colors',
                       deleting.has(item.key)
                         ? 'opacity-100 cursor-progress'
-                        : 'hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100',
+                        : 'hover:text-destructive hover:bg-destructive/10 active:scale-95 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100',
                     )}
                   >
                     {deleting.has(item.key) ? (
