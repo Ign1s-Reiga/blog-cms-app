@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+import { invoke, isTauri } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 type McpStatus = {
   enabled: boolean;
@@ -54,7 +56,6 @@ export function McpCard() {
   const portRangeId = `${portId}-range`;
 
   const refresh = useCallback(async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setAvailable(false);
       return;
@@ -85,9 +86,7 @@ export function McpCard() {
     let stop: (() => void) | undefined;
     let cancelled = false;
     void (async () => {
-      const { isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
-      const { listen } = await import('@tauri-apps/api/event');
       const un = await listen<PublishRequest[]>('mcp://publish-requests-changed', (e) => {
         setRequests(e.payload);
       });
@@ -102,7 +101,6 @@ export function McpCard() {
 
   const run = useCallback(
     async (fn: (invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>) => Promise<void>) => {
-      const { invoke, isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri() || busy) return;
       setBusy(true);
       setError(null);

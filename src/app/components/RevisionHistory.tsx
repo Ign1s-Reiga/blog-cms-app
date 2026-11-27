@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { useReturnFocus } from '@/lib/useReturnFocus';
 import { cn } from '@/lib/utils';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 /// One entry as `list_revisions` returns it (see `RevisionSummary` in
 /// `src-tauri/src/commands/local_db.rs`). Bodies are fetched one at a time.
@@ -114,7 +115,6 @@ export function RevisionHistory({
 
   const load = useCallback(async () => {
     if (postId === null) return;
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setLoading(true);
     setError(null);
@@ -147,7 +147,6 @@ export function RevisionHistory({
   }, [restoring, onClose]);
 
   const select = async (summary: RevisionSummary) => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     try {
       setSelected(await invoke<Revision>('get_revision', { revisionId: summary.id }));
@@ -158,7 +157,6 @@ export function RevisionHistory({
 
   const restore = async () => {
     if (!selected || restoring) return;
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setRestoring(true);
     setError(null);

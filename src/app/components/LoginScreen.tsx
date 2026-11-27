@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 // D1 database ids are UUIDs; the API rejects anything else.
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -32,7 +33,6 @@ export function LoginScreen({ onAuthed }: { onAuthed: () => void }) {
       setError("R2 Public URL must be the bucket's public origin, e.g. https://cdn.example.com");
       return;
     }
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setBusy(true);
     setError(null);

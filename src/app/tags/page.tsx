@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { onPostsRefreshed } from '@/lib/sync';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 /// Mirrors `TagCount` in `src-tauri/src/commands/local_db.rs`.
 type TagCount = { name: string; posts: number };
@@ -33,7 +34,6 @@ export default function TagsPage() {
   const [result, setResult] = useState<(TagRenamed & { from: string; to: string }) | null>(null);
 
   const load = useCallback(async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
       return;
@@ -65,7 +65,6 @@ export default function TagsPage() {
     setBusy(true);
     setError(null);
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
       const done = await invoke<TagRenamed>('rename_tag', { from: editing.from, to });
       setResult({ ...done, from: editing.from, to });
       setEditing(null);

@@ -8,6 +8,8 @@ import { Input } from '@/components/ui/input';
 import { isVideo } from '@/lib/media';
 import { useReturnFocus } from '@/lib/useReturnFocus';
 import { cn } from '@/lib/utils';
+import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
+import { appDataDir, join } from '@tauri-apps/api/path';
 
 export interface MediaEntry {
   /** R2 key, e.g. `media/<uuid>.avif`. */
@@ -56,13 +58,11 @@ export function MediaPicker({
   const returnFocus = useReturnFocus();
 
   const load = useCallback(async () => {
-    const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setLoading(true);
     setError(null);
     try {
       const rows = await invoke<MediaEntry[]>('list_media');
-      const { appDataDir, join } = await import('@tauri-apps/api/path');
       const base = await appDataDir();
       setItems(
         await Promise.all(

@@ -23,6 +23,7 @@ import { Separator } from '@/components/ui/separator';
 import { onPostsRefreshed } from '@/lib/sync';
 import { checkForUpdate, getCachedStatus, onUpdateStatusChanged } from '@/lib/updater';
 import { cn } from '@/lib/utils';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -155,7 +156,6 @@ export function Sidebar() {
   const [postCount, setPostCount] = useState<number | null>(null);
 
   const loadCount = useCallback(async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     try {
       const rows = await invoke<unknown[]>('list_posts');

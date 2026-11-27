@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { McpCard } from '@/components/McpCard';
 import { UpdateCard } from '@/components/UpdateCard';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 type Creds = {
   account_id: string;
@@ -31,7 +32,6 @@ export default function SettingsPage() {
   const [save, setSave] = useState<SaveState>({ kind: 'idle' });
 
   const load = useCallback(async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
       return;
@@ -62,7 +62,6 @@ export default function SettingsPage() {
       mediaPat !== creds.media_key_pattern);
 
   const commit = async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri() || save.kind === 'saving') return;
     setSave({ kind: 'saving' });
     try {
@@ -82,7 +81,6 @@ export default function SettingsPage() {
   };
 
   const signOut = async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     try {
       await invoke('clear_credentials');

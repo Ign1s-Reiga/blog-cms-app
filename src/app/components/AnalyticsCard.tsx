@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Lock, RefreshCw, TriangleAlert } from 'lucide-react';
 import { SectionHeader } from '@/components/SectionHeader';
 import { cn } from '@/lib/utils';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 // ─── Types (mirror src-tauri/src/analytics.rs) ────────────────────────────────
 
@@ -127,7 +128,6 @@ export function AnalyticsCard() {
   const attempt = useRef(0);
 
   const load = useCallback(async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
       return;

@@ -1,3 +1,4 @@
+import { invoke, isTauri } from '@tauri-apps/api/core';
 // Local-first data sync helpers.
 //
 // The UI reads posts from the local cache (`list_posts`). Cloud sync is explicit
@@ -22,7 +23,6 @@ function broadcastPostsRefreshed(): void {
 /// Resolves to whether a sync ran, so a caller that reports success does not
 /// claim one for the no-op.
 export async function pullFromCloud(): Promise<boolean> {
-  const { invoke, isTauri } = await import('@tauri-apps/api/core');
   if (!isTauri()) return false;
   await invoke<number>('sync_posts_from_cloud');
   broadcastPostsRefreshed();
@@ -33,7 +33,6 @@ export async function pullFromCloud(): Promise<boolean> {
 /// to re-read (local sync status may change). No-ops outside the Tauri runtime,
 /// and resolves to whether a sync ran, as `pullFromCloud` does.
 export async function pushToCloud(): Promise<boolean> {
-  const { invoke, isTauri } = await import('@tauri-apps/api/core');
   if (!isTauri()) return false;
   await invoke<number>('sync_posts');
   broadcastPostsRefreshed();

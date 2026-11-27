@@ -1,3 +1,5 @@
+import { invoke, isTauri } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 // Self-update helpers, backed by GitHub Releases.
 //
 // The Rust side (`src-tauri/src/update.rs`) does the network work and the
@@ -38,7 +40,6 @@ export function getCachedStatus(): UpdateStatus | null {
 /// Repeat calls replay the cached result; pass `force` to re-query (the manual
 /// "Check for updates" button). Returns `null` outside the Tauri runtime.
 export async function checkForUpdate(force = false): Promise<UpdateStatus | null> {
-  const { invoke, isTauri } = await import('@tauri-apps/api/core');
   if (!isTauri()) return null;
 
   if (!force && lastStatus) return lastStatus;
@@ -63,10 +64,8 @@ export async function checkForUpdate(force = false): Promise<UpdateStatus | null
 /// the download finishes and closes the app, so this generally does not return
 /// on that platform — treat reaching the end as "ready to restart" elsewhere.
 export async function installUpdate(onProgress?: (progress: DownloadProgress) => void): Promise<void> {
-  const { invoke, isTauri } = await import('@tauri-apps/api/core');
   if (!isTauri()) return;
 
-  const { listen } = await import('@tauri-apps/api/event');
   const unlisten = onProgress
     ? await listen<DownloadProgress>('update://download-progress', (e) => onProgress(e.payload))
     : undefined;
@@ -80,7 +79,6 @@ export async function installUpdate(onProgress?: (progress: DownloadProgress) =>
 
 /// Relaunch into the newly installed version.
 export async function restartApp(): Promise<void> {
-  const { invoke, isTauri } = await import('@tauri-apps/api/core');
   if (!isTauri()) return;
   await invoke('restart_app');
 }
