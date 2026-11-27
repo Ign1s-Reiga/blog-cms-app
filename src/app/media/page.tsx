@@ -100,7 +100,7 @@ export default function MediaPage() {
   /// An upload's failure, kept apart from `error`, which belongs to reloads:
   /// a reload clears it when it lands, and one that started before the upload
   /// would otherwise clear a failure it knows nothing about. Goes when the
-  /// next upload starts.
+  /// next upload starts, or when the author dismisses it.
   const [uploadError, setUploadError] = useState<string | null>(null);
   /// The item whose posts are being inspected, and the one whose deletion is
   /// waiting on an answer. Separate because they are different questions: one
@@ -381,7 +381,25 @@ export default function MediaPage() {
             role='alert'
             className='space-y-1 rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
           >
-            {uploadError && <p>{uploadError}</p>}
+            {uploadError && (
+              <div className='flex items-start gap-2'>
+                <p className='flex-1 min-w-0 break-words'>{uploadError}</p>
+                {/* Its button goes with it, so focus moves to Upload — the
+                    way to try again — rather than falling to <body>. */}
+                <Button
+                  variant='ghost'
+                  size='icon-xs'
+                  onClick={() => {
+                    setUploadError(null);
+                    uploadButton.current?.focus();
+                  }}
+                  aria-label={`Dismiss: ${uploadError}`}
+                  className='shrink-0 text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive active:scale-95'
+                >
+                  <X size={12} strokeWidth={2} />
+                </Button>
+              </div>
+            )}
             {error && <p>{error}</p>}
           </div>
         )}

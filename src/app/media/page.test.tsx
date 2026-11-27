@@ -310,6 +310,21 @@ describe('deleting media', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Could not upload: permission denied');
   });
 
+  it("dismisses an upload's failure and puts focus on Upload", async () => {
+    const { failUpload } = backend();
+    render(<MediaPage />);
+    await screen.findByRole('button', { name: 'Delete a.webp' });
+
+    failUpload('permission denied');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    await screen.findByRole('alert');
+
+    screen.getByRole('button', { name: 'Dismiss: Could not upload: permission denied' }).focus();
+    await userEvent.keyboard('{Enter}');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Upload' })).toHaveFocus();
+  });
+
   it('moves focus to the next notice, then to Upload, as notices are dismissed', async () => {
     const { deletes } = backend();
     render(<MediaPage />);
