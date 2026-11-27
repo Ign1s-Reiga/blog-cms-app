@@ -120,6 +120,24 @@ export default function MediaPage() {
   /// be told apart; each goes once its object is deleted after all, once a
   /// reload no longer lists it, or when the author dismisses it.
   const [deleteErrors, setDeleteErrors] = useState<ReadonlyMap<string, string>>(new Map());
+  /// Where focus goes after a delete-error line is dismissed. Its button goes
+  /// with the line, and with the last line the whole notice — so focus moves
+  /// to the next line's button, or to Upload, rather than falling to <body>.
+  const dismissButtons = useRef(new Map<string, HTMLButtonElement>());
+  const uploadButton = useRef<HTMLButtonElement>(null);
+  const refocusAfterDismiss = useRef<string | 'upload' | null>(null);
+  useEffect(() => {
+    const target = refocusAfterDismiss.current;
+    if (target === null) return;
+    refocusAfterDismiss.current = null;
+    (target === 'upload' ? uploadButton.current : dismissButtons.current.get(target))?.focus();
+  }, [deleteErrors]);
+  const dismissDeleteError = (key: string) => {
+    const keys = [...deleteErrors.keys()];
+    const at = keys.indexOf(key);
+    refocusAfterDismiss.current = keys[at + 1] ?? keys[at - 1] ?? 'upload';
+    forgetDeleteError(key);
+  };
   const forgetDeleteError = (key: string) =>
     setDeleteErrors((prev) => {
       if (!prev.has(key)) return prev;
@@ -127,10 +145,12 @@ export default function MediaPage() {
       next.delete(key);
       return next;
     });
-  /// Which reload is the newest. Reloads overlap — the first load and an
-  /// upload's — and finish in any order; only the newest may set the grid, or
-  /// a slow older listing would hide what a newer one found.
-  const loadGeneration = useRef(0);
+  /// Reloads, numbered as they start, and the newest whose listing is on
+  /// screen. Reloads overlap — the first load and an upload's — and finish in
+  /// any order. A listing goes on screen only if nothing newer already has:
+  /// a slow older one must not hide what a newer one found, but if the newer
+  /// one failed, the older one's good listing is still the best there is.
+  const loads = useRef({ started: 0, applied: 0 });
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -142,7 +162,7 @@ export default function MediaPage() {
   // Load media from R2 (cached locally by the backend). No-ops in a plain
   // browser (`pnpm dev`), where the Tauri API isn't available.
   const loadMedia = useCallback(async () => {
-    const generation = ++loadGeneration.current;
+    const generation = ++loads.current.started;
     const since = removals.current.count;
     const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
@@ -179,7 +199,8 @@ export default function MediaPage() {
           usedBy: withUsage(usage.get(r.key), blind),
         })),
       );
-      if (generation !== loadGeneration.current) return;
+      if (generation < loads.current.applied) return;
+      loads.current.applied = generation;
       setUncheckedPosts(report.unchecked_posts);
       // Leave out what was deleted while this was in flight: the list came
       // from R2 before the delete did, and would put the object back.
@@ -192,11 +213,14 @@ export default function MediaPage() {
         const kept = [...prev].filter(([key]) => listed.has(key));
         return kept.length === prev.size ? prev : new Map(kept);
       });
-      setError(null);
+      // An older listing does not answer a newer reload that failed.
+      if (generation === loads.current.started) setError(null);
     } catch (e) {
-      if (generation === loadGeneration.current) setError(String(e));
+      if (generation === loads.current.started) setError(String(e));
     } finally {
-      setLoading(false);
+      // Still loading while a newer reload is out and nothing is on screen
+      // from this one: ending it here would show "No media yet" meanwhile.
+      if (generation === loads.current.started || generation === loads.current.applied) setLoading(false);
     }
   }, []);
 
@@ -294,6 +318,7 @@ export default function MediaPage() {
             </span>
           </div>
           <Button
+            ref={uploadButton}
             size='sm'
             onClick={handleUpload}
             disabled={busy}
@@ -341,14 +366,19 @@ export default function MediaPage() {
               {[...deleteErrors].map(([key, message]) => (
                 <li key={key} className='flex items-start gap-2'>
                   <span className='flex-1 min-w-0 break-words'>{message}</span>
-                  <button
-                    type='button'
-                    onClick={() => forgetDeleteError(key)}
+                  <Button
+                    ref={(el) => {
+                      if (el) dismissButtons.current.set(key, el);
+                      else dismissButtons.current.delete(key);
+                    }}
+                    variant='ghost'
+                    size='icon-xs'
+                    onClick={() => dismissDeleteError(key)}
                     aria-label={`Dismiss: ${message}`}
-                    className='shrink-0 rounded-[4px] p-0.5 transition-colors hover:bg-destructive/10'
+                    className='shrink-0 text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive active:scale-95'
                   >
                     <X size={12} strokeWidth={2} />
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
@@ -403,18 +433,23 @@ export default function MediaPage() {
                   </div>
                   {/* Busy while its own delete runs: an unused object deletes
                       straight from here, with no dialog to show it, and a slow
-                      R2 call would otherwise look like a dead click. */}
+                      R2 call would otherwise look like a dead click.
+                      `aria-disabled`, not `disabled`: a button that becomes
+                      disabled drops the keyboard focus it holds to <body>. A
+                      repeat press is refused here and in `handleDelete`. */}
                   <button
                     type='button'
                     aria-label={`Delete ${item.name}`}
-                    onClick={() => requestDelete(item)}
-                    disabled={deleting.has(item.key)}
+                    onClick={() => {
+                      if (!deleting.has(item.key)) requestDelete(item);
+                    }}
+                    aria-disabled={deleting.has(item.key) || undefined}
                     aria-busy={deleting.has(item.key) || undefined}
                     className={cn(
                       'shrink-0 p-1 rounded-[4px] text-muted-foreground transition-colors',
                       deleting.has(item.key)
                         ? 'opacity-100 cursor-progress'
-                        : 'hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100',
+                        : 'hover:text-destructive hover:bg-destructive/10 active:scale-95 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100',
                     )}
                   >
                     {deleting.has(item.key) ? (
