@@ -252,11 +252,13 @@ export default function MediaPage() {
     }
   };
   const upload = async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
-    if (!isTauri()) return;
-    setBusy(true);
     setUploadError(null);
+    // Set-up inside the `try`, so that a failed import is reported as the
+    // upload's failure rather than escaping the click unseen.
     try {
+      const { invoke, isTauri } = await import('@tauri-apps/api/core');
+      if (!isTauri()) return;
+      setBusy(true);
       await invoke('upload_media');
       await loadMedia();
     } catch (e) {
@@ -284,12 +286,12 @@ export default function MediaPage() {
     };
     // Settling one delete closes the confirmation only if it is this object's.
     const closeOwnConfirmation = () => setConfirming((c) => (c?.key === item.key ? null : c));
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
-    if (!isTauri()) {
-      release();
-      return;
-    }
+    // Set-up inside the `try` too: `finally` must release the object however
+    // this ends, or a failed import would leave its tile busy for good, with
+    // every later press refused.
     try {
+      const { invoke, isTauri } = await import('@tauri-apps/api/core');
+      if (!isTauri()) return;
       await invoke('delete_media', { key: item.key, force });
       const r = removals.current;
       r.at.set(item.key, ++r.count);

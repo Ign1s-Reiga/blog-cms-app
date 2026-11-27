@@ -295,6 +295,34 @@ describe('deleting media', () => {
     expect(screen.queryByText('Loading media…')).not.toBeInTheDocument();
   });
 
+  it('reports a delete that fails before it reaches R2, and lets it be retried', async () => {
+    const { deletes } = backend();
+    render(<MediaPage />);
+    await screen.findByRole('button', { name: 'Delete a.webp' });
+
+    isTauri.mockImplementationOnce(() => {
+      throw new Error('chunk failed to load');
+    });
+    await userEvent.click(tile('a.webp')!);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not delete a.webp: Error: chunk failed to load');
+    expect(tile('a.webp')).not.toHaveAttribute('aria-busy');
+
+    await userEvent.click(tile('a.webp')!);
+    await waitFor(() => expect(deletes).toHaveLength(1));
+  });
+
+  it('reports an upload that fails before it starts', async () => {
+    backend();
+    render(<MediaPage />);
+    await screen.findByRole('button', { name: 'Delete a.webp' });
+
+    isTauri.mockImplementationOnce(() => {
+      throw new Error('chunk failed to load');
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not upload: Error: chunk failed to load');
+  });
+
   it("keeps an upload's failure when an earlier load lands after it", async () => {
     const { lists, failUpload } = backend({ holdFirstList: true });
     render(<MediaPage />);
