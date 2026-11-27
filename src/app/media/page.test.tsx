@@ -102,4 +102,25 @@ describe('deleting media', () => {
     await waitFor(() => expect(tile('a.webp')).not.toBeInTheDocument());
     expect(screen.getByRole('alertdialog')).toBeInTheDocument();
   });
+
+  it('does not bring back an object deleted while a reload was out', async () => {
+    const { deletes, lists, holdLists } = backend();
+    render(<MediaPage />);
+
+    await userEvent.click((await screen.findByRole('button', { name: 'Delete a.webp' }))!);
+    await waitFor(() => expect(deletes).toHaveLength(1));
+
+    // An upload reloads the library; its listing is taken with a.webp still in R2.
+    holdLists();
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    await waitFor(() => expect(lists).toHaveLength(1));
+
+    deletes[0].settle();
+    await waitFor(() => expect(tile('a.webp')).not.toBeInTheDocument());
+    lists[0]([object('a.webp'), object('b.webp')]);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Upload' })).toBeEnabled());
+    expect(tile('a.webp')).not.toBeInTheDocument();
+    expect(tile('b.webp')).toBeInTheDocument();
+  });
 });

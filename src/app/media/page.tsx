@@ -111,6 +111,10 @@ export default function MediaPage() {
   /// The same set, readable at once: state only changes on the next render,
   /// and a double click lands its second press before that.
   const deletingKeys = useRef(new Set<string>());
+  /// When each object's delete went through, as a count of deletes. A media
+  /// reload that started before a delete finished carries a list fetched with
+  /// the object still in it; this is how it knows to leave that one out.
+  const removals = useRef({ count: 0, at: new Map<string, number>() });
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -122,6 +126,7 @@ export default function MediaPage() {
   // Load media from R2 (cached locally by the backend). No-ops in a plain
   // browser (`pnpm dev`), where the Tauri API isn't available.
   const loadMedia = useCallback(async () => {
+    const since = removals.current.count;
     const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
@@ -158,7 +163,10 @@ export default function MediaPage() {
           usedBy: withUsage(usage.get(r.key), blind),
         })),
       );
-      setItems(resolved);
+      // Leave out what was deleted while this was in flight: the list came
+      // from R2 before the delete did, and would put the object back.
+      const removedAt = removals.current.at;
+      setItems(resolved.filter((item) => (removedAt.get(item.key) ?? 0) <= since));
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -210,6 +218,8 @@ export default function MediaPage() {
     }
     try {
       await invoke('delete_media', { key: item.key, force });
+      const r = removals.current;
+      r.at.set(item.key, ++r.count);
       setItems((prev) => prev.filter((i) => i.key !== item.key));
       closeOwnConfirmation();
     } catch (e) {
