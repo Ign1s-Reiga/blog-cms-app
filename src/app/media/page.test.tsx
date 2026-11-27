@@ -7,8 +7,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-const { invoke, join } = vi.hoisted(() => ({
+const { invoke, isTauri, join } = vi.hoisted(() => ({
   invoke: vi.fn(),
+  /// A mock so that a test can make one reload fail before it reaches R2.
+  isTauri: vi.fn(() => true),
   /// Counted: the last thing a reload awaits per object, so a test can tell
   /// when a held reload has run all the way to applying its listing.
   join: vi.fn(async (...parts: string[]) => parts.join('/')),
@@ -16,7 +18,7 @@ const { invoke, join } = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke,
-  isTauri: () => true,
+  isTauri,
   convertFileSrc: (p: string) => `asset://localhost/${p}`,
 }));
 vi.mock('@tauri-apps/api/path', () => ({
@@ -277,6 +279,22 @@ describe('deleting media', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('network unreachable');
   });
 
+  it('stops loading when a reload fails before it reaches R2', async () => {
+    const { failLists } = backend();
+    // The first load fails while setting up, before it asks for anything.
+    isTauri.mockImplementationOnce(() => {
+      throw new Error('chunk failed to load');
+    });
+    render(<MediaPage />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('chunk failed to load');
+
+    // So does the next. Nothing is left out that could bring the library.
+    failLists();
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    expect(await screen.findByText(/No media yet/)).toBeInTheDocument();
+    expect(screen.queryByText('Loading media…')).not.toBeInTheDocument();
+  });
+
   it("keeps an upload's failure when an earlier load lands after it", async () => {
     const { lists, failUpload } = backend({ holdFirstList: true });
     render(<MediaPage />);
@@ -290,6 +308,21 @@ describe('deleting media', () => {
     lists[0]([object('a.webp'), object('b.webp')]);
     expect(await screen.findByRole('button', { name: 'Delete a.webp' })).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('Could not upload: permission denied');
+  });
+
+  it("dismisses an upload's failure and puts focus on Upload", async () => {
+    const { failUpload } = backend();
+    render(<MediaPage />);
+    await screen.findByRole('button', { name: 'Delete a.webp' });
+
+    failUpload('permission denied');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    await screen.findByRole('alert');
+
+    screen.getByRole('button', { name: 'Dismiss: Could not upload: permission denied' }).focus();
+    await userEvent.keyboard('{Enter}');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Upload' })).toHaveFocus();
   });
 
   it('moves focus to the next notice, then to Upload, as notices are dismissed', async () => {
