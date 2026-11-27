@@ -13,6 +13,13 @@ import { useRef } from 'react';
 /// was pressed. If that element has gone by the time the dialog closes — a
 /// deleted row takes its button with it — there is nothing to return to, and
 /// focus is left where it is.
+///
+/// Radix fires `onCloseAutoFocus` only once the exit animation is over, and
+/// the work a dialog started may have placed focus itself by then: picking
+/// from the media library inserts the image and focuses the editor, often
+/// before the picker has finished fading. Focus goes back to the opener only
+/// when it has nowhere better to be — on `<body>`, or inside the dialog that
+/// is going away.
 export function useReturnFocus() {
   const opener = useRef<HTMLElement | null>(null);
 
@@ -24,7 +31,10 @@ export function useReturnFocus() {
       e.preventDefault();
       const el = opener.current;
       opener.current = null;
-      if (el?.isConnected) el.focus();
+      const active = document.activeElement;
+      const dialog = e.currentTarget instanceof Node ? e.currentTarget : null;
+      const placed = active !== null && active !== document.body && !dialog?.contains(active);
+      if (!placed && el?.isConnected) el.focus();
     },
   };
 }
