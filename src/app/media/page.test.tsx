@@ -311,4 +311,28 @@ describe('deleting media', () => {
     await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Upload' })).toHaveFocus());
   });
+
+  it('moves focus to Upload while an upload is running', async () => {
+    const { deletes, lists, holdLists } = backend();
+    render(<MediaPage />);
+
+    await userEvent.click((await screen.findByRole('button', { name: 'Delete a.webp' }))!);
+    await waitFor(() => expect(deletes).toHaveLength(1));
+    deletes[0].settle('R2 timed out');
+    const dismiss = await screen.findByRole('button', { name: /^Dismiss: Could not delete a\.webp/ });
+
+    // The upload stays busy while its reload is held.
+    holdLists();
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    await waitFor(() => expect(lists).toHaveLength(1));
+    const upload = screen.getByRole('button', { name: 'Uploading…' });
+    expect(upload).toHaveAttribute('aria-disabled', 'true');
+    // A press while it runs starts nothing more.
+    await userEvent.click(upload);
+    expect(invoke.mock.calls.filter(([command]) => command === 'upload_media')).toHaveLength(1);
+
+    dismiss.focus();
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(upload).toHaveFocus());
+  });
 });

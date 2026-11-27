@@ -240,7 +240,19 @@ export default function MediaPage() {
     void loadMedia();
   }, [loadMedia]);
 
+  /// The upload in progress, readable at once: `busy` only changes on the next
+  /// render, and the button is no longer `disabled` to refuse a second press.
+  const uploading = useRef(false);
   const handleUpload = async () => {
+    if (uploading.current) return;
+    uploading.current = true;
+    try {
+      await upload();
+    } finally {
+      uploading.current = false;
+    }
+  };
+  const upload = async () => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setBusy(true);
@@ -330,12 +342,16 @@ export default function MediaPage() {
               {items.length} {items.length === 1 ? 'file' : 'files'}
             </span>
           </div>
+          {/* `aria-disabled`, not `disabled`, as on the delete tiles: a button
+              that becomes disabled drops the focus it holds to <body>, and
+              cannot take it back when a dismissed notice sends it here. */}
           <Button
             ref={uploadButton}
             size='sm'
             onClick={handleUpload}
-            disabled={busy}
-            className='h-[30px] px-3 gap-[6px] rounded-[6px] text-ui font-semibold'
+            aria-disabled={busy || undefined}
+            aria-busy={busy || undefined}
+            className='h-[30px] px-3 gap-[6px] rounded-[6px] text-ui font-semibold aria-disabled:opacity-50 aria-disabled:cursor-progress aria-disabled:hover:bg-primary'
           >
             <Upload size={13} strokeWidth={2} />
             {busy ? 'Uploading…' : 'Upload'}
