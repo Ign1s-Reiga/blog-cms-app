@@ -3,14 +3,23 @@
 /// failure is not news, and it must stay quiet even when it arrives after the
 /// author has signed in and the shell has been mounted again.
 import { describe, expect, it, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
-const { pull, toastError } = vi.hoisted(() => ({ pull: vi.fn(), toastError: vi.fn() }));
+const { pull, toast } = vi.hoisted(() => ({
+  pull: vi.fn(),
+  toast: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn() }),
+}));
 
-vi.mock('@/lib/sync', () => ({ pullFromCloud: pull, pushToCloud: vi.fn() }));
-vi.mock('sonner', () => ({ toast: { error: toastError, success: vi.fn() } }));
+vi.mock('@/lib/sync', async (original) => ({
+  ...(await original<typeof import('@/lib/sync')>()),
+  pullFromCloud: pull,
+  pushToCloud: vi.fn(),
+}));
+vi.mock('sonner', () => ({ toast }));
 
 import { SyncActions } from './SyncActions';
+import { SYNC_UNAVAILABLE } from '@/lib/sync';
 
 describe('the launch-time pull', () => {
   it('stays quiet about a failure that started behind the login, even once that shell is gone', async () => {
@@ -29,6 +38,18 @@ describe('the launch-time pull', () => {
     fail('no credentials');
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(toastError).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  /// Outside the desktop app there is no backend and the helper does nothing.
+  /// A click says that, rather than announcing a pull that never happened.
+  it('says sync is unavailable instead of claiming a pull it did not make', async () => {
+    pull.mockResolvedValue(false);
+    render(<SyncActions />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Pull from cloud' }));
+
+    expect(toast).toHaveBeenCalledWith(SYNC_UNAVAILABLE);
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });

@@ -20,7 +20,7 @@ import { SectionHeader } from '@/components/SectionHeader';
 import { StatusDot } from '@/components/StatusDot';
 import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { Card } from '@/components/ui/card';
-import { onPostsRefreshed, pullFromCloud, pushToCloud } from '@/lib/sync';
+import { SYNC_UNAVAILABLE, onPostsRefreshed, pullFromCloud, pushToCloud } from '@/lib/sync';
 import { cn } from '@/lib/utils';
 
 // ─── Data mapping ─────────────────────────────────────────────────────────────
@@ -132,10 +132,12 @@ export default function DashboardPage() {
   const runSync = useCallback(async (which: 'pull' | 'push') => {
     setSyncing((s) => ({ ...s, [which]: true }));
     try {
-      await (which === 'pull' ? pullFromCloud() : pushToCloud());
+      const ran = await (which === 'pull' ? pullFromCloud() : pushToCloud());
       // Said out loud because a sync that changed nothing on screen is
-      // otherwise indistinguishable from a click that did nothing.
-      toast.success(which === 'pull' ? 'Pulled posts from the cloud' : 'Pushed local posts to the cloud');
+      // otherwise indistinguishable from a click that did nothing — and when
+      // there was no sync at all, that is said instead of claiming one.
+      if (!ran) toast(SYNC_UNAVAILABLE);
+      else toast.success(which === 'pull' ? 'Pulled posts from the cloud' : 'Pushed local posts to the cloud');
     } catch (err) {
       console.error(`${which} failed:`, err);
       toast.error(which === 'pull' ? 'Could not pull posts from the cloud' : 'Could not push posts to the cloud', {

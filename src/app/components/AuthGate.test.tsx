@@ -13,7 +13,11 @@ const { invoke, pull, toastError } = vi.hoisted(() => ({
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke, isTauri: () => true }));
-vi.mock('@/lib/sync', () => ({ pullFromCloud: pull, pushToCloud: vi.fn() }));
+vi.mock('@/lib/sync', async (original) => ({
+  ...(await original<typeof import('@/lib/sync')>()),
+  pullFromCloud: pull,
+  pushToCloud: vi.fn(),
+}));
 vi.mock('sonner', () => ({ toast: { error: toastError, success: vi.fn() } }));
 
 import { AuthGate } from './AuthGate';
