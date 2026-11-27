@@ -105,9 +105,12 @@ export default function MediaPage() {
   /// A forced delete in flight. The confirmation stays up until it settles, so
   /// a slow R2 call cannot be dismissed into looking like it never happened.
   const [deleting, setDeleting] = useState(false);
-  /// The same flag, readable at once. `deleting` only disables the button on
-  /// the next render, and a double click lands its second press before that.
-  const deletingNow = useRef(false);
+  /// The objects being deleted right now, readable at once: `deleting` only
+  /// disables the dialog's button on the next render, and a double click lands
+  /// its second press before that. Keyed by object, so a repeat press for the
+  /// same one is dropped while a delete of a different one goes ahead — an
+  /// unused tile deletes straight away, with no dialog to show it is busy.
+  const deletingKeys = useRef(new Set<string>());
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -190,13 +193,17 @@ export default function MediaPage() {
     // Claimed before the first await: set after it, as it was, a second press
     // got through while the Tauri module loaded, sent a second delete for an
     // object the first had already removed, and reported that as a failure.
-    if (deletingNow.current) return;
-    deletingNow.current = true;
+    const inFlight = deletingKeys.current;
+    if (inFlight.has(item.key)) return;
+    inFlight.add(item.key);
     setDeleting(true);
+    const release = () => {
+      inFlight.delete(item.key);
+      setDeleting(inFlight.size > 0);
+    };
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
-      deletingNow.current = false;
-      setDeleting(false);
+      release();
       return;
     }
     try {
@@ -207,8 +214,7 @@ export default function MediaPage() {
       setError(String(e));
       setConfirming(null);
     } finally {
-      deletingNow.current = false;
-      setDeleting(false);
+      release();
     }
   };
 

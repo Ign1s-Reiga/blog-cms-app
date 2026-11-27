@@ -65,7 +65,8 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             runs again as it mounts — now with the new account's credentials.
             That pull is the first thing to talk to R2/D1, so it is where a bad
             token shows up (`LoginScreen` accepts one without checking it), and
-            it reports a failure as a toast beside the app: everything local
+            it reports a failure as a toast beside the app — one that stays until
+            dismissed, since nobody clicked for it: everything local
             still works, and what failed was reaching Cloudflare. A second pull
             here would only race it and report the same error twice. */}
         <LoginScreen onAuthed={() => setPhase('authed')} />

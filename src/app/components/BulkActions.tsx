@@ -76,8 +76,6 @@ function describe(action: BulkAction, count: number, tag: string): string {
   }
 }
 
-/// The bar that appears once posts are selected, and the confirmation in front
-/// of every action it offers.
 /// One line on how a run went, for the panel and for the announcement alike.
 function summarize(outcome: BulkOutcome & { action: BulkAction }): string {
   let line = `${LABEL[outcome.action]}: ${outcome.done} done`;
@@ -86,6 +84,8 @@ function summarize(outcome: BulkOutcome & { action: BulkAction }): string {
   return `${line}.`;
 }
 
+/// The bar that appears once posts are selected, and the confirmation in front
+/// of every action it offers.
 export function BulkActions({
   selected,
   onClear,
@@ -259,9 +259,6 @@ export function BulkActions({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* What happened, per post where it did not work. Nothing is rolled back:
-          the posts that succeeded stay done, and the ones that did not are
-          named rather than folded into a count. */}
       {/* The result, read out once the dialog that started the run has closed —
           without it, a screen reader user hears focus come back and nothing
           about what was done. A live region is only announced reliably when
@@ -277,6 +274,9 @@ export function BulkActions({
           document.body,
         )}
 
+      {/* What happened, per post where it did not work. Nothing is rolled back:
+          the posts that succeeded stay done, and the ones that did not are
+          named rather than folded into a count. */}
       {outcome && (
         <div className='space-y-2'>
           <div className='flex items-start gap-2 rounded-[6px] border border-border bg-muted/50 px-3 py-2'>

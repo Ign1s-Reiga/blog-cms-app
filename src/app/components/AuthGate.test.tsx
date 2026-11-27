@@ -52,7 +52,14 @@ describe('signing in', () => {
 
     // One pull behind the login, which stays quiet, and one after it.
     await waitFor(() => expect(pull).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    // Let anything still pending settle, so a second report arriving a tick
+    // later — the race this guards against — is counted too.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(toastError).toHaveBeenCalledTimes(1);
+    // Nobody clicked for this pull, so its report stays until dismissed rather
+    // than fading and leaving an empty library to explain itself.
+    expect(toastError).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ duration: Infinity }));
     expect(screen.queryByText(/Could not read this account/)).not.toBeInTheDocument();
   });
 });
