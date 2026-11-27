@@ -171,14 +171,13 @@ export default function MediaPage() {
     const generation = ++loads.current.started;
     loads.current.running++;
     const since = removals.current.count;
-    const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
-    if (!isTauri()) {
-      loads.current.running--;
-      setLoading(false);
-      return;
-    }
-    const { appDataDir, join } = await import('@tauri-apps/api/path');
+    // Everything from here is inside the `try`, set-up included: `finally` has
+    // to take this reload off `running` however it ends, or a failed import
+    // would leave the page loading for good.
     try {
+      const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
+      if (!isTauri()) return;
+      const { appDataDir, join } = await import('@tauri-apps/api/path');
       const rows = await invoke<{ key: string; name: string; size: number }[]>('list_media');
       // After `list_media`, which caches every object locally — the survey reads
       // the cache, so asking it first would report a fresh library as unused.
