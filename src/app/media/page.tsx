@@ -350,7 +350,7 @@ export default function MediaPage() {
             onClick={handleUpload}
             aria-disabled={busy || undefined}
             aria-busy={busy || undefined}
-            className='h-[30px] px-3 gap-[6px] rounded-[6px] text-ui font-semibold aria-disabled:opacity-50 aria-disabled:cursor-progress aria-disabled:hover:bg-primary'
+            className='h-[30px] px-3 gap-[6px] rounded-[6px] text-ui font-semibold aria-disabled:opacity-50 aria-disabled:cursor-progress aria-disabled:hover:bg-primary aria-disabled:active:not-aria-[haspopup]:translate-y-0'
           >
             <Upload size={13} strokeWidth={2} />
             {busy ? 'Uploading…' : 'Upload'}
