@@ -1,5 +1,3 @@
-import { invoke, isTauri } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 // Self-update helpers, backed by GitHub Releases.
 //
 // The Rust side (`src-tauri/src/update.rs`) does the network work and the
@@ -9,6 +7,9 @@ import { listen } from '@tauri-apps/api/event';
 //   - `checkForUpdate` fetches (or replays) the latest status.
 //   - `UPDATE_STATUS_CHANGED` broadcasts a new status to listeners.
 // All calls no-op outside the Tauri runtime (e.g. plain `pnpm dev`).
+
+import { invoke, isTauri } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 export const UPDATE_STATUS_CHANGED = 'update:status-changed';
 

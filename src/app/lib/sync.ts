@@ -1,4 +1,3 @@
-import { invoke, isTauri } from '@tauri-apps/api/core';
 // Local-first data sync helpers.
 //
 // The UI reads posts from the local cache (`list_posts`). Cloud sync is explicit
@@ -7,6 +6,8 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 //   - `pushToCloud`   pushes local → D1 (upsert by slug).
 // Both broadcast `POSTS_REFRESHED` afterwards so the list, dashboard, and sidebar
 // re-read local data.
+
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 export const POSTS_REFRESHED = 'posts:refreshed';
 

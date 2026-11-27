@@ -10,9 +10,9 @@ import userEvent from '@testing-library/user-event';
 
 const invoke = vi.fn();
 
-/// The page reaches Tauri through `await import('@tauri-apps/api/core')` in each
-/// handler rather than a top-level import, so the module mock has to answer for
-/// every one of them.
+/// The page imports `invoke` and `isTauri` from `@tauri-apps/api/core` at the
+/// top; `vi.mock` is hoisted above that import, so this stands in for the
+/// module for every handler on the page.
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => invoke(...args),
   isTauri: () => true,
