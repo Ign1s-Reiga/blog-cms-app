@@ -150,7 +150,8 @@ export default function MediaPage() {
   /// any order. A listing goes on screen only if nothing newer already has:
   /// a slow older one must not hide what a newer one found, but if the newer
   /// one failed, the older one's good listing is still the best there is.
-  const loads = useRef({ started: 0, applied: 0 });
+  /// `running` counts the reloads still out, whichever came first.
+  const loads = useRef({ started: 0, applied: 0, running: 0 });
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -163,9 +164,11 @@ export default function MediaPage() {
   // browser (`pnpm dev`), where the Tauri API isn't available.
   const loadMedia = useCallback(async () => {
     const generation = ++loads.current.started;
+    loads.current.running++;
     const since = removals.current.count;
     const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
+      loads.current.running--;
       setLoading(false);
       return;
     }
@@ -218,9 +221,13 @@ export default function MediaPage() {
     } catch (e) {
       if (generation === loads.current.started) setError(String(e));
     } finally {
-      // Still loading while a newer reload is out and nothing is on screen
-      // from this one: ending it here would show "No media yet" meanwhile.
-      if (generation === loads.current.started || generation === loads.current.applied) setLoading(false);
+      // Loading ends once a listing is on screen, or once no reload is left
+      // that could put one there. Until then a reload that failed — older or
+      // newer — leaves the page loading: ending it would show "No media yet"
+      // while another reload may still bring the library.
+      const l = loads.current;
+      l.running--;
+      if (l.applied > 0 || l.running === 0) setLoading(false);
     }
   }, []);
 

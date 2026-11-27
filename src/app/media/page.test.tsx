@@ -259,6 +259,10 @@ describe('deleting media', () => {
     failLists();
     await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('network unreachable');
+    // The first load is still out, and may yet bring the library: until it
+    // settles, the page is loading, not empty.
+    expect(screen.getByText('Loading media…')).toBeInTheDocument();
+    expect(screen.queryByText(/No media yet/)).not.toBeInTheDocument();
 
     lists[0]([object('a.webp'), object('b.webp')]);
     expect(await screen.findByRole('button', { name: 'Delete a.webp' })).toBeInTheDocument();
