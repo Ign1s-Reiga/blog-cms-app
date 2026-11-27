@@ -302,6 +302,7 @@ export default function PostsPage() {
   useEffect(() => onPostsRefreshed(() => void loadPosts()), [loadPosts]);
 
   const handleImportArticle = async () => {
+    if (!isTauri()) return;
     setImportStatus({ kind: 'loading' });
     try {
       const title = await invoke<string>('import_article');

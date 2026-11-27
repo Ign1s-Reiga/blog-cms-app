@@ -56,7 +56,7 @@ export default function TagsPage() {
   useEffect(() => onPostsRefreshed(() => void load()), [load]);
 
   const commit = async () => {
-    if (!editing || busy) return;
+    if (!editing || busy || !isTauri()) return;
     const to = editing.to.trim();
     if (to === '' || to === editing.from) {
       setEditing(null);
