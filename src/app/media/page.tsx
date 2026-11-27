@@ -127,10 +127,12 @@ export default function MediaPage() {
       next.delete(key);
       return next;
     });
-  /// Which reload is the newest. Reloads overlap — the first load and an
-  /// upload's — and finish in any order; only the newest may set the grid, or
-  /// a slow older listing would hide what a newer one found.
-  const loadGeneration = useRef(0);
+  /// Reloads, numbered as they start, and the newest whose listing is on
+  /// screen. Reloads overlap — the first load and an upload's — and finish in
+  /// any order. A listing goes on screen only if nothing newer already has:
+  /// a slow older one must not hide what a newer one found, but if the newer
+  /// one failed, the older one's good listing is still the best there is.
+  const loads = useRef({ started: 0, applied: 0 });
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -142,7 +144,7 @@ export default function MediaPage() {
   // Load media from R2 (cached locally by the backend). No-ops in a plain
   // browser (`pnpm dev`), where the Tauri API isn't available.
   const loadMedia = useCallback(async () => {
-    const generation = ++loadGeneration.current;
+    const generation = ++loads.current.started;
     const since = removals.current.count;
     const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
@@ -179,7 +181,8 @@ export default function MediaPage() {
           usedBy: withUsage(usage.get(r.key), blind),
         })),
       );
-      if (generation !== loadGeneration.current) return;
+      if (generation < loads.current.applied) return;
+      loads.current.applied = generation;
       setUncheckedPosts(report.unchecked_posts);
       // Leave out what was deleted while this was in flight: the list came
       // from R2 before the delete did, and would put the object back.
@@ -192,11 +195,14 @@ export default function MediaPage() {
         const kept = [...prev].filter(([key]) => listed.has(key));
         return kept.length === prev.size ? prev : new Map(kept);
       });
-      setError(null);
+      // An older listing does not answer a newer reload that failed.
+      if (generation === loads.current.started) setError(null);
     } catch (e) {
-      if (generation === loadGeneration.current) setError(String(e));
+      if (generation === loads.current.started) setError(String(e));
     } finally {
-      setLoading(false);
+      // Still loading while a newer reload is out and nothing is on screen
+      // from this one: ending it here would show "No media yet" meanwhile.
+      if (generation === loads.current.started || generation === loads.current.applied) setLoading(false);
     }
   }, []);
 

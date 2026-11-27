@@ -7,7 +7,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const { invoke, join } = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  /// Counted: the last thing a reload awaits per object, so a test can tell
+  /// when a held reload has run all the way to applying its listing.
+  join: vi.fn(async (...parts: string[]) => parts.join('/')),
+}));
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke,
@@ -16,7 +21,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 vi.mock('@tauri-apps/api/path', () => ({
   appDataDir: async () => '/data',
-  join: async (...parts: string[]) => parts.join('/'),
+  join,
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
@@ -46,10 +51,12 @@ function backend({
   const deletes: { key: string; settle: (error?: string) => void }[] = [];
   const lists: ((rows: unknown[]) => void)[] = [];
   let holdLists = holdFirstList;
+  let failLists = false;
   let current = listing;
   invoke.mockImplementation(async (command: string, args?: { key: string }) => {
     switch (command) {
       case 'list_media':
+        if (failLists) throw 'network unreachable';
         return holdLists ? new Promise((resolve) => lists.push(resolve)) : current;
       case 'media_usage':
         return { objects: usage, unchecked_posts: [] };
@@ -69,6 +76,9 @@ function backend({
     },
     setListing: (rows: ReturnType<typeof object>[]) => {
       current = rows;
+    },
+    failLists: (on = true) => {
+      failLists = on;
     },
   };
 }
@@ -213,5 +223,35 @@ describe('deleting media', () => {
     lists[0]([object('a.webp'), object('b.webp')]);
     await new Promise((r) => setTimeout(r, 50));
     expect(tile('c.webp')).toBeInTheDocument();
+  });
+
+  it('keeps the library on screen while a newer reload is still out', async () => {
+    const { lists } = backend({ holdFirstList: true });
+    render(<MediaPage />);
+    await waitFor(() => expect(lists).toHaveLength(1));
+
+    // An upload's reload starts and is held too; then the first load lands.
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    await waitFor(() => expect(lists).toHaveLength(2));
+    lists[0]([object('a.webp'), object('b.webp')]);
+
+    expect(await screen.findByRole('button', { name: 'Delete a.webp' })).toBeInTheDocument();
+    expect(screen.queryByText(/No media yet/)).not.toBeInTheDocument();
+  });
+
+  it("shows an older reload's listing when the newer one failed", async () => {
+    const { lists, holdLists, failLists } = backend({ holdFirstList: true });
+    render(<MediaPage />);
+    await waitFor(() => expect(lists).toHaveLength(1));
+
+    holdLists(false);
+    failLists();
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('network unreachable');
+
+    lists[0]([object('a.webp'), object('b.webp')]);
+    expect(await screen.findByRole('button', { name: 'Delete a.webp' })).toBeInTheDocument();
+    // The failure it answers is the newer reload's, and it still stands.
+    expect(screen.getByRole('alert')).toHaveTextContent('network unreachable');
   });
 });
