@@ -120,6 +120,24 @@ export default function MediaPage() {
   /// be told apart; each goes once its object is deleted after all, once a
   /// reload no longer lists it, or when the author dismisses it.
   const [deleteErrors, setDeleteErrors] = useState<ReadonlyMap<string, string>>(new Map());
+  /// Where focus goes after a delete-error line is dismissed. Its button goes
+  /// with the line, and with the last line the whole notice — so focus moves
+  /// to the next line's button, or to Upload, rather than falling to <body>.
+  const dismissButtons = useRef(new Map<string, HTMLButtonElement>());
+  const uploadButton = useRef<HTMLButtonElement>(null);
+  const refocusAfterDismiss = useRef<string | 'upload' | null>(null);
+  useEffect(() => {
+    const target = refocusAfterDismiss.current;
+    if (target === null) return;
+    refocusAfterDismiss.current = null;
+    (target === 'upload' ? uploadButton.current : dismissButtons.current.get(target))?.focus();
+  }, [deleteErrors]);
+  const dismissDeleteError = (key: string) => {
+    const keys = [...deleteErrors.keys()];
+    const at = keys.indexOf(key);
+    refocusAfterDismiss.current = keys[at + 1] ?? keys[at - 1] ?? 'upload';
+    forgetDeleteError(key);
+  };
   const forgetDeleteError = (key: string) =>
     setDeleteErrors((prev) => {
       if (!prev.has(key)) return prev;
@@ -300,6 +318,7 @@ export default function MediaPage() {
             </span>
           </div>
           <Button
+            ref={uploadButton}
             size='sm'
             onClick={handleUpload}
             disabled={busy}
@@ -347,14 +366,19 @@ export default function MediaPage() {
               {[...deleteErrors].map(([key, message]) => (
                 <li key={key} className='flex items-start gap-2'>
                   <span className='flex-1 min-w-0 break-words'>{message}</span>
-                  <button
-                    type='button'
-                    onClick={() => forgetDeleteError(key)}
+                  <Button
+                    ref={(el) => {
+                      if (el) dismissButtons.current.set(key, el);
+                      else dismissButtons.current.delete(key);
+                    }}
+                    variant='ghost'
+                    size='icon-xs'
+                    onClick={() => dismissDeleteError(key)}
                     aria-label={`Dismiss: ${message}`}
-                    className='shrink-0 rounded-[4px] p-0.5 transition-colors hover:bg-destructive/10'
+                    className='shrink-0 text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive active:scale-95'
                   >
                     <X size={12} strokeWidth={2} />
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>

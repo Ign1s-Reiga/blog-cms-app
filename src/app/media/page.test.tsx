@@ -261,4 +261,24 @@ describe('deleting media', () => {
     // The failure it answers is the newer reload's, and it still stands.
     expect(screen.getByRole('alert')).toHaveTextContent('network unreachable');
   });
+
+  it('moves focus to the next notice, then to Upload, as notices are dismissed', async () => {
+    const { deletes } = backend();
+    render(<MediaPage />);
+
+    await userEvent.click((await screen.findByRole('button', { name: 'Delete a.webp' }))!);
+    await userEvent.click(tile('b.webp')!);
+    await waitFor(() => expect(deletes).toHaveLength(2));
+    deletes[0].settle('R2 timed out');
+    deletes[1].settle('R2 refused');
+    const dismissA = await screen.findByRole('button', { name: /^Dismiss: Could not delete a\.webp/ });
+    const dismissB = await screen.findByRole('button', { name: /^Dismiss: Could not delete b\.webp/ });
+
+    dismissA.focus();
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(dismissB).toHaveFocus());
+
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Upload' })).toHaveFocus());
+  });
 });
