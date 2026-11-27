@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { FileWarning, Trash2, Upload } from 'lucide-react';
+import { FileWarning, Loader2, Trash2, Upload, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
@@ -115,9 +115,22 @@ export default function MediaPage() {
   /// reload that started before a delete finished carries a list fetched with
   /// the object still in it; this is how it knows to leave that one out.
   const removals = useRef({ count: 0, at: new Map<string, number>() });
-  /// A delete that failed, kept apart from the page's other errors so it can
-  /// name its object and go away once that object is deleted after all.
-  const [deleteError, setDeleteError] = useState<{ key: string; message: string } | null>(null);
+  /// Deletes that failed, by object, kept apart from the page's other errors.
+  /// One per object, because deletes run side by side and each failure has to
+  /// be told apart; each goes once its object is deleted after all, once a
+  /// reload no longer lists it, or when the author dismisses it.
+  const [deleteErrors, setDeleteErrors] = useState<ReadonlyMap<string, string>>(new Map());
+  const forgetDeleteError = (key: string) =>
+    setDeleteErrors((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Map(prev);
+      next.delete(key);
+      return next;
+    });
+  /// Which reload is the newest. Reloads overlap — the first load and an
+  /// upload's — and finish in any order; only the newest may set the grid, or
+  /// a slow older listing would hide what a newer one found.
+  const loadGeneration = useRef(0);
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -129,6 +142,7 @@ export default function MediaPage() {
   // Load media from R2 (cached locally by the backend). No-ops in a plain
   // browser (`pnpm dev`), where the Tauri API isn't available.
   const loadMedia = useCallback(async () => {
+    const generation = ++loadGeneration.current;
     const since = removals.current.count;
     const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
@@ -150,7 +164,6 @@ export default function MediaPage() {
       // object, so the whole library reads as unknown rather than inviting a
       // delete it cannot justify.
       const blind = report.unchecked_posts.length > 0;
-      setUncheckedPosts(report.unchecked_posts);
       const usage = new Map<string, UsingPost[]>(report.objects.map((u) => [u.key, u.posts]));
       const base = await appDataDir();
       const resolved = await Promise.all(
@@ -166,13 +179,22 @@ export default function MediaPage() {
           usedBy: withUsage(usage.get(r.key), blind),
         })),
       );
+      if (generation !== loadGeneration.current) return;
+      setUncheckedPosts(report.unchecked_posts);
       // Leave out what was deleted while this was in flight: the list came
       // from R2 before the delete did, and would put the object back.
       const removedAt = removals.current.at;
       setItems(resolved.filter((item) => (removedAt.get(item.key) ?? 0) <= since));
+      // A failed delete whose object is no longer listed has nothing left to
+      // retry, and its notice would otherwise stay for the rest of the session.
+      const listed = new Set(rows.map((r) => r.key));
+      setDeleteErrors((prev) => {
+        const kept = [...prev].filter(([key]) => listed.has(key));
+        return kept.length === prev.size ? prev : new Map(kept);
+      });
       setError(null);
     } catch (e) {
-      setError(String(e));
+      if (generation === loadGeneration.current) setError(String(e));
     } finally {
       setLoading(false);
     }
@@ -224,10 +246,10 @@ export default function MediaPage() {
       const r = removals.current;
       r.at.set(item.key, ++r.count);
       setItems((prev) => prev.filter((i) => i.key !== item.key));
-      setDeleteError((d) => (d?.key === item.key ? null : d));
+      forgetDeleteError(item.key);
       closeOwnConfirmation();
     } catch (e) {
-      setDeleteError({ key: item.key, message: `Could not delete ${item.name}: ${String(e)}` });
+      setDeleteErrors((prev) => new Map(prev).set(item.key, `Could not delete ${item.name}: ${String(e)}`));
       closeOwnConfirmation();
     } finally {
       release();
@@ -310,12 +332,26 @@ export default function MediaPage() {
           </div>
         )}
 
-        {deleteError && (
+        {deleteErrors.size > 0 && (
           <div
             role='alert'
             className='rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
           >
-            {deleteError.message}
+            <ul className='space-y-1'>
+              {[...deleteErrors].map(([key, message]) => (
+                <li key={key} className='flex items-start gap-2'>
+                  <span className='flex-1 min-w-0 break-words'>{message}</span>
+                  <button
+                    type='button'
+                    onClick={() => forgetDeleteError(key)}
+                    aria-label={`Dismiss: ${message}`}
+                    className='shrink-0 rounded-[4px] p-0.5 transition-colors hover:bg-destructive/10'
+                  >
+                    <X size={12} strokeWidth={2} />
+                  </button>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
@@ -365,13 +401,27 @@ export default function MediaPage() {
                       )}
                     </p>
                   </div>
+                  {/* Busy while its own delete runs: an unused object deletes
+                      straight from here, with no dialog to show it, and a slow
+                      R2 call would otherwise look like a dead click. */}
                   <button
                     type='button'
                     aria-label={`Delete ${item.name}`}
                     onClick={() => requestDelete(item)}
-                    className='shrink-0 p-1 rounded-[4px] text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100'
+                    disabled={deleting.has(item.key)}
+                    aria-busy={deleting.has(item.key) || undefined}
+                    className={cn(
+                      'shrink-0 p-1 rounded-[4px] text-muted-foreground transition-colors',
+                      deleting.has(item.key)
+                        ? 'opacity-100 cursor-progress'
+                        : 'hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100',
+                    )}
                   >
-                    <Trash2 size={13} strokeWidth={2} />
+                    {deleting.has(item.key) ? (
+                      <Loader2 size={13} strokeWidth={2} className='animate-spin' />
+                    ) : (
+                      <Trash2 size={13} strokeWidth={2} />
+                    )}
                   </button>
                 </div>
               </div>
