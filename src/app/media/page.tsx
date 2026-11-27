@@ -97,6 +97,11 @@ export default function MediaPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /// An upload's failure, kept apart from `error`, which belongs to reloads:
+  /// a reload clears it when it lands, and one that started before the upload
+  /// would otherwise clear a failure it knows nothing about. Goes when the
+  /// next upload starts.
+  const [uploadError, setUploadError] = useState<string | null>(null);
   /// The item whose posts are being inspected, and the one whose deletion is
   /// waiting on an answer. Separate because they are different questions: one
   /// is "what uses this", the other "delete it anyway?".
@@ -150,7 +155,8 @@ export default function MediaPage() {
   /// any order. A listing goes on screen only if nothing newer already has:
   /// a slow older one must not hide what a newer one found, but if the newer
   /// one failed, the older one's good listing is still the best there is.
-  const loads = useRef({ started: 0, applied: 0 });
+  /// `running` counts the reloads still out, whichever came first.
+  const loads = useRef({ started: 0, applied: 0, running: 0 });
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -163,9 +169,11 @@ export default function MediaPage() {
   // browser (`pnpm dev`), where the Tauri API isn't available.
   const loadMedia = useCallback(async () => {
     const generation = ++loads.current.started;
+    loads.current.running++;
     const since = removals.current.count;
     const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
+      loads.current.running--;
       setLoading(false);
       return;
     }
@@ -218,9 +226,13 @@ export default function MediaPage() {
     } catch (e) {
       if (generation === loads.current.started) setError(String(e));
     } finally {
-      // Still loading while a newer reload is out and nothing is on screen
-      // from this one: ending it here would show "No media yet" meanwhile.
-      if (generation === loads.current.started || generation === loads.current.applied) setLoading(false);
+      // Loading ends once a listing is on screen, or once no reload is left
+      // that could put one there. Until then a reload that failed — older or
+      // newer — leaves the page loading: ending it would show "No media yet"
+      // while another reload may still bring the library.
+      const l = loads.current;
+      l.running--;
+      if (l.applied > 0 || l.running === 0) setLoading(false);
     }
   }, []);
 
@@ -228,16 +240,29 @@ export default function MediaPage() {
     void loadMedia();
   }, [loadMedia]);
 
+  /// The upload in progress, readable at once: `busy` only changes on the next
+  /// render, and the button is no longer `disabled` to refuse a second press.
+  const uploading = useRef(false);
   const handleUpload = async () => {
+    if (uploading.current) return;
+    uploading.current = true;
+    try {
+      await upload();
+    } finally {
+      uploading.current = false;
+    }
+  };
+  const upload = async () => {
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setBusy(true);
+    setUploadError(null);
     try {
       await invoke('upload_media');
       await loadMedia();
     } catch (e) {
       const msg = String(e);
-      if (msg !== 'cancelled') setError(msg);
+      if (msg !== 'cancelled') setUploadError(`Could not upload: ${msg}`);
     } finally {
       setBusy(false);
     }
@@ -317,12 +342,16 @@ export default function MediaPage() {
               {items.length} {items.length === 1 ? 'file' : 'files'}
             </span>
           </div>
+          {/* `aria-disabled`, not `disabled`, as on the delete tiles: a button
+              that becomes disabled drops the focus it holds to <body>, and
+              cannot take it back when a dismissed notice sends it here. */}
           <Button
             ref={uploadButton}
             size='sm'
             onClick={handleUpload}
-            disabled={busy}
-            className='h-[30px] px-3 gap-[6px] rounded-[6px] text-ui font-semibold'
+            aria-disabled={busy || undefined}
+            aria-busy={busy || undefined}
+            className='h-[30px] px-3 gap-[6px] rounded-[6px] text-ui font-semibold aria-disabled:opacity-50 aria-disabled:cursor-progress aria-disabled:hover:bg-primary'
           >
             <Upload size={13} strokeWidth={2} />
             {busy ? 'Uploading…' : 'Upload'}
@@ -348,12 +377,13 @@ export default function MediaPage() {
           </div>
         )}
 
-        {error && (
+        {(uploadError || error) && (
           <div
             role='alert'
-            className='rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
+            className='space-y-1 rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
           >
-            {error}
+            {uploadError && <p>{uploadError}</p>}
+            {error && <p>{error}</p>}
           </div>
         )}
 

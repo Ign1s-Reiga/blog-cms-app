@@ -52,6 +52,7 @@ function backend({
   const lists: ((rows: unknown[]) => void)[] = [];
   let holdLists = holdFirstList;
   let failLists = false;
+  let failUpload: string | null = null;
   let current = listing;
   invoke.mockImplementation(async (command: string, args?: { key: string }) => {
     switch (command) {
@@ -60,6 +61,9 @@ function backend({
         return holdLists ? new Promise((resolve) => lists.push(resolve)) : current;
       case 'media_usage':
         return { objects: usage, unchecked_posts: [] };
+      case 'upload_media':
+        if (failUpload) throw failUpload;
+        return undefined;
       case 'delete_media':
         return new Promise<void>((resolve, reject) =>
           deletes.push({ key: args!.key, settle: (error) => (error ? reject(error) : resolve()) }),
@@ -79,6 +83,9 @@ function backend({
     },
     failLists: (on = true) => {
       failLists = on;
+    },
+    failUpload: (error: string | null) => {
+      failUpload = error;
     },
   };
 }
@@ -259,11 +266,30 @@ describe('deleting media', () => {
     failLists();
     await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('network unreachable');
+    // The first load is still out, and may yet bring the library: until it
+    // settles, the page is loading, not empty.
+    expect(screen.getByText('Loading media…')).toBeInTheDocument();
+    expect(screen.queryByText(/No media yet/)).not.toBeInTheDocument();
 
     lists[0]([object('a.webp'), object('b.webp')]);
     expect(await screen.findByRole('button', { name: 'Delete a.webp' })).toBeInTheDocument();
     // The failure it answers is the newer reload's, and it still stands.
     expect(screen.getByRole('alert')).toHaveTextContent('network unreachable');
+  });
+
+  it("keeps an upload's failure when an earlier load lands after it", async () => {
+    const { lists, failUpload } = backend({ holdFirstList: true });
+    render(<MediaPage />);
+    await waitFor(() => expect(lists).toHaveLength(1));
+
+    failUpload('permission denied');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not upload: permission denied');
+
+    // The first load started before the upload and says nothing about it.
+    lists[0]([object('a.webp'), object('b.webp')]);
+    expect(await screen.findByRole('button', { name: 'Delete a.webp' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not upload: permission denied');
   });
 
   it('moves focus to the next notice, then to Upload, as notices are dismissed', async () => {
@@ -284,5 +310,29 @@ describe('deleting media', () => {
 
     await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Upload' })).toHaveFocus());
+  });
+
+  it('moves focus to Upload while an upload is running', async () => {
+    const { deletes, lists, holdLists } = backend();
+    render(<MediaPage />);
+
+    await userEvent.click((await screen.findByRole('button', { name: 'Delete a.webp' }))!);
+    await waitFor(() => expect(deletes).toHaveLength(1));
+    deletes[0].settle('R2 timed out');
+    const dismiss = await screen.findByRole('button', { name: /^Dismiss: Could not delete a\.webp/ });
+
+    // The upload stays busy while its reload is held.
+    holdLists();
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    await waitFor(() => expect(lists).toHaveLength(1));
+    const upload = screen.getByRole('button', { name: 'Uploading…' });
+    expect(upload).toHaveAttribute('aria-disabled', 'true');
+    // A press while it runs starts nothing more.
+    await userEvent.click(upload);
+    expect(invoke.mock.calls.filter(([command]) => command === 'upload_media')).toHaveLength(1);
+
+    dismiss.focus();
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(upload).toHaveFocus());
   });
 });
