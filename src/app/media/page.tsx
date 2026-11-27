@@ -102,14 +102,14 @@ export default function MediaPage() {
   /// is "what uses this", the other "delete it anyway?".
   const [inspecting, setInspecting] = useState<MediaItem | null>(null);
   const [confirming, setConfirming] = useState<MediaItem | null>(null);
-  /// A forced delete in flight. The confirmation stays up until it settles, so
-  /// a slow R2 call cannot be dismissed into looking like it never happened.
-  const [deleting, setDeleting] = useState(false);
-  /// The objects being deleted right now, readable at once: `deleting` only
-  /// disables the dialog's button on the next render, and a double click lands
-  /// its second press before that. Keyed by object, so a repeat press for the
-  /// same one is dropped while a delete of a different one goes ahead — an
-  /// unused tile deletes straight away, with no dialog to show it is busy.
+  /// The objects being deleted right now. Per object, because deletes run side
+  /// by side — an unused tile deletes straight away, with no dialog — and one
+  /// object's delete must neither hold up nor close another's confirmation.
+  /// The confirmation stays up until *its* delete settles, so a slow R2 call
+  /// cannot be dismissed into looking like it never happened.
+  const [deleting, setDeleting] = useState<ReadonlySet<string>>(new Set());
+  /// The same set, readable at once: state only changes on the next render,
+  /// and a double click lands its second press before that.
   const deletingKeys = useRef(new Set<string>());
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
@@ -196,11 +196,13 @@ export default function MediaPage() {
     const inFlight = deletingKeys.current;
     if (inFlight.has(item.key)) return;
     inFlight.add(item.key);
-    setDeleting(true);
+    setDeleting(new Set(inFlight));
     const release = () => {
       inFlight.delete(item.key);
-      setDeleting(inFlight.size > 0);
+      setDeleting(new Set(inFlight));
     };
+    // Settling one delete closes the confirmation only if it is this object's.
+    const closeOwnConfirmation = () => setConfirming((c) => (c?.key === item.key ? null : c));
     const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       release();
@@ -209,10 +211,10 @@ export default function MediaPage() {
     try {
       await invoke('delete_media', { key: item.key, force });
       setItems((prev) => prev.filter((i) => i.key !== item.key));
-      setConfirming(null);
+      closeOwnConfirmation();
     } catch (e) {
       setError(String(e));
-      setConfirming(null);
+      closeOwnConfirmation();
     } finally {
       release();
     }
@@ -430,7 +432,7 @@ export default function MediaPage() {
         <AlertDialog
           open={confirming !== null}
           onOpenChange={(open) => {
-            if (!open && !deleting) setConfirming(null);
+            if (!open && !(confirming && deleting.has(confirming.key))) setConfirming(null);
           }}
         >
           {confirming && (
@@ -474,7 +476,7 @@ export default function MediaPage() {
               <div className='mt-4 flex items-center justify-end gap-2'>
                 <AlertDialogCancel
                   size='sm'
-                  disabled={deleting}
+                  disabled={deleting.has(confirming.key)}
                   className='h-[28px] px-3 rounded-[5px] text-meta font-semibold'
                 >
                   Keep it
@@ -482,7 +484,7 @@ export default function MediaPage() {
                 <AlertDialogAction
                   variant='destructive'
                   size='sm'
-                  disabled={deleting}
+                  disabled={deleting.has(confirming.key)}
                   onClick={(e) => {
                     // Held open until the delete settles: `handleDelete`
                     // closes it either way, and says so if it failed.
@@ -491,7 +493,7 @@ export default function MediaPage() {
                   }}
                   className='h-[28px] px-3 rounded-[5px] text-meta font-semibold'
                 >
-                  {deleting ? 'Deleting…' : 'Delete anyway'}
+                  {deleting.has(confirming.key) ? 'Deleting…' : 'Delete anyway'}
                 </AlertDialogAction>
               </div>
             </AlertDialogContent>
