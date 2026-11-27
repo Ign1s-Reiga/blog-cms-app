@@ -24,6 +24,7 @@ import { BulkActions, type BulkAction, type BulkOutcome } from '@/components/Bul
 import { onPostsRefreshed } from '@/lib/sync';
 import { useReturnFocus } from '@/lib/useReturnFocus';
 import { cn } from '@/lib/utils';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -236,7 +237,6 @@ export default function PostsPage() {
   // Load posts from the local SQLite cache via the Tauri backend. No-ops in a
   // plain browser (`pnpm dev`), where the Tauri API isn't available.
   const loadPosts = useCallback(async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
       return;
@@ -304,7 +304,6 @@ export default function PostsPage() {
   const handleImportArticle = async () => {
     setImportStatus({ kind: 'loading' });
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
       const title = await invoke<string>('import_article');
       setImportStatus({ kind: 'success', title });
       void loadPosts(); // show the newly imported draft
@@ -335,7 +334,6 @@ export default function PostsPage() {
     const mine = ++bodyAttempt.current;
     const timer = setTimeout(async () => {
       try {
-        const { invoke, isTauri } = await import('@tauri-apps/api/core');
         if (!isTauri()) return;
         const found = await invoke<BodyMatchesPayload>('search_post_bodies', { query: q });
         if (mine !== bodyAttempt.current) return;
@@ -366,7 +364,6 @@ export default function PostsPage() {
     // retiring inherits the spinner and has to put it down again.
     let mine: number | null = null;
     try {
-      const { invoke, isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
       await invoke('cache_bodies', { ids });
       // Only if the box still says what it said. Claiming a fresh attempt
@@ -401,7 +398,6 @@ export default function PostsPage() {
   /// that succeeded stays done — and a failure is recorded against the post it
   /// belongs to rather than aborting the rest.
   const runBulk = async (action: BulkAction, tag: string): Promise<BulkOutcome> => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     const ids = actionable;
     const outcome: BulkOutcome = { done: 0, failed: [], skipped: [] };
     if (!isTauri()) return outcome;
@@ -498,7 +494,6 @@ export default function PostsPage() {
 
   const exportPost = async (id: number) => {
     if (exportStatus.kind === 'working') return;
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     // Asked before the working state is claimed, not inside it. There is
     // nothing to export to in a browser, and returning from under
     // `{kind:'working'}` used to leave it there for good — the guard above then
@@ -533,7 +528,6 @@ export default function PostsPage() {
   /// — so re-reading one of them would leave the tab counts disagreeing with the
   /// rows. Unpublishing does the same to the Published and Drafts counts.
   const runPostCommand = async (command: string, args?: Record<string, unknown>) => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setActionError(null);
     try {

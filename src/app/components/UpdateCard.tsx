@@ -5,6 +5,8 @@ import { ArrowUpCircle, CheckCircle2, Download, RefreshCw, RotateCcw, TriangleAl
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { checkForUpdate, getCachedStatus, installUpdate, restartApp, type UpdateStatus } from '@/lib/updater';
+import { isTauri } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 
 type Phase = 'idle' | 'checking' | 'downloading' | 'ready' | 'error';
 
@@ -21,9 +23,7 @@ export function UpdateCard() {
   useEffect(() => {
     let active = true;
     void (async () => {
-      const { isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
-      const { getVersion } = await import('@tauri-apps/api/app');
       const v = await getVersion();
       if (active) setVersion((prev) => prev ?? v);
     })();

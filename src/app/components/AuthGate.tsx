@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { LoginScreen } from '@/components/LoginScreen';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 type Phase = 'checking' | 'authed' | 'unauthed';
 
@@ -12,7 +13,6 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const [phase, setPhase] = useState<Phase>('checking');
 
   const check = useCallback(async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setPhase('authed');
       return;

@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { cn } from '@/lib/utils';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 /// Mirrors `AnalyticsError` in `src-tauri/src/analytics.rs`.
 type TrafficError = {
@@ -81,7 +82,6 @@ export default function AnalyticsPage() {
   const attempt = useRef(0);
 
   const load = useCallback(async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
       return;
@@ -108,7 +108,6 @@ export default function AnalyticsPage() {
   }, [load]);
 
   const offerSites = async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setChoosing(true);
     try {
@@ -121,7 +120,6 @@ export default function AnalyticsPage() {
   };
 
   const chooseSite = async (tag: string) => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     setChoosing(true);
     try {

@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { onPostsRefreshed } from '@/lib/sync';
 import { cn } from '@/lib/utils';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 /// Mirrors `series::Model` in `src-tauri/src/entities/series.rs`.
 type Series = {
@@ -72,7 +73,6 @@ export default function SeriesPage() {
   const returnFocus = useRef<HTMLElement | null>(null);
 
   const load = useCallback(async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
       return;
@@ -125,7 +125,6 @@ export default function SeriesPage() {
     setBusy(true);
     setError(null);
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
       if (editing === 'new') {
         // `slug` and `created_at` are settled on the Rust side — the slug is
         // the name D1 knows this series by, so it is not the form's to invent.
@@ -151,7 +150,6 @@ export default function SeriesPage() {
     setBusy(true);
     setError(null);
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
       await invoke<number>('delete_series', { id: s.id });
       setConfirming(null);
       await load();

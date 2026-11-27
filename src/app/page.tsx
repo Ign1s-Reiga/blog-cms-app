@@ -22,6 +22,7 @@ import { AnalyticsCard } from '@/components/AnalyticsCard';
 import { Card } from '@/components/ui/card';
 import { SYNC_UNAVAILABLE, onPostsRefreshed, pullFromCloud, pushToCloud } from '@/lib/sync';
 import { cn } from '@/lib/utils';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 // ─── Data mapping ─────────────────────────────────────────────────────────────
 
@@ -104,7 +105,6 @@ export default function DashboardPage() {
   // Load posts from the local SQLite cache via the Tauri backend. No-ops in a
   // plain browser (`pnpm dev`), where the Tauri API isn't available.
   const loadPosts = useCallback(async () => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
       setLoading(false);
       return;

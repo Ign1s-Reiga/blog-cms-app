@@ -501,7 +501,6 @@ export function PostEditor() {
   /// text sitting in the textarea where the next save would push it back up.
   const resolve = async (keep: 'keep_local' | 'keep_remote') => {
     if (postId === null || saveState.kind === 'saving') return;
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     // Take the write from autosave, exactly as a manual save does. Keeping the
     // cloud's copy installs a downloaded body; an autosave landing after it
@@ -540,7 +539,6 @@ export function PostEditor() {
     setPostId(id);
     let cancelled = false;
     (async () => {
-      const { invoke, isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
       try {
         await loadFromBackend(invoke, id, () => !cancelled);
@@ -606,7 +604,6 @@ export function PostEditor() {
         const id = postIdRef.current;
         if (id === null) return;
 
-        const { invoke, isTauri } = await import('@tauri-apps/api/core');
         if (!isTauri()) return;
 
         setLocalSave({ kind: 'saving' });
@@ -738,7 +735,6 @@ export function PostEditor() {
     const at = Math.floor(new Date(scheduleAt).getTime() / 1000);
     if (Number.isNaN(at)) return;
 
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     showSaveState({ kind: 'saving', publish: false });
     try {
@@ -758,7 +754,6 @@ export function PostEditor() {
   /// readers until something publishes it.
   const cancelSchedule = async () => {
     if (postId === null) return;
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     showSaveState({ kind: 'saving', publish: false });
     try {
@@ -781,7 +776,6 @@ export function PostEditor() {
     // rather than the state beside it, because one render's lag is the whole of
     // what is being guarded.
     if (loadingRef.current) return;
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
 
     // Look the post over before it goes live, once. `checked` is the answer
@@ -909,7 +903,6 @@ export function PostEditor() {
   /// over the thing that was just restored.
   const reloadAfterRestore = async () => {
     if (postId === null) return;
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     // Failures propagate to the history panel, which keeps itself open and says
     // so. Swallowing them here would close the panel over an editor still
@@ -1030,7 +1023,6 @@ export function PostEditor() {
   // same route a dropped image takes.
   async function pickFromLibrary(entry: MediaEntry) {
     setPickerOpen(false);
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
     if (!isTauri()) return;
     try {
       const staged = await invoke<StagedImage>('stage_media_from_library', { key: entry.key });

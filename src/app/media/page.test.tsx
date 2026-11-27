@@ -9,7 +9,8 @@ import userEvent from '@testing-library/user-event';
 
 const { invoke, isTauri, join } = vi.hoisted(() => ({
   invoke: vi.fn(),
-  /// A mock so that a test can make one reload fail before it reaches R2.
+  /// A mock so that a test can make a handler throw before its first call to
+  /// the backend — the part of each handler that sits before R2 is reached.
   isTauri: vi.fn(() => true),
   /// Counted: the last thing a reload awaits per object, so a test can tell
   /// when a held reload has run all the way to applying its listing.
@@ -95,7 +96,13 @@ function backend({
 const tile = (name: string) => screen.queryByRole('button', { name: `Delete ${name}` });
 
 describe('deleting media', () => {
-  beforeEach(() => invoke.mockReset());
+  beforeEach(() => {
+    invoke.mockReset();
+    // A throw queued by a test that failed before using it must not carry
+    // into the next test's first load.
+    isTauri.mockReset();
+    isTauri.mockImplementation(() => true);
+  });
 
   it('deletes a second object while the first is still going', async () => {
     const { deletes } = backend();
@@ -281,12 +288,12 @@ describe('deleting media', () => {
 
   it('stops loading when a reload fails before it reaches R2', async () => {
     const { failLists } = backend();
-    // The first load fails while setting up, before it asks for anything.
+    // The first load throws before it asks the backend for anything.
     isTauri.mockImplementationOnce(() => {
-      throw new Error('chunk failed to load');
+      throw new Error('runtime not ready');
     });
     render(<MediaPage />);
-    expect(await screen.findByRole('alert')).toHaveTextContent('chunk failed to load');
+    expect(await screen.findByRole('alert')).toHaveTextContent('runtime not ready');
 
     // So does the next. Nothing is left out that could bring the library.
     failLists();
@@ -301,10 +308,10 @@ describe('deleting media', () => {
     await screen.findByRole('button', { name: 'Delete a.webp' });
 
     isTauri.mockImplementationOnce(() => {
-      throw new Error('chunk failed to load');
+      throw new Error('runtime not ready');
     });
     await userEvent.click(tile('a.webp')!);
-    expect(await screen.findByRole('alert')).toHaveTextContent('Could not delete a.webp: Error: chunk failed to load');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not delete a.webp: Error: runtime not ready');
     expect(tile('a.webp')).not.toHaveAttribute('aria-busy');
 
     await userEvent.click(tile('a.webp')!);
@@ -317,10 +324,10 @@ describe('deleting media', () => {
     await screen.findByRole('button', { name: 'Delete a.webp' });
 
     isTauri.mockImplementationOnce(() => {
-      throw new Error('chunk failed to load');
+      throw new Error('runtime not ready');
     });
     await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Could not upload: Error: chunk failed to load');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not upload: Error: runtime not ready');
   });
 
   it("keeps an upload's failure when an earlier load lands after it", async () => {

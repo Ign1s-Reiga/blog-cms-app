@@ -15,6 +15,8 @@ import {
 } from '@/components/ui/alert-dialog';
 import { isVideo } from '@/lib/media';
 import { cn } from '@/lib/utils';
+import { convertFileSrc, invoke, isTauri } from '@tauri-apps/api/core';
+import { appDataDir, join } from '@tauri-apps/api/path';
 
 type MediaItem = {
   key: string;
@@ -175,13 +177,11 @@ export default function MediaPage() {
     const generation = ++loads.current.started;
     loads.current.running++;
     const since = removals.current.count;
-    // Everything from here is inside the `try`, set-up included: `finally` has
-    // to take this reload off `running` however it ends, or a failed import
+    // Everything from here is inside the `try`: `finally` has to take this
+    // reload off `running` however it ends, or a throw before the first call
     // would leave the page loading for good.
     try {
-      const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
-      const { appDataDir, join } = await import('@tauri-apps/api/path');
       const rows = await invoke<{ key: string; name: string; size: number }[]>('list_media');
       // After `list_media`, which caches every object locally — the survey reads
       // the cache, so asking it first would report a fresh library as unused.
@@ -257,10 +257,9 @@ export default function MediaPage() {
   };
   const upload = async () => {
     setUploadError(null);
-    // Set-up inside the `try`, so that a failed import is reported as the
-    // upload's failure rather than escaping the click unseen.
+    // All of it inside the `try`, so that anything that throws is reported as
+    // the upload's failure rather than escaping the click unseen.
     try {
-      const { invoke, isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
       setBusy(true);
       await invoke('upload_media');
@@ -277,9 +276,10 @@ export default function MediaPage() {
   /// true on the path that showed one — the backend refuses a referenced object
   /// without it, so a bug here cannot silently break a published post.
   const handleDelete = async (item: MediaItem, force: boolean) => {
-    // Claimed before the first await: set after it, as it was, a second press
-    // got through while the Tauri module loaded, sent a second delete for an
-    // object the first had already removed, and reported that as a failure.
+    // Claimed before the first await: set after it, as it once was, a second
+    // press got through while the first was still setting up, sent a second
+    // delete for an object the first had already removed, and reported that
+    // as a failure.
     const inFlight = deletingKeys.current;
     if (inFlight.has(item.key)) return;
     inFlight.add(item.key);
@@ -290,11 +290,10 @@ export default function MediaPage() {
     };
     // Settling one delete closes the confirmation only if it is this object's.
     const closeOwnConfirmation = () => setConfirming((c) => (c?.key === item.key ? null : c));
-    // Set-up inside the `try` too: `finally` must release the object however
-    // this ends, or a failed import would leave its tile busy for good, with
-    // every later press refused.
+    // All of it inside the `try` too: `finally` must release the object
+    // however this ends, or a throw before the call would leave its tile busy
+    // for good, with every later press refused.
     try {
-      const { invoke, isTauri } = await import('@tauri-apps/api/core');
       if (!isTauri()) return;
       await invoke('delete_media', { key: item.key, force });
       const r = removals.current;
