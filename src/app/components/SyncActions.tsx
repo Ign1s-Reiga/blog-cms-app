@@ -7,6 +7,11 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { SYNC_UNAVAILABLE, pullFromCloud, pushToCloud } from '@/lib/sync';
 
+/// How long a click's result stays up: sonner's own default, spelled out
+/// because a result shown under the standing notice's id would otherwise
+/// inherit that notice's `Infinity`.
+const CLICK_RESULT_MS = 4000;
+
 /// A single header sync control. `runOnMount` runs the action once when the app
 /// shell mounts (used for the launch-time pull). No-ops outside the Tauri
 /// runtime — the underlying sync helpers guard that.
@@ -73,8 +78,16 @@ function SyncAction({
         if (clicked) {
           // Under the standing notice's id too, so it replaces that rather than
           // stacking beside it. It fades like any click's result: the person
-          // who clicked is there to see it.
-          toast.error(failed, { id: standing, description: String(err) });
+          // who clicked is there to see it. sonner *merges* a toast into the
+          // one already showing under its id, so the standing notice's
+          // `duration: Infinity` and close button would carry over unless
+          // they are set here.
+          toast.error(failed, {
+            id: standing,
+            description: String(err),
+            duration: CLICK_RESULT_MS,
+            closeButton: false,
+          });
         } else if (!behindLogin && mounted.current) {
           // Nobody asked for this run, so nobody is watching for its result.
           // It stays until dismissed: it is how a bad token from signing in
