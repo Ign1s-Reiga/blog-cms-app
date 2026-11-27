@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { FileWarning, Trash2, Upload, X } from 'lucide-react';
+import { FileWarning, Loader2, Trash2, Upload, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
@@ -401,13 +401,27 @@ export default function MediaPage() {
                       )}
                     </p>
                   </div>
+                  {/* Busy while its own delete runs: an unused object deletes
+                      straight from here, with no dialog to show it, and a slow
+                      R2 call would otherwise look like a dead click. */}
                   <button
                     type='button'
                     aria-label={`Delete ${item.name}`}
                     onClick={() => requestDelete(item)}
-                    className='shrink-0 p-1 rounded-[4px] text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100'
+                    disabled={deleting.has(item.key)}
+                    aria-busy={deleting.has(item.key) || undefined}
+                    className={cn(
+                      'shrink-0 p-1 rounded-[4px] text-muted-foreground transition-colors',
+                      deleting.has(item.key)
+                        ? 'opacity-100 cursor-progress'
+                        : 'hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100',
+                    )}
                   >
-                    <Trash2 size={13} strokeWidth={2} />
+                    {deleting.has(item.key) ? (
+                      <Loader2 size={13} strokeWidth={2} className='animate-spin' />
+                    ) : (
+                      <Trash2 size={13} strokeWidth={2} />
+                    )}
                   </button>
                 </div>
               </div>

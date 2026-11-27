@@ -145,6 +145,17 @@ describe('deleting media', () => {
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
 
+  it('shows a tile as busy while its own delete runs', async () => {
+    const { deletes } = backend();
+    render(<MediaPage />);
+
+    await userEvent.click((await screen.findByRole('button', { name: 'Delete a.webp' }))!);
+    await waitFor(() => expect(deletes).toHaveLength(1));
+
+    expect(tile('a.webp')).toBeDisabled();
+    expect(tile('b.webp')).toBeEnabled();
+  });
+
   it('keeps a notice per failed object, each dismissable on its own', async () => {
     const { deletes } = backend();
     render(<MediaPage />);
