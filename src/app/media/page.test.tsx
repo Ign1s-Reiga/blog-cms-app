@@ -226,9 +226,13 @@ describe('deleting media', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
     expect(await screen.findByRole('button', { name: 'Delete c.webp' })).toBeInTheDocument();
 
-    // The first load finally lands, with a listing from before the upload.
+    // The first load finally lands, with a listing from before the upload. Its
+    // last await is a `join` per object; once both have run, one more task
+    // turn lets it reach the point where it would apply its listing.
+    const joined = join.mock.calls.length;
     lists[0]([object('a.webp'), object('b.webp')]);
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => expect(join).toHaveBeenCalledTimes(joined + 2));
+    await new Promise((r) => setTimeout(r, 0));
     expect(tile('c.webp')).toBeInTheDocument();
   });
 
