@@ -186,4 +186,21 @@ describe('deleting media', () => {
     await waitFor(() => expect(tile('a.webp')).not.toBeInTheDocument());
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
+
+  it('lets only the newest reload set the library', async () => {
+    const { lists, holdLists, setListing } = backend({ holdFirstList: true });
+    render(<MediaPage />);
+    await waitFor(() => expect(lists).toHaveLength(1));
+
+    // An upload's reload overtakes the first load and finds the new object.
+    holdLists(false);
+    setListing([object('a.webp'), object('b.webp'), object('c.webp')]);
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    expect(await screen.findByRole('button', { name: 'Delete c.webp' })).toBeInTheDocument();
+
+    // The first load finally lands, with a listing from before the upload.
+    lists[0]([object('a.webp'), object('b.webp')]);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(tile('c.webp')).toBeInTheDocument();
+  });
 });

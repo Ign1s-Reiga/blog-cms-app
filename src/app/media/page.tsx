@@ -127,6 +127,10 @@ export default function MediaPage() {
       next.delete(key);
       return next;
     });
+  /// Which reload is the newest. Reloads overlap — the first load and an
+  /// upload's — and finish in any order; only the newest may set the grid, or
+  /// a slow older listing would hide what a newer one found.
+  const loadGeneration = useRef(0);
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -138,6 +142,7 @@ export default function MediaPage() {
   // Load media from R2 (cached locally by the backend). No-ops in a plain
   // browser (`pnpm dev`), where the Tauri API isn't available.
   const loadMedia = useCallback(async () => {
+    const generation = ++loadGeneration.current;
     const since = removals.current.count;
     const { invoke, isTauri, convertFileSrc } = await import('@tauri-apps/api/core');
     if (!isTauri()) {
@@ -159,7 +164,6 @@ export default function MediaPage() {
       // object, so the whole library reads as unknown rather than inviting a
       // delete it cannot justify.
       const blind = report.unchecked_posts.length > 0;
-      setUncheckedPosts(report.unchecked_posts);
       const usage = new Map<string, UsingPost[]>(report.objects.map((u) => [u.key, u.posts]));
       const base = await appDataDir();
       const resolved = await Promise.all(
@@ -175,6 +179,8 @@ export default function MediaPage() {
           usedBy: withUsage(usage.get(r.key), blind),
         })),
       );
+      if (generation !== loadGeneration.current) return;
+      setUncheckedPosts(report.unchecked_posts);
       // Leave out what was deleted while this was in flight: the list came
       // from R2 before the delete did, and would put the object back.
       const removedAt = removals.current.at;
@@ -188,7 +194,7 @@ export default function MediaPage() {
       });
       setError(null);
     } catch (e) {
-      setError(String(e));
+      if (generation === loadGeneration.current) setError(String(e));
     } finally {
       setLoading(false);
     }
