@@ -1,6 +1,6 @@
 [package]
 name = "blog-cms-app"
-version = "1.11.9"
+version = "1.11.10"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
