@@ -115,6 +115,9 @@ export default function MediaPage() {
   /// reload that started before a delete finished carries a list fetched with
   /// the object still in it; this is how it knows to leave that one out.
   const removals = useRef({ count: 0, at: new Map<string, number>() });
+  /// A delete that failed, kept apart from the page's other errors so it can
+  /// name its object and go away once that object is deleted after all.
+  const [deleteError, setDeleteError] = useState<{ key: string; message: string } | null>(null);
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -221,9 +224,10 @@ export default function MediaPage() {
       const r = removals.current;
       r.at.set(item.key, ++r.count);
       setItems((prev) => prev.filter((i) => i.key !== item.key));
+      setDeleteError((d) => (d?.key === item.key ? null : d));
       closeOwnConfirmation();
     } catch (e) {
-      setError(String(e));
+      setDeleteError({ key: item.key, message: `Could not delete ${item.name}: ${String(e)}` });
       closeOwnConfirmation();
     } finally {
       release();
@@ -303,6 +307,15 @@ export default function MediaPage() {
             className='rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
           >
             {error}
+          </div>
+        )}
+
+        {deleteError && (
+          <div
+            role='alert'
+            className='rounded-[6px] px-3 py-2 border border-destructive/30 bg-destructive/10 text-destructive text-meta font-medium'
+          >
+            {deleteError.message}
           </div>
         )}
 

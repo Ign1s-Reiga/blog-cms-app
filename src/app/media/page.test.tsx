@@ -123,4 +123,19 @@ describe('deleting media', () => {
     expect(tile('a.webp')).not.toBeInTheDocument();
     expect(tile('b.webp')).toBeInTheDocument();
   });
+
+  it('names the object a delete failed for, and clears that once it goes', async () => {
+    const { deletes } = backend();
+    render(<MediaPage />);
+
+    await userEvent.click((await screen.findByRole('button', { name: 'Delete a.webp' }))!);
+    await waitFor(() => expect(deletes).toHaveLength(1));
+    deletes[0].settle('R2 timed out');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not delete a.webp: R2 timed out');
+
+    await userEvent.click(tile('a.webp')!);
+    await waitFor(() => expect(deletes).toHaveLength(2));
+    deletes[1].settle();
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
 });
