@@ -1,6 +1,7 @@
 'use client';
 
 import { useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { EyeOff, Loader2, RotateCcw, Send, Tag, Trash2, X } from 'lucide-react';
 import {
   AlertDialog,
@@ -77,6 +78,14 @@ function describe(action: BulkAction, count: number, tag: string): string {
 
 /// The bar that appears once posts are selected, and the confirmation in front
 /// of every action it offers.
+/// One line on how a run went, for the panel and for the announcement alike.
+function summarize(outcome: BulkOutcome & { action: BulkAction }): string {
+  let line = `${LABEL[outcome.action]}: ${outcome.done} done`;
+  if (outcome.failed.length > 0) line += `, ${outcome.failed.length} failed`;
+  if (outcome.skipped.length > 0) line += `, ${outcome.skipped.length} left alone`;
+  return `${line}.`;
+}
+
 export function BulkActions({
   selected,
   onClear,
@@ -253,17 +262,25 @@ export function BulkActions({
       {/* What happened, per post where it did not work. Nothing is rolled back:
           the posts that succeeded stay done, and the ones that did not are
           named rather than folded into a count. */}
+      {/* The result, read out once the dialog that started the run has closed —
+          without it, a screen reader user hears focus come back and nothing
+          about what was done. A live region is only announced reliably when
+          it is already in the page as its text arrives, so this one exists
+          for as long as the bar does and is filled in when a run finishes.
+          It goes to <body> because an empty element here would still take a
+          gap in the page's spacing. */}
+      {typeof document !== 'undefined' &&
+        createPortal(
+          <div role='status' className='sr-only'>
+            {outcome && summarize(outcome)}
+          </div>,
+          document.body,
+        )}
+
       {outcome && (
-        // A status region, so the result is read out once the dialog that
-        // started the run has closed — without it, a screen reader user hears
-        // focus come back and nothing about what was done.
-        <div role='status' className='space-y-2'>
+        <div className='space-y-2'>
           <div className='flex items-start gap-2 rounded-[6px] border border-border bg-muted/50 px-3 py-2'>
-            <p className='flex-1 text-meta text-body'>
-              {LABEL[outcome.action]}: {outcome.done} done
-              {outcome.failed.length > 0 && `, ${outcome.failed.length} failed`}
-              {outcome.skipped.length > 0 && `, ${outcome.skipped.length} left alone`}.
-            </p>
+            <p className='flex-1 text-meta text-body'>{summarize(outcome)}</p>
             <button
               type='button'
               onClick={() => setOutcome(null)}
