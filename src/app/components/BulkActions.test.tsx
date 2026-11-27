@@ -52,4 +52,19 @@ describe('bulk tag actions', () => {
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('database is locked');
     expect(dialog).toBeInTheDocument();
   });
+
+  /// A live region is read out reliably only if it is already in the page when
+  /// its text arrives, so it is there, empty, before the run.
+  it('announces the result through a status region that was waiting for it', async () => {
+    render(<BulkActions selected={[1, 2]} onClear={() => {}} onRun={vi.fn(async () => ok)} inTrash={false} />);
+
+    const status = screen.getByRole('status');
+    expect(status).toBeEmptyDOMElement();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Publish' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Publish' }));
+
+    await waitFor(() => expect(status).toHaveTextContent('Publish: 2 done.'));
+  });
 });

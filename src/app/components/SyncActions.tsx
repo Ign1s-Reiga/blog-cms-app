@@ -5,7 +5,7 @@ import { CloudDownload, CloudUpload, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { pullFromCloud, pushToCloud } from '@/lib/sync';
+import { SYNC_UNAVAILABLE, pullFromCloud, pushToCloud } from '@/lib/sync';
 
 /// A single header sync control. `runOnMount` runs the action once when the app
 /// shell mounts (used for the launch-time pull). No-ops outside the Tauri
@@ -26,7 +26,8 @@ function SyncAction({
 }: {
   icon: LucideIcon;
   label: string;
-  run: () => Promise<void>;
+  /// Resolves to whether the sync ran; `false` outside the desktop app.
+  run: () => Promise<boolean>;
   /// What a toast says when a click succeeded, and when it failed.
   done: string;
   failed: string;
@@ -57,8 +58,11 @@ function SyncAction({
       const behindLogin = button.current?.closest('[inert]') != null;
       setBusy(true);
       try {
-        await run();
-        if (clicked) toast.success(done);
+        const ran = await run();
+        if (clicked) {
+          if (ran) toast.success(done);
+          else toast(SYNC_UNAVAILABLE);
+        }
       } catch (err) {
         console.error(`${label} failed:`, err);
         if (clicked || (!behindLogin && mounted.current)) toast.error(failed, { description: String(err) });

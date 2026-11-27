@@ -105,6 +105,9 @@ export default function MediaPage() {
   /// A forced delete in flight. The confirmation stays up until it settles, so
   /// a slow R2 call cannot be dismissed into looking like it never happened.
   const [deleting, setDeleting] = useState(false);
+  /// The same flag, readable at once. `deleting` only disables the button on
+  /// the next render, and a double click lands its second press before that.
+  const deletingNow = useRef(false);
   /// Where focus goes back to when a dialog closes. Neither dialog has a Radix
   /// trigger — both open from buttons inside a tile — so without this a
   /// keyboard user would be dropped at the top of the document.
@@ -184,9 +187,18 @@ export default function MediaPage() {
   /// true on the path that showed one — the backend refuses a referenced object
   /// without it, so a bug here cannot silently break a published post.
   const handleDelete = async (item: MediaItem, force: boolean) => {
-    const { invoke, isTauri } = await import('@tauri-apps/api/core');
-    if (!isTauri()) return;
+    // Claimed before the first await: set after it, as it was, a second press
+    // got through while the Tauri module loaded, sent a second delete for an
+    // object the first had already removed, and reported that as a failure.
+    if (deletingNow.current) return;
+    deletingNow.current = true;
     setDeleting(true);
+    const { invoke, isTauri } = await import('@tauri-apps/api/core');
+    if (!isTauri()) {
+      deletingNow.current = false;
+      setDeleting(false);
+      return;
+    }
     try {
       await invoke('delete_media', { key: item.key, force });
       setItems((prev) => prev.filter((i) => i.key !== item.key));
@@ -195,6 +207,7 @@ export default function MediaPage() {
       setError(String(e));
       setConfirming(null);
     } finally {
+      deletingNow.current = false;
       setDeleting(false);
     }
   };
