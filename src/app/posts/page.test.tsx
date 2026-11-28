@@ -8,14 +8,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-const invoke = vi.fn();
+const { invoke, isTauri } = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  /// False to stand for a plain browser (`pnpm dev`), where there is no backend.
+  isTauri: vi.fn(() => true),
+}));
 
-/// The page reaches Tauri through `await import('@tauri-apps/api/core')` in each
-/// handler rather than a top-level import, so the module mock has to answer for
-/// every one of them.
+/// The page imports `invoke` and `isTauri` from `@tauri-apps/api/core` at the
+/// top; `vi.mock` is hoisted above that import, so this stands in for the
+/// module for every handler on the page.
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => invoke(...args),
-  isTauri: () => true,
+  isTauri,
 }));
 
 vi.mock('next/navigation', () => ({
@@ -65,6 +69,17 @@ const respond = (opts: { posts?: Row[]; trashed?: Row[] }) => {
 describe('the posts list', () => {
   beforeEach(() => {
     invoke.mockReset();
+    isTauri.mockReset();
+    isTauri.mockImplementation(() => true);
+  });
+
+  it('does nothing on Import Article outside the desktop app', async () => {
+    isTauri.mockImplementation(() => false);
+    render(<PostsPage />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Import Article' }));
+    expect(invoke).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Import Article' })).toBeEnabled();
   });
 
   it('shows the trash in its own tab', async () => {

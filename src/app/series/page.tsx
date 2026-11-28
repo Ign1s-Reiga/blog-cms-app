@@ -121,7 +121,7 @@ export default function SeriesPage() {
   };
 
   const submit = async () => {
-    if (busy || !title.trim()) return;
+    if (busy || !title.trim() || !isTauri()) return;
     setBusy(true);
     setError(null);
     try {
@@ -147,6 +147,7 @@ export default function SeriesPage() {
   };
 
   const remove = async (s: SeriesWithPosts) => {
+    if (!isTauri()) return;
     setBusy(true);
     setError(null);
     try {
